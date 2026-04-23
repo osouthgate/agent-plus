@@ -1,0 +1,13 @@
+{
+  "name": "coolify-remote",
+  "description": "Remote CLI for managing a Coolify instance over REST — apps, env vars (with post-set verification), domains, TLS, deploys with --wait. Collapses the common Coolify fumbles (wrong field names, UUID threading, manual polling) into one-liners.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Oliver Southgate",
+    "email": "osouthgate@gmail.com"
+  },
+  "homepage": "https://github.com/osouthgate/agent-plus",
+  "repository": "https://github.com/osouthgate/agent-plus",
+  "license": "MIT",
+  "keywords": ["coolify", "remote", "cli", "deploy", "paas"]
+}

@@ -1,0 +1,389 @@
+#!/usr/bin/env python3
+"""hcloud-remote — minimal CLI for Hetzner Cloud day-to-day ops.
+
+Scope is deliberately narrow: list/show servers, reboot, snapshot, ssh.
+Nothing for volumes, networks, load balancers, firewalls, or floating IPs —
+Terraform owns those if you ever need them.
+
+Configuration (highest precedence first):
+  1. --env-file <path>
+  2. ./.env.local, ./.env    (walked up from cwd)
+  3. Shell environment        (including Claude Code settings)
+
+Project .env files WIN over the shell.
+
+Env vars:
+  HCLOUD_TOKEN   Hetzner Cloud API token (Console → Security → API tokens)
+
+Python 3.9+, stdlib only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+API_BASE = "https://api.hetzner.cloud/v1"
+
+# ─── .env autoloading ─────────────────────────────────────────────────────────
+
+_ENV_FILENAMES = (".env.local", ".env")
+_ENV_PREFIXES = ("HCLOUD_", "HETZNER_")
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v = v[1:-1]
+        if k:
+            out[k] = v
+    return out
+
+
+def _autoload_env_files(extra: list[str] | None = None) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def _push(p: Path) -> None:
+        p = p.expanduser().resolve()
+        if p in seen or not p.is_file():
+            return
+        seen.add(p)
+        candidates.append(p)
+
+    for f in extra or []:
+        _push(Path(f))
+
+    cwd = Path.cwd().resolve()
+    for parent in (cwd, *cwd.parents):
+        before = len(candidates)
+        for name in _ENV_FILENAMES:
+            _push(parent / name)
+        if len(candidates) > before:
+            break
+
+    loaded: list[Path] = []
+    for p in reversed(candidates):
+        vals = _parse_env_file(p)
+        any_taken = False
+        for k, v in vals.items():
+            if not k.startswith(_ENV_PREFIXES):
+                continue
+            os.environ[k] = v
+            any_taken = True
+        if any_taken:
+            loaded.append(p)
+    return loaded
+
+
+def _suggest_env_setup(missing: str) -> str:
+    cwd = Path.cwd()
+    return (
+        f"{missing}\n\n"
+        "Set in whichever is most convenient — project files win over shell env:\n\n"
+        f"  Project-level (preferred):  {cwd / '.env'}\n"
+        "    # .env\n"
+        "    HCLOUD_TOKEN=...\n\n"
+        "  Global (Claude Code settings):\n"
+        "    ~/.claude/settings.json → \"env\": { \"HCLOUD_TOKEN\": \"...\" }\n"
+        "    (or export it in your shell profile)\n\n"
+        "Generate a token in Hetzner Console → Security → API tokens (read/write)."
+    )
+
+
+# ─── transport ────────────────────────────────────────────────────────────────
+
+
+class HCloudClient:
+    def __init__(self) -> None:
+        token = os.environ.get("HCLOUD_TOKEN", "")
+        if not token:
+            raise SystemExit(_suggest_env_setup("HCLOUD_TOKEN is not set."))
+        self.token = token
+
+    def call(
+        self,
+        method: str,
+        path: str,
+        body: Any = None,
+        *,
+        query: dict[str, Any] | None = None,
+        timeout: float = 30.0,
+    ) -> tuple[int, Any]:
+        url = API_BASE + path
+        if query:
+            url += "?" + urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/json",
+        }
+        data: bytes | None = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+                status = resp.status
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            status = e.code
+        try:
+            parsed = json.loads(raw) if raw else None
+        except json.JSONDecodeError:
+            parsed = raw
+        return status, parsed
+
+    def _servers(self) -> list[dict]:
+        status, data = self.call("GET", "/servers", query={"per_page": 50})
+        if status >= 300 or not isinstance(data, dict):
+            raise SystemExit(f"GET /servers failed: HTTP {status}: {data!r}")
+        return data.get("servers", [])
+
+    def resolve_server(self, ident: str) -> dict:
+        servers = self._servers()
+        # Numeric id
+        if ident.isdigit():
+            for s in servers:
+                if str(s.get("id")) == ident:
+                    return s
+        # Name
+        for s in servers:
+            if s.get("name") == ident:
+                return s
+        names = ", ".join(sorted(s.get("name", "?") for s in servers)) or "(none)"
+        raise SystemExit(f"No server matching {ident!r}. Known servers: {names}")
+
+
+# ─── pretty printers ──────────────────────────────────────────────────────────
+
+
+def _dump_json(obj: Any) -> None:
+    json.dump(obj, sys.stdout, indent=2, sort_keys=True, default=str)
+    sys.stdout.write("\n")
+
+
+def _server_ips(s: dict) -> tuple[str, str]:
+    pub = s.get("public_net") or {}
+    v4 = (pub.get("ipv4") or {}).get("ip") or "-"
+    v6 = (pub.get("ipv6") or {}).get("ip") or "-"
+    return v4, v6
+
+
+# ─── subcommands ──────────────────────────────────────────────────────────────
+
+
+def cmd_server_list(client: HCloudClient, args: argparse.Namespace) -> None:
+    servers = client._servers()
+    if args.json:
+        _dump_json(servers)
+        return
+    print(f"{len(servers)} server(s):")
+    print(f"  {'name':20s} {'status':10s} {'type':12s} {'ipv4':18s} ipv6")
+    for s in sorted(servers, key=lambda x: x.get("name", "")):
+        v4, v6 = _server_ips(s)
+        stype = ((s.get("server_type") or {}).get("name")) or "?"
+        print(f"  {s.get('name',''):20s} {s.get('status',''):10s} {stype:12s} {v4:18s} {v6}")
+
+
+def cmd_server_show(client: HCloudClient, args: argparse.Namespace) -> None:
+    server = client.resolve_server(args.server)
+    if args.json:
+        _dump_json(server)
+        return
+    v4, v6 = _server_ips(server)
+    dc = (server.get("datacenter") or {}).get("name") or "?"
+    loc = ((server.get("datacenter") or {}).get("location") or {}).get("name") or "?"
+    stype = (server.get("server_type") or {}).get("name") or "?"
+    image = (server.get("image") or {}).get("name") or (server.get("image") or {}).get("description") or "?"
+    print(f"name:     {server.get('name')}")
+    print(f"id:       {server.get('id')}")
+    print(f"status:   {server.get('status')}")
+    print(f"type:     {stype}")
+    print(f"image:    {image}")
+    print(f"location: {loc} ({dc})")
+    print(f"ipv4:     {v4}")
+    print(f"ipv6:     {v6}")
+    print(f"created:  {server.get('created')}")
+
+
+def cmd_server_reboot(client: HCloudClient, args: argparse.Namespace) -> None:
+    server = client.resolve_server(args.server)
+    if not args.yes:
+        resp = input(f"Reboot server {server['name']!r} (id {server['id']})? [y/N] ")
+        if resp.strip().lower() != "y":
+            print("aborted")
+            return
+    status, data = client.call("POST", f"/servers/{server['id']}/actions/reboot")
+    if status >= 300:
+        print(f"HTTP {status}: reboot failed", file=sys.stderr)
+        _dump_json(data)
+        sys.exit(1)
+    action = (data or {}).get("action") or {}
+    print(f"HTTP {status}: reboot queued (action {action.get('id')}, status {action.get('status')})")
+
+
+def cmd_snapshot_create(client: HCloudClient, args: argparse.Namespace) -> None:
+    server = client.resolve_server(args.server)
+    body: dict[str, Any] = {"type": "snapshot"}
+    if args.description:
+        body["description"] = args.description
+    status, data = client.call(
+        "POST", f"/servers/{server['id']}/actions/create_image", body=body
+    )
+    if status >= 300:
+        print(f"HTTP {status}: snapshot failed", file=sys.stderr)
+        _dump_json(data)
+        sys.exit(1)
+    image = (data or {}).get("image") or {}
+    action = (data or {}).get("action") or {}
+    print(f"HTTP {status}: snapshot queued")
+    print(f"  image id:    {image.get('id')}")
+    print(f"  description: {image.get('description') or args.description or '-'}")
+    print(f"  action:      {action.get('id')} ({action.get('status')})")
+    print("  (snapshot runs in background; use `hcloud-remote snapshot list` to check)")
+
+
+def cmd_snapshot_list(client: HCloudClient, args: argparse.Namespace) -> None:
+    query: dict[str, Any] = {"type": "snapshot", "per_page": 50}
+    if args.server:
+        server = client.resolve_server(args.server)
+        # Hetzner filters snapshots by `bound_to` (the server id) — but only
+        # snapshots currently attached. Use the broader list and filter client-side.
+        status, data = client.call("GET", "/images", query=query)
+        if status >= 300 or not isinstance(data, dict):
+            raise SystemExit(f"GET /images failed: HTTP {status}: {data!r}")
+        images = [
+            i for i in data.get("images", [])
+            if (i.get("created_from") or {}).get("id") == server["id"]
+            or i.get("bound_to") == server["id"]
+        ]
+    else:
+        status, data = client.call("GET", "/images", query=query)
+        if status >= 300 or not isinstance(data, dict):
+            raise SystemExit(f"GET /images failed: HTTP {status}: {data!r}")
+        images = data.get("images", [])
+
+    if args.json:
+        _dump_json(images)
+        return
+    print(f"{len(images)} snapshot(s):")
+    print(f"  {'id':12s} {'created':22s} {'size-gb':8s} from")
+    for i in sorted(images, key=lambda x: x.get("created", ""), reverse=True):
+        cf = (i.get("created_from") or {}).get("name") or "-"
+        size = i.get("image_size") or i.get("disk_size") or 0
+        desc = i.get("description") or ""
+        print(f"  {str(i.get('id','')):12s} {str(i.get('created','')):22s} {size!s:8s} {cf} — {desc}")
+
+
+def cmd_ssh(client: HCloudClient, args: argparse.Namespace) -> None:
+    server = client.resolve_server(args.server)
+    v4, _ = _server_ips(server)
+    if v4 == "-":
+        raise SystemExit(f"Server {server['name']!r} has no public IPv4")
+    target = f"{args.user}@{v4}"
+    cmd = ["ssh", target, *args.ssh_args]
+    print(f"→ {' '.join(cmd)}", file=sys.stderr)
+    # Replace this process with ssh so Ctrl-C etc. behave correctly.
+    try:
+        if os.name == "nt":
+            # os.execvp on Windows doesn't handle PATH lookup for .exe reliably
+            # when invoked from the bash shim; subprocess + exit code is fine.
+            sys.exit(subprocess.call(cmd))
+        else:
+            os.execvp("ssh", cmd)
+    except FileNotFoundError:
+        raise SystemExit("ssh not found on PATH")
+
+
+# ─── argparse wiring ──────────────────────────────────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="hcloud-remote",
+        description="Minimal CLI for Hetzner Cloud day-to-day ops",
+    )
+    p.add_argument(
+        "--env-file",
+        action="append",
+        default=[],
+        help="Additional .env file(s) to load (highest precedence).",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # server
+    sp = sub.add_parser("server", help="Manage servers")
+    srv_sub = sp.add_subparsers(dest="server_cmd", required=True)
+
+    sl = srv_sub.add_parser("list", help="List servers")
+    sl.add_argument("--json", action="store_true")
+    sl.set_defaults(func=cmd_server_list)
+
+    ss = srv_sub.add_parser("show", help="Show one server (name or id)")
+    ss.add_argument("server")
+    ss.add_argument("--json", action="store_true")
+    ss.set_defaults(func=cmd_server_show)
+
+    sr = srv_sub.add_parser("reboot", help="Soft-reboot a server")
+    sr.add_argument("server")
+    sr.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+    sr.set_defaults(func=cmd_server_reboot)
+
+    # snapshot
+    sp = sub.add_parser("snapshot", help="Manage snapshots")
+    snap_sub = sp.add_subparsers(dest="snapshot_cmd", required=True)
+
+    sc = snap_sub.add_parser("create", help="Create a snapshot of a server")
+    sc.add_argument("server")
+    sc.add_argument("--description", help="Snapshot description (optional)")
+    sc.set_defaults(func=cmd_snapshot_create)
+
+    sls = snap_sub.add_parser("list", help="List snapshots")
+    sls.add_argument("--server", help="Filter to snapshots created from this server")
+    sls.add_argument("--json", action="store_true")
+    sls.set_defaults(func=cmd_snapshot_list)
+
+    # ssh
+    sh = sub.add_parser("ssh", help="SSH to a server by name (resolves IPv4)")
+    sh.add_argument("server")
+    sh.add_argument("--user", default="root", help="SSH user (default: root)")
+    sh.add_argument("ssh_args", nargs=argparse.REMAINDER, help="Extra args passed to ssh")
+    sh.set_defaults(func=cmd_ssh)
+
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    _autoload_env_files(args.env_file)
+    client = HCloudClient()
+    args.func(client, args)
+
+
+if __name__ == "__main__":
+    main()

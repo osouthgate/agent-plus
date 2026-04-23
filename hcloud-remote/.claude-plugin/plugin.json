@@ -1,0 +1,13 @@
+{
+  "name": "hcloud-remote",
+  "description": "Minimal CLI for Hetzner Cloud day-to-day ops — list/show servers, reboot, snapshot, ssh. Resolves servers by name so you never copy IDs around, and prints IPv4/IPv6 cleanly without the Python heredoc dance that breaks on Windows.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Oliver Southgate",
+    "email": "osouthgate@gmail.com"
+  },
+  "homepage": "https://github.com/osouthgate/agent-plus",
+  "repository": "https://github.com/osouthgate/agent-plus",
+  "license": "MIT",
+  "keywords": ["hetzner", "hcloud", "vps", "cli", "remote"]
+}
