@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+"""hermes-remote — CLI for talking to a remote Hermes Agent over REST.
+
+The upstream `hermes` CLI runs its own local gateway; it has no remote-control
+mode. But the Hermes web server exposes a REST API (login cookie + bearer
+session token). This script wraps the common operations so humans and other
+agents can manage crons, inspect env vars, and check status from anywhere.
+
+Configuration is layered and everything is env-driven:
+
+  HERMES_URL            e.g. https://hermes.example.com
+                         or http://1.2.3.4:3000
+  HERMES_ADMIN_USER     admin email/username (default: admin@example.com)
+  HERMES_PASSWORD       admin password, plain value
+  HERMES_PASSWORD_CMD   OR: a shell command whose stdout is the password
+                         (useful for pass/1Password/op/secrets managers)
+
+Traefik-behind-reverse-proxy shortcut (optional):
+
+  HERMES_VPS_IP         IP where your reverse proxy listens on :80
+  HERMES_HOST           Host header to send so Traefik routes correctly
+
+If you set HERMES_VPS_IP + HERMES_HOST the script skips DNS and connects to
+the IP directly, passing Host for routing. Handy when your local resolver is
+flaky (looking at you, sslip.io on Windows).
+
+Coolify integration (optional, convenience):
+
+  COOLIFY_URL, COOLIFY_API_KEY, HERMES_APP_UUID  → auto-fetch ADMIN_PASSWORD
+
+If HERMES_PASSWORD is not set, and those three Coolify vars are, the script
+pulls the password from Coolify's env-var API. Saves having the secret in
+two places.
+
+Python 3.9+, stdlib only. No pip installs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import http.client
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import urllib.parse
+from typing import Any
+from urllib.parse import urlparse
+
+DEFAULT_ADMIN_USER = "admin@example.com"
+
+
+# ─── transport ────────────────────────────────────────────────────────────────
+
+
+def _request(
+    method: str,
+    url: str,
+    *,
+    headers: dict | None = None,
+    data: bytes | None = None,
+    timeout: float = 30.0,
+) -> tuple[int, bytes, dict]:
+    """Low-level HTTP via http.client so we can override Host header cleanly.
+
+    urllib.request overrides Host from the URL's netloc; that breaks Traefik's
+    Host-based routing when we point at a raw IP. http.client with
+    skip_host=True lets us set Host explicitly.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme == "https":
+        conn = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=timeout)
+    else:
+        conn = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=timeout)
+    path = parsed.path or "/"
+    if parsed.query:
+        path += f"?{parsed.query}"
+
+    headers = dict(headers or {})
+    skip_host = "Host" in headers or "host" in headers
+    # Always set a sensible default Content-Length for body requests.
+    if data is not None and not any(k.lower() == "content-length" for k in headers):
+        headers["Content-Length"] = str(len(data))
+
+    try:
+        conn.putrequest(method, path, skip_host=skip_host, skip_accept_encoding=False)
+        for k, v in headers.items():
+            conn.putheader(k, v)
+        conn.endheaders(data if data is not None else None)
+        resp = conn.getresponse()
+        body = resp.read()
+        # Multi-valued headers (Set-Cookie in particular) need list handling.
+        hdrs: dict[str, Any] = {}
+        for k, v in resp.getheaders():
+            lk = k.lower()
+            if lk in hdrs:
+                if isinstance(hdrs[lk], list):
+                    hdrs[lk].append(v)
+                else:
+                    hdrs[lk] = [hdrs[lk], v]
+            else:
+                hdrs[lk] = v
+        return resp.status, body, hdrs
+    finally:
+        conn.close()
+
+
+def _resolve_password() -> str:
+    """Find the admin password from whatever source is configured.
+
+    Precedence: HERMES_PASSWORD → HERMES_PASSWORD_CMD → Coolify API.
+    """
+    direct = os.environ.get("HERMES_PASSWORD")
+    if direct:
+        return direct
+
+    cmd = os.environ.get("HERMES_PASSWORD_CMD")
+    if cmd:
+        try:
+            out = subprocess.run(
+                cmd, shell=True, check=True, capture_output=True, text=True
+            )
+            return out.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            raise SystemExit(
+                f"HERMES_PASSWORD_CMD failed (exit {e.returncode}): {e.stderr}"
+            )
+
+    coolify_url = os.environ.get("COOLIFY_URL", "").rstrip("/")
+    coolify_key = os.environ.get("COOLIFY_API_KEY")
+    app_uuid = os.environ.get("HERMES_APP_UUID")
+    if coolify_url and coolify_key and app_uuid:
+        return _fetch_coolify_password(coolify_url, coolify_key, app_uuid)
+
+    raise SystemExit(
+        "No password source configured. Set one of:\n"
+        "  HERMES_PASSWORD=...                          (plain value)\n"
+        "  HERMES_PASSWORD_CMD='pass show hermes'       (run a command)\n"
+        "  COOLIFY_URL + COOLIFY_API_KEY + HERMES_APP_UUID   (fetch from Coolify)"
+    )
+
+
+def _fetch_coolify_password(coolify_url: str, coolify_key: str, app_uuid: str) -> str:
+    status, body, _ = _request(
+        "GET",
+        f"{coolify_url}/api/v1/applications/{app_uuid}/envs",
+        headers={"Authorization": f"Bearer {coolify_key}"},
+    )
+    if status != 200:
+        raise SystemExit(f"Coolify envs fetch failed: HTTP {status}")
+    for entry in json.loads(body):
+        if entry.get("key") == "ADMIN_PASSWORD":
+            return entry["value"]
+    raise SystemExit("ADMIN_PASSWORD not found on Hermes app in Coolify")
+
+
+def _login(base_url: str, override_host: str, user: str, password: str) -> tuple[str, str]:
+    """Form-login and return (cookie, session_token).
+
+    `override_host` is only set when we're connecting to a raw IP and need to
+    pass a Host header for reverse-proxy routing. Empty string means use the
+    default Host derived from the URL.
+    """
+    host_header = {"Host": override_host} if override_host else {}
+    form = urllib.parse.urlencode({"username": user, "password": password}).encode()
+    status, body, headers = _request(
+        "POST",
+        f"{base_url}/login",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            **host_header,
+        },
+        data=form,
+    )
+    if status not in (200, 302):
+        raise SystemExit(f"Hermes /login failed: HTTP {status}")
+    set_cookie = headers.get("set-cookie", "")
+    # Could be a single string or a list if multiple Set-Cookie headers.
+    joined = "\n".join(set_cookie) if isinstance(set_cookie, list) else set_cookie
+    match = re.search(r"hermes_auth=[^;]+", joined)
+    if not match:
+        raise SystemExit(f"Hermes didn't set hermes_auth cookie (got: {joined!r})")
+    cookie = match.group(0)
+
+    status, body, _ = _request(
+        "GET",
+        f"{base_url}/",
+        headers={"Cookie": cookie, **host_header},
+    )
+    token_match = re.search(
+        rb'__HERMES_SESSION_TOKEN__="([^"]+)"', body
+    )
+    if not token_match:
+        raise SystemExit("Couldn't extract __HERMES_SESSION_TOKEN__ from Hermes /")
+    return cookie, token_match.group(1).decode()
+
+
+class HermesClient:
+    def __init__(self) -> None:
+        self.user = os.environ.get("HERMES_ADMIN_USER", DEFAULT_ADMIN_USER)
+
+        # Two routing modes:
+        #  1) HERMES_URL set → talk to it directly, normal DNS, no Host override.
+        #  2) HERMES_VPS_IP + HERMES_HOST set → hit IP:80 directly, pass Host
+        #     header for reverse-proxy routing. Useful when local DNS is flaky.
+        url = os.environ.get("HERMES_URL", "").rstrip("/")
+        vps_ip = os.environ.get("HERMES_VPS_IP", "")
+        host = os.environ.get("HERMES_HOST", "")
+
+        if url:
+            parsed = urlparse(url)
+            self.base_url = url
+            self.host = parsed.netloc  # http.client will use this, no override needed
+            self._override_host = False
+        elif vps_ip and host:
+            self.base_url = f"http://{vps_ip}"
+            self.host = host
+            self._override_host = True
+        else:
+            raise SystemExit(
+                "No Hermes URL configured. Set either:\n"
+                "  HERMES_URL=https://hermes.example.com\n"
+                "or for reverse-proxy-by-Host setups:\n"
+                "  HERMES_VPS_IP=1.2.3.4 HERMES_HOST=hermes.example.com"
+            )
+
+        pw = _resolve_password()
+        self.cookie, self.token = _login(
+            self.base_url, self.host if self._override_host else "",
+            self.user, pw,
+        )
+
+    def _headers(self, extra: dict | None = None) -> dict:
+        h = {
+            "Cookie": self.cookie,
+            "Authorization": f"Bearer {self.token}",
+        }
+        if self._override_host:
+            h["Host"] = self.host
+        if extra:
+            h.update(extra)
+        return h
+
+    def call(
+        self,
+        method: str,
+        path: str,
+        body: Any = None,
+    ) -> tuple[int, Any]:
+        """Call /api/* and return (status, parsed_json_or_raw_bytes)."""
+        url = f"{self.base_url}{path}"
+        data: bytes | None = None
+        headers = self._headers()
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        status, raw, _ = _request(method, url, headers=headers, data=data)
+        try:
+            return status, json.loads(raw)
+        except json.JSONDecodeError:
+            return status, raw
+
+
+# ─── pretty printers ──────────────────────────────────────────────────────────
+
+
+def _dump_json(obj: Any) -> None:
+    json.dump(obj, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+
+
+def _print_cron_row(j: dict) -> None:
+    runs = j.get("repeat", {}).get("completed", 0)
+    print(
+        f"  {j['id']:14s} {j.get('state','?'):8s} "
+        f"{j.get('schedule_display','?'):18s} "
+        f"{runs:<5d} {j.get('name','')}"
+    )
+
+
+# ─── subcommands ──────────────────────────────────────────────────────────────
+
+
+def cmd_status(client: HermesClient, args: argparse.Namespace) -> None:
+    status, data = client.call("GET", "/api/status")
+    if args.json:
+        _dump_json(data)
+        return
+    print(f"version: {data.get('version')}  released: {data.get('release_date')}")
+    print(f"hermes_home: {data.get('hermes_home')}")
+    print(f"gateway: {data.get('gateway_state')} (pid {data.get('gateway_pid')})")
+    platforms = data.get("gateway_platforms") or {}
+    for name, info in platforms.items():
+        print(f"  platform {name}: {info.get('state')}")
+
+
+def cmd_model(client: HermesClient, args: argparse.Namespace) -> None:
+    status, data = client.call("GET", "/api/model/info")
+    if args.json:
+        _dump_json(data)
+        return
+    print(f"model:    {data.get('model')}")
+    print(f"provider: {data.get('provider')}")
+    ctx = data.get("effective_context_length")
+    if ctx:
+        print(f"context:  {ctx:,} tokens")
+
+
+def cmd_env_list(client: HermesClient, args: argparse.Namespace) -> None:
+    status, data = client.call("GET", "/api/env")
+    set_only = {k: v for k, v in data.items() if v.get("is_set")}
+    if args.json:
+        _dump_json(set_only if not args.all else data)
+        return
+    source = data if args.all else set_only
+    for key, info in sorted(source.items()):
+        flag = "x" if info.get("is_set") else " "
+        val = info.get("redacted_value") or ""
+        print(f"  [{flag}] {key:30s} {val}")
+
+
+def cmd_cron_list(client: HermesClient, args: argparse.Namespace) -> None:
+    status, data = client.call("GET", "/api/cron/jobs")
+    if args.json:
+        _dump_json(data)
+        return
+    print(f"{len(data)} cron job(s):")
+    print(f"  {'id':14s} {'state':8s} {'schedule':18s} {'runs':5s} name")
+    for j in data:
+        _print_cron_row(j)
+
+
+def cmd_cron_show(client: HermesClient, args: argparse.Namespace) -> None:
+    status, jobs = client.call("GET", "/api/cron/jobs")
+    match = next((j for j in jobs if j["id"] == args.id or j.get("name") == args.id), None)
+    if not match:
+        raise SystemExit(f"No cron job with id or name {args.id!r}")
+    _dump_json(match)
+
+
+def cmd_cron_pause(client: HermesClient, args: argparse.Namespace) -> None:
+    status, data = client.call("POST", f"/api/cron/jobs/{args.id}/pause")
+    print(f"HTTP {status}: paused {args.id}")
+
+
+def cmd_cron_resume(client: HermesClient, args: argparse.Namespace) -> None:
+    status, data = client.call("POST", f"/api/cron/jobs/{args.id}/resume")
+    print(f"HTTP {status}: resumed {args.id}")
+
+
+def cmd_cron_trigger(client: HermesClient, args: argparse.Namespace) -> None:
+    status, data = client.call("POST", f"/api/cron/jobs/{args.id}/trigger")
+    print(f"HTTP {status}: triggered {args.id}")
+
+
+def cmd_cron_remove(client: HermesClient, args: argparse.Namespace) -> None:
+    if not args.yes:
+        resp = input(f"Delete cron job {args.id!r}? [y/N] ")
+        if resp.strip().lower() != "y":
+            print("aborted")
+            return
+    status, data = client.call("DELETE", f"/api/cron/jobs/{args.id}")
+    print(f"HTTP {status}: deleted {args.id}")
+
+
+def cmd_cron_create(client: HermesClient, args: argparse.Namespace) -> None:
+    payload: dict[str, Any] = {
+        "name": args.name,
+        "schedule": args.schedule,
+        "prompt": args.prompt or "",
+        "deliver": args.deliver,
+    }
+    if args.script:
+        payload["script"] = args.script
+    if args.skill:
+        payload["skills"] = args.skill
+    if args.model:
+        payload["model"] = args.model
+    status, data = client.call("POST", "/api/cron/jobs", body=payload)
+    if status >= 400:
+        print(f"HTTP {status}: create failed", file=sys.stderr)
+        _dump_json(data)
+        sys.exit(1)
+    print(f"HTTP {status}: created")
+    _dump_json(data)
+
+
+# ─── argparse wiring ──────────────────────────────────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="hermes-remote",
+        description="Remote CLI for a Hermes Agent deployment",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("status", help="Show gateway status and platforms")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_status)
+
+    sp = sub.add_parser("model", help="Show current LLM model")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_model)
+
+    sp = sub.add_parser("env", help="Inspect Hermes-tracked env vars")
+    env_sub = sp.add_subparsers(dest="env_cmd", required=True)
+    sp_list = env_sub.add_parser("list", help="List env vars Hermes knows about")
+    sp_list.add_argument("--all", action="store_true", help="Include unset vars")
+    sp_list.add_argument("--json", action="store_true")
+    sp_list.set_defaults(func=cmd_env_list)
+
+    sp = sub.add_parser("cron", help="Manage cron jobs")
+    cron_sub = sp.add_subparsers(dest="cron_cmd", required=True)
+
+    cl = cron_sub.add_parser("list", help="List all cron jobs")
+    cl.add_argument("--json", action="store_true")
+    cl.set_defaults(func=cmd_cron_list)
+
+    cs = cron_sub.add_parser("show", help="Show full JSON for a cron job")
+    cs.add_argument("id", help="Job id or name")
+    cs.set_defaults(func=cmd_cron_show)
+
+    cp = cron_sub.add_parser("pause", help="Pause a cron job")
+    cp.add_argument("id")
+    cp.set_defaults(func=cmd_cron_pause)
+
+    cr = cron_sub.add_parser("resume", help="Resume a paused cron job")
+    cr.add_argument("id")
+    cr.set_defaults(func=cmd_cron_resume)
+
+    ct = cron_sub.add_parser("trigger", help="Trigger a cron job on next tick")
+    ct.add_argument("id")
+    ct.set_defaults(func=cmd_cron_trigger)
+
+    cd = cron_sub.add_parser("remove", help="Delete a cron job")
+    cd.add_argument("id")
+    cd.add_argument("-y", "--yes", action="store_true", help="Skip confirmation")
+    cd.set_defaults(func=cmd_cron_remove)
+
+    cc = cron_sub.add_parser("create", help="Create a new cron job")
+    cc.add_argument("--name", required=True)
+    cc.add_argument(
+        "--schedule",
+        required=True,
+        help='e.g. "every 15m", "0 9 * * *", "2h"',
+    )
+    cc.add_argument("--script", help="Path ON HERMES HOST to a script (pre-run)")
+    cc.add_argument(
+        "--prompt",
+        default="",
+        help="Agent prompt (minimal for skillify pattern; use [SILENT] on success)",
+    )
+    cc.add_argument(
+        "--skill",
+        action="append",
+        default=[],
+        help="Attach a skill (can repeat)",
+    )
+    cc.add_argument(
+        "--deliver",
+        default="origin",
+        help="Delivery target: origin, local, telegram, etc.",
+    )
+    cc.add_argument("--model", help="Override model for this job (e.g. haiku)")
+    cc.set_defaults(func=cmd_cron_create)
+
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    client = HermesClient()
+    args.func(client, args)
+
+
+if __name__ == "__main__":
+    main()
