@@ -763,8 +763,8 @@ def build_parser() -> argparse.ArgumentParser:
     ch.add_argument(
         "--max-tokens",
         type=int,
-        default=1024,
-        help="Max output tokens (default: 1024)",
+        default=2048,
+        help="Max output tokens (default: 2048)",
     )
     ch.add_argument("--system", help="Optional system message prepended to the request")
     ch.add_argument(

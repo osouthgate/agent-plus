@@ -6,6 +6,9 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+### Changed
+- `chat --max-tokens` default bumped 1024 → 2048. 1024 was truncating moderately complex responses mid-sentence. [2026-04-23]
+
 ### Added
 - `chat` subcommand — one-shot call to `/v1/chat/completions` (OpenAI-compatible). Bearer auth via `HERMES_CHAT_API_KEY` — distinct from the admin session cookie, so it skips the login step entirely. Supports `--model`, `--max-tokens`, `--system`, `--json`. Designed for ad-hoc CLI chat (`hermes-remote chat "status?"`) and cron-script use. [2026-04-23]
 - `.env` autoloading with project-file-wins precedence: `--env-file` → project `.env.local` / `.env` → shell. Only `HERMES_*` and `COOLIFY_*` keys are picked up. Motivation: lets per-project configs override Claude Code global settings without unsetting anything. [2026-04-23]
