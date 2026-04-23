@@ -4,6 +4,11 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## Unreleased
+
+### Changed
+- SKILL.md `allowed-tools` now includes `Bash(python3 *langfuse*:*)` alongside `Bash(langfuse:*)` for consistency with the four other plugins. Lets the skill be invoked both through the `bin/` shim and via direct `python3 path/to/langfuse …` calls without a fresh permission prompt. [2026-04-23]
+
 ## 0.1.0
 
 Initial release.

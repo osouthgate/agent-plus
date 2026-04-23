@@ -2,7 +2,7 @@
 name: langfuse
 description: Manage Langfuse instances (cloud or self-hosted) from the CLI — export/import prompts for backup and cross-env migration, send smoke-test traces, check health across multiple instances, and inspect a specific user's recent activity (sessions, traces, errors) read-only from the public REST API. Use whenever the user wants to back up prompts, move prompts between Langfuse instances, verify that ingestion is working, check whether a Langfuse deployment is up, or debug what a given Langfuse user has been doing without clicking through the UI.
 when_to_use: Trigger on phrases like "export the langfuse prompts", "back up langfuse prompts", "migrate prompts to the new langfuse", "move prompts from cloud to self-hosted", "ping a test trace", "is langfuse up", "check langfuse health", "list my langfuse instances", "send a trace to langfuse", "import prompts.json into langfuse", "what has user <id> been doing in langfuse", "debug this langfuse user", "monitor langfuse user", "show recent traces for user", "fetch langfuse trace <id>", "look up this observation", "any errors for user <id>".
-allowed-tools: Bash(langfuse:*)
+allowed-tools: Bash(langfuse:*) Bash(python3 *langfuse*:*)
 ---
 
 # langfuse
