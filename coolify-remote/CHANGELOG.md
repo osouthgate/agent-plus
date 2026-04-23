@@ -7,7 +7,7 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 ## Unreleased
 
 ### Added
-- `app exec <app> -- <cmd>` — run a shell command inside the app's running Docker container. SSH-based (to `$COOLIFY_SSH_HOST` or the host parsed from `COOLIFY_URL`) + `docker exec`, because Coolify has no REST exec endpoint — every obvious path (`/applications/{uuid}/execute`, `/exec`, `/command`, `/run`, `/terminal`, `/shell`) returns 404. The web UI's terminal is WebSocket-based, not worth wrapping. Stdout/stderr/exit-code all propagate — suitable for cron/skillify patterns. Supports `-t` for TTY, `-v` to print the ssh command. Motivation: unblocks Phase 2.5 cron-script deployment onto the Hermes container (see `rainshift/rayna-setup/TODO.md:195`). [2026-04-23]
+- `app exec <app> -- <cmd>` — run a shell command inside the app's running Docker container. SSH-based (to `$COOLIFY_SSH_HOST` or the host parsed from `COOLIFY_URL`) + `docker exec`, because Coolify has no REST exec endpoint — every obvious path (`/applications/{uuid}/execute`, `/exec`, `/command`, `/run`, `/terminal`, `/shell`) returns 404. The web UI's terminal is WebSocket-based, not worth wrapping. Stdout/stderr/exit-code all propagate — suitable for cron/skillify patterns. Supports `-t` for TTY, `-v` to print the ssh command. Unblocks the common "I need to run a one-off check inside the container" workflow without clicking through the Coolify UI. [2026-04-23]
 - SSH env vars: `COOLIFY_SSH_HOST`, `COOLIFY_SSH_USER` (default `root`), `COOLIFY_SSH_KEY`, `COOLIFY_SSH_PORT` (default 22). [2026-04-23]
 
 ### Changed

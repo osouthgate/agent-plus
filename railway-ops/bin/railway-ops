@@ -1,0 +1,558 @@
+#!/usr/bin/env python3
+"""
+railway-ops — read-first CLI wrapper around `railway` for incident triage.
+
+One call returns the full env/services/errors/envs tree so the agent doesn't
+burn context running `railway list`, `railway service status`, `railway logs`,
+`railway variables` per service.
+
+Commands (all emit JSON to stdout; use --pretty for indented):
+  overview [--env <name>] [--since <dur>] [--limit N]
+      Single-shot snapshot: project, env, services[], deploy status, recent
+      errors/warnings per service, and env var NAMES (never values).
+  status
+      Current project/env/service context + whoami.
+  errors <service> [--since <dur>] [--limit N]
+      Focus on one service's error/warning lines.
+  envs <service>
+      Env var NAMES only. Values stripped at parse time.
+  services [--env <name>]
+      Per-service deploy status shortlist.
+  projects
+      `railway list` re-shaped to JSON.
+
+Hard safety rules:
+  1. Env var VALUES are NEVER written to stdout/stderr. Only names.
+  2. Read-only. No up / redeploy / variables --set / etc.
+  3. Requires `railway` CLI installed + authed (`railway login`).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Callable, Optional
+
+# ──────────────────────────── constants ────────────────────────────
+
+DEFAULT_SINCE = "24h"
+DEFAULT_OVERVIEW_LOG_LINES = 500
+DEFAULT_ERRORS_LIMIT = 50
+OVERVIEW_BUCKET_CAP = 20
+CMD_TIMEOUT_SEC = 30
+
+# Classification regexes — applied to text log lines (fallback path) and also
+# used to confirm JSON `level` field matches. Deliberately broad but not greedy.
+ERROR_RE = re.compile(r"\b(error|fatal|panic|exception|traceback|unhandled)\b", re.IGNORECASE)
+WARNING_RE = re.compile(r"\b(warn|warning)\b", re.IGNORECASE)
+
+# Commands that write — rejected outright. railway-ops is read-only.
+BLOCKED_SUBCOMMANDS = {
+    "up", "deploy", "redeploy", "restart", "down", "delete",
+    "init", "link", "unlink", "add", "scale",
+}
+
+
+# ──────────────────────────── subprocess ────────────────────────────
+
+
+def _resolve_exe(name: str) -> Optional[str]:
+    """Resolve an executable on PATH, including Windows .cmd / .bat shims.
+    subprocess.run() without shell=True won't find .cmd files via bare name
+    on Windows — we have to hand it the fully-qualified path."""
+    found = shutil.which(name)
+    if found:
+        return found
+    if os.name == "nt":
+        for ext in (".cmd", ".bat", ".exe"):
+            found = shutil.which(name + ext)
+            if found:
+                return found
+    return None
+
+
+def default_run_cmd(argv: list[str], *, timeout: int = CMD_TIMEOUT_SEC,
+                    stdin: Optional[str] = None) -> tuple[int, str, str]:
+    """Run a command. Returns (returncode, stdout, stderr). Tests inject a stub."""
+    # Resolve argv[0] through shutil.which so Windows .cmd shims work.
+    if argv:
+        resolved = _resolve_exe(argv[0])
+        if resolved:
+            argv = [resolved, *argv[1:]]
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            input=stdin,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+    except FileNotFoundError as e:
+        return 127, "", f"command not found: {e.filename}"
+    except subprocess.TimeoutExpired:
+        return 124, "", f"command timed out after {timeout}s: {' '.join(argv)}"
+
+
+# Module-level hook so tests can monkey-patch.
+run_cmd: Callable[..., tuple[int, str, str]] = default_run_cmd
+
+
+def railway(args: list[str], *, timeout: int = CMD_TIMEOUT_SEC) -> tuple[int, str, str]:
+    """Invoke `railway` with safety checks."""
+    if args and args[0] in BLOCKED_SUBCOMMANDS:
+        return 1, "", f"railway-ops: blocked write subcommand '{args[0]}'"
+    return run_cmd(["railway", *args], timeout=timeout)
+
+
+# ──────────────────────────── safety helpers ────────────────────────────
+
+
+def strip_env_values(raw_json_text: str) -> list[str]:
+    """Parse `railway variables --json` output (a dict of KEY -> VALUE) and
+    return ONLY the list of keys. The raw dict is discarded immediately.
+
+    Also accepts legacy KV output (KEY=VALUE\\n...) as a fallback — in that
+    case we split on '=' and keep only the left side.
+
+    INVARIANT: the return value contains no substring of any value.
+    """
+    if not raw_json_text.strip():
+        return []
+    # Try JSON first.
+    try:
+        data = json.loads(raw_json_text)
+        if isinstance(data, dict):
+            keys = sorted(str(k) for k in data.keys())
+            del data  # be explicit: drop the values from memory scope
+            return keys
+    except json.JSONDecodeError:
+        pass
+    # Fallback: KEY=VALUE lines.
+    keys: list[str] = []
+    for line in raw_json_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            k = line.split("=", 1)[0].strip()
+            if k:
+                keys.append(k)
+    return sorted(set(keys))
+
+
+# ──────────────────────────── log classification ────────────────────────────
+
+
+def classify_log_line(line_json: dict[str, Any]) -> Optional[str]:
+    """Return 'error', 'warning', or None for an already-parsed JSON log line.
+
+    Priority order:
+      1. Explicit `level` field (Pino, standard loggers).
+      2. Message content regex match.
+    """
+    level = str(line_json.get("level", "")).lower()
+    if level in ("error", "fatal", "critical"):
+        return "error"
+    if level in ("warn", "warning"):
+        return "warning"
+    # Some loggers use numeric levels (Pino: 50=error, 60=fatal, 40=warn).
+    if isinstance(line_json.get("level"), int):
+        lv = line_json["level"]
+        if lv >= 50:
+            return "error"
+        if lv == 40:
+            return "warning"
+    msg = str(line_json.get("message", "") or line_json.get("msg", ""))
+    if msg:
+        if ERROR_RE.search(msg):
+            return "error"
+        if WARNING_RE.search(msg):
+            return "warning"
+    return None
+
+
+def classify_log_text(line: str) -> Optional[str]:
+    """Fallback classification for non-JSON log lines."""
+    if ERROR_RE.search(line):
+        return "error"
+    if WARNING_RE.search(line):
+        return "warning"
+    return None
+
+
+def parse_log_entries(raw: str) -> list[dict[str, Any]]:
+    """Parse a block of `railway logs --json` output. Each line is a JSON object.
+    Lines that fail to parse are wrapped as {text: ..., timestamp: None}."""
+    entries: list[dict[str, Any]] = []
+    for raw_line in raw.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            if isinstance(obj, dict):
+                entries.append(obj)
+            else:
+                entries.append({"message": str(obj), "_non_object": True})
+        except json.JSONDecodeError:
+            entries.append({"message": line, "_non_json": True})
+    return entries
+
+
+def bucket_log_entries(entries: list[dict[str, Any]], cap: int) -> tuple[
+        list[dict[str, Any]], list[dict[str, Any]]]:
+    """Classify entries into (errors, warnings). Dedupes consecutive identical
+    messages. Keeps the most-recent `cap` of each bucket."""
+    errors: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    last_error_msg: Optional[str] = None
+    last_warning_msg: Optional[str] = None
+
+    for entry in entries:
+        kind = (classify_log_line(entry)
+                if not entry.get("_non_json")
+                else classify_log_text(str(entry.get("message", ""))))
+        if not kind:
+            continue
+        msg = str(entry.get("message") or entry.get("msg") or "").strip()
+        slim = {
+            "timestamp": entry.get("timestamp") or entry.get("time"),
+            "level": entry.get("level"),
+            "message": msg[:500],
+            "module": entry.get("module"),
+        }
+        if kind == "error":
+            if msg == last_error_msg:
+                continue
+            last_error_msg = msg
+            errors.append(slim)
+        else:
+            if msg == last_warning_msg:
+                continue
+            last_warning_msg = msg
+            warnings.append(slim)
+
+    # Keep most-recent `cap` entries. Logs are typically returned oldest-first,
+    # so keep the tail. If entries are newest-first, this still gives us `cap`
+    # contiguous items — downstream consumers should not rely on the order.
+    return errors[-cap:], warnings[-cap:]
+
+
+# ──────────────────────────── railway wrappers ────────────────────────────
+
+
+def check_prereqs() -> None:
+    rc, out, _ = railway(["--version"], timeout=10)
+    if rc != 0:
+        die("railway CLI not found on PATH — install from https://docs.railway.com/guides/cli")
+    rc, out, _ = railway(["whoami"], timeout=10)
+    if rc != 0 or "Logged in" not in out:
+        die("not authenticated — run `railway login`")
+
+
+def get_status() -> dict[str, Any]:
+    """Return the project/env context from `railway status --json`.
+    If not linked, return a synthetic object with a clear error."""
+    rc, out, err = railway(["status", "--json"], timeout=15)
+    if rc != 0:
+        if "No linked project" in err or "not linked" in err.lower():
+            die("no linked project — run `railway link` first")
+        die(f"railway status failed: {err.strip() or out.strip()}")
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError as e:
+        die(f"could not parse `railway status --json`: {e}")
+    return {}  # unreachable
+
+
+def list_services(env: Optional[str]) -> list[dict[str, Any]]:
+    """Return per-service deploy status for the given env (or linked env)."""
+    args = ["service", "status", "--all", "--json"]
+    if env:
+        args.extend(["--environment", env])
+    rc, out, err = railway(args, timeout=30)
+    if rc != 0:
+        die(f"railway service status failed: {err.strip() or out.strip()}")
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as e:
+        die(f"could not parse service status JSON: {e}")
+        return []
+    return data if isinstance(data, list) else []
+
+
+def fetch_logs(service: str, env: Optional[str], *, lines: int, since: Optional[str]) -> str:
+    args = ["logs", "-s", service, "--json", "--lines", str(lines)]
+    if since:
+        args.extend(["--since", since])
+    if env:
+        args.extend(["--environment", env])
+    rc, out, err = railway(args, timeout=30)
+    if rc != 0:
+        # Don't abort — just return empty. A single service failing to stream
+        # logs shouldn't kill the entire overview.
+        sys.stderr.write(f"railway-ops: logs for '{service}' failed: {err.strip() or out.strip()}\n")
+        return ""
+    return out
+
+
+def fetch_env_var_names(service: str, env: Optional[str]) -> list[str]:
+    """Return env var NAMES only. Values are stripped before returning."""
+    args = ["variables", "-s", service, "--json"]
+    if env:
+        args.extend(["--environment", env])
+    rc, out, err = railway(args, timeout=20)
+    if rc != 0:
+        sys.stderr.write(f"railway-ops: variables for '{service}' failed: {err.strip() or out.strip()}\n")
+        return []
+    return strip_env_values(out)
+
+
+# ──────────────────────────── overview builder ────────────────────────────
+
+
+def build_service_snapshot(
+    service_row: dict[str, Any],
+    env: Optional[str],
+    *,
+    since: str,
+    log_lines: int,
+    bucket_cap: int,
+) -> dict[str, Any]:
+    name = service_row.get("name") or service_row.get("id") or "unknown"
+    raw_logs = fetch_logs(name, env, lines=log_lines, since=since)
+    entries = parse_log_entries(raw_logs)
+    errors, warnings = bucket_log_entries(entries, bucket_cap)
+    env_var_names = fetch_env_var_names(name, env)
+    return {
+        "name": name,
+        "id": service_row.get("id"),
+        "status": service_row.get("status"),
+        "stopped": service_row.get("stopped"),
+        "latestDeploy": {
+            "id": service_row.get("deploymentId"),
+            "status": service_row.get("status"),
+        },
+        "errors": errors,
+        "warnings": warnings,
+        "envVarNames": env_var_names,
+    }
+
+
+def build_overview(env: Optional[str], since: str, log_lines: int) -> dict[str, Any]:
+    status = get_status()
+    project_name = status.get("name", "unknown")
+    # Resolve the env used for this snapshot — if not passed, use linked env.
+    resolved_env = env
+    if not resolved_env:
+        # Try to extract linked env from the status payload. Railway's status
+        # JSON shape doesn't put the currently-linked env at top-level, so we
+        # just leave this as None and rely on the CLI default.
+        resolved_env = None
+
+    services = list_services(resolved_env)
+
+    # Parallelise per-service fetches — each one is 2 CLI roundtrips (logs +
+    # variables). Thread pool is fine since we're CPU-idle while subprocess
+    # blocks on network I/O.
+    snapshots: list[dict[str, Any]] = []
+    max_workers = max(2, min(8, len(services) or 1))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(
+                build_service_snapshot, svc, resolved_env,
+                since=since, log_lines=log_lines, bucket_cap=OVERVIEW_BUCKET_CAP,
+            ): svc.get("name", "?")
+            for svc in services
+        }
+        for fut in as_completed(futures):
+            try:
+                snapshots.append(fut.result())
+            except Exception as e:  # noqa: BLE001
+                snapshots.append({
+                    "name": futures[fut],
+                    "error": f"snapshot failed: {e}",
+                })
+
+    snapshots.sort(key=lambda s: (s.get("name") or "").lower())
+    return {
+        "project": project_name,
+        "projectId": status.get("id"),
+        "env": resolved_env or "<linked>",
+        "since": since,
+        "services": snapshots,
+    }
+
+
+# ──────────────────────────── command dispatch ────────────────────────────
+
+
+def die(msg: str) -> None:
+    print(f"railway-ops: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def emit(data: Any, pretty: bool) -> None:
+    if pretty:
+        print(json.dumps(data, indent=2, default=str))
+    else:
+        print(json.dumps(data, default=str))
+
+
+def cmd_overview(args: argparse.Namespace) -> None:
+    check_prereqs()
+    data = build_overview(args.env, args.since, args.log_lines)
+    emit(data, args.pretty)
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    check_prereqs()
+    rc, out, err = railway(["whoami"], timeout=10)
+    whoami = out.strip() if rc == 0 else None
+    status = get_status()
+    emit({
+        "whoami": whoami,
+        "project": status.get("name"),
+        "projectId": status.get("id"),
+        "environments": [
+            e["node"]["name"]
+            for e in (status.get("environments", {}) or {}).get("edges", [])
+            if isinstance(e, dict) and isinstance(e.get("node"), dict)
+        ],
+    }, args.pretty)
+
+
+def cmd_errors(args: argparse.Namespace) -> None:
+    check_prereqs()
+    # Pull more lines than overview — this command is focused.
+    raw = fetch_logs(args.service, args.env, lines=max(args.limit * 10, 500), since=args.since)
+    entries = parse_log_entries(raw)
+    errors, warnings = bucket_log_entries(entries, args.limit)
+    emit({
+        "service": args.service,
+        "env": args.env or "<linked>",
+        "since": args.since,
+        "errors": errors,
+        "warnings": warnings,
+    }, args.pretty)
+
+
+def cmd_envs(args: argparse.Namespace) -> None:
+    check_prereqs()
+    names = fetch_env_var_names(args.service, args.env)
+    emit({
+        "service": args.service,
+        "env": args.env or "<linked>",
+        "envVarNames": names,
+        "count": len(names),
+    }, args.pretty)
+
+
+def cmd_services(args: argparse.Namespace) -> None:
+    check_prereqs()
+    services = list_services(args.env)
+    emit({
+        "env": args.env or "<linked>",
+        "services": [
+            {
+                "name": s.get("name"),
+                "id": s.get("id"),
+                "status": s.get("status"),
+                "stopped": s.get("stopped"),
+                "latestDeploymentId": s.get("deploymentId"),
+            }
+            for s in services
+        ],
+    }, args.pretty)
+
+
+def cmd_projects(args: argparse.Namespace) -> None:
+    check_prereqs()
+    rc, out, err = railway(["list", "--json"], timeout=15)
+    if rc != 0:
+        die(f"railway list failed: {err.strip() or out.strip()}")
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as e:
+        die(f"could not parse `railway list --json`: {e}")
+        return
+    emit(data, args.pretty)
+
+
+# ──────────────────────────── argparse ────────────────────────────
+
+
+def _add_globals(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--pretty", action="store_true", help="indent JSON output")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="railway-ops",
+        description="Read-first wrapper around the Railway CLI for incident triage.",
+    )
+    _add_globals(p)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    over = sub.add_parser("overview", help="full env/services/errors/envs snapshot")
+    _add_globals(over)
+    over.add_argument("--env", help="Railway environment name (e.g. production, staging)")
+    over.add_argument("--since", default=DEFAULT_SINCE,
+                      help=f"pull logs since this duration (default: {DEFAULT_SINCE})")
+    over.add_argument("--log-lines", type=int, default=DEFAULT_OVERVIEW_LOG_LINES,
+                      help=f"log lines per service (default: {DEFAULT_OVERVIEW_LOG_LINES})")
+
+    st = sub.add_parser("status", help="current project/env/whoami context")
+    _add_globals(st)
+
+    er = sub.add_parser("errors", help="errors+warnings for one service")
+    _add_globals(er)
+    er.add_argument("service", help="Railway service name")
+    er.add_argument("--env", help="Railway environment name")
+    er.add_argument("--since", default=DEFAULT_SINCE)
+    er.add_argument("--limit", type=int, default=DEFAULT_ERRORS_LIMIT)
+
+    ev = sub.add_parser("envs", help="env var NAMES only for one service (values stripped)")
+    _add_globals(ev)
+    ev.add_argument("service")
+    ev.add_argument("--env", help="Railway environment name")
+
+    sv = sub.add_parser("services", help="per-service deploy status in an env")
+    _add_globals(sv)
+    sv.add_argument("--env", help="Railway environment name")
+
+    sub.add_parser("projects", help="list all Railway projects").add_argument(
+        "--pretty", action="store_true", help="indent JSON output",
+    )
+
+    return p
+
+
+DISPATCH = {
+    "overview": cmd_overview,
+    "status": cmd_status,
+    "errors": cmd_errors,
+    "envs": cmd_envs,
+    "services": cmd_services,
+    "projects": cmd_projects,
+}
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    fn = DISPATCH[args.cmd]
+    fn(args)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)

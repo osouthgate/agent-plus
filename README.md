@@ -11,6 +11,7 @@ A collection of [Claude Code](https://claude.com/claude-code) plugins I use day-
 | [`coolify-remote`](./coolify-remote) | CLI for managing a [Coolify](https://coolify.io) PaaS instance — app lookup by name, env vars with post-write verify, domain set with correct field names, `deploy --wait` polling, bundled TLS enable. |
 | [`hcloud-remote`](./hcloud-remote) | Minimal CLI for day-to-day [Hetzner Cloud](https://hetzner.com/cloud) ops — `server list/show/reboot`, `snapshot create/list`, `ssh <name>`. Deliberately narrow (no volumes/networks/LBs). |
 | [`openrouter-remote`](./openrouter-remote) | CLI for [OpenRouter](https://openrouter.ai) — balance check (with `--alert-below` for crons), usage stats aggregated per key, model catalogue search/filter by price/context/capability, and API key management via the provisioning endpoint. |
+| [`railway-ops`](./railway-ops) | Read-first wrapper around the [Railway](https://railway.app) CLI — single-call env overviews (services, deploy status, recent errors/warnings, env var **names**-only) for fast incident triage. Never leaks env var values. |
 
 More coming as I skillify workflows I keep repeating.
 
@@ -19,7 +20,7 @@ More coming as I skillify workflows I keep repeating.
 Every plugin in this repo follows the same patterns so switching between them is cheap:
 
 - **Stdlib-only Python 3 CLI** in `bin/<plugin>`. No pip installs, no venvs. Run it standalone if you don't want the plugin wrapper.
-- **Layered `.env` autoloading**, precedence highest-first: `--env-file` → project `.env.local` / `.env` (walked up from cwd) → shell environment (including `~/.claude/settings.json` env). **Project `.env` files win over the shell** — drop one in the repo you're working in and it overrides whatever globals you have set, no unset required. Each plugin scopes autoload to its own prefixes (`HERMES_*`, `LANGFUSE_*`, `COOLIFY_*`, `HCLOUD_*`).
+- **Layered `.env` autoloading**, precedence highest-first: `--env-file` → project `.env.local` / `.env` (walked up from cwd) → shell environment (including `~/.claude/settings.json` env). **Project `.env` files win over the shell** — drop one in the repo you're working in and it overrides whatever globals you have set, no unset required. Each plugin scopes autoload to its own prefixes (`HERMES_*`, `LANGFUSE_*`, `COOLIFY_*`, `HCLOUD_*`, `OPENROUTER_*`). **Exception**: `railway-ops` defers to the `railway` CLI's own auth (`railway login` / `~/.railway/config.json`) — no `.env` autoload.
 - **Helpful missing-config errors**: when a required env var is absent, the CLI prints both the preferred project-level location and the global Claude Code settings location.
 - **Resolve-by-name everywhere**: apps, servers, and instances are identified by human names in commands; the CLI looks up UUIDs/IDs internally. You never copy an opaque identifier across commands.
 - **`--json` on every list/show command** for piping to `jq`.
