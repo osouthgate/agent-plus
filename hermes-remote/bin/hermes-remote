@@ -6,7 +6,16 @@ mode. But the Hermes web server exposes a REST API (login cookie + bearer
 session token). This script wraps the common operations so humans and other
 agents can manage crons, inspect env vars, and check status from anywhere.
 
-Configuration is layered and everything is env-driven:
+Configuration is layered. Values are read from (highest precedence first):
+
+  1. --env-file <path>         explicitly-passed .env file(s)
+  2. ./.env.local, ./.env      walking up from cwd until one is found
+  3. Shell environment         including anything Claude Code settings export
+
+Project files override the shell — drop a .env in the repo you're working in
+and it beats whatever globals you have set, no unset required.
+
+The keys read:
 
   HERMES_URL            e.g. https://hermes.example.com
                          or http://1.2.3.4:3000
@@ -46,10 +55,118 @@ import shlex
 import subprocess
 import sys
 import urllib.parse
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 DEFAULT_ADMIN_USER = "admin@example.com"
+
+
+# ─── .env autoloading ─────────────────────────────────────────────────────────
+#
+# Load project-local .env files before resolving config. Precedence, highest
+# first:
+#   1. Explicit --env-file
+#   2. Project .env.local / .env (walking up from cwd)
+#   3. Shell environment (including vars exported by Claude Code settings)
+#
+# Project files WIN over the shell — opposite of the usual rule. This lets a
+# developer drop a .env in the repo they're currently in and have it override
+# whatever Claude's global settings are exporting, without having to unset
+# anything. Only HERMES_* and COOLIFY_* keys are picked up.
+
+_ENV_FILENAMES = (".env.local", ".env")
+_ENV_PREFIXES = ("HERMES_", "COOLIFY_")
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v = v[1:-1]
+        if k:
+            out[k] = v
+    return out
+
+
+def _autoload_env_files(extra: list[str] | None = None) -> list[Path]:
+    """Populate os.environ from .env files. Project files override the shell
+    for HERMES_*/COOLIFY_* keys. Returns the list of files that contributed
+    at least one key.
+
+    Precedence (highest first): --env-file, then project .env.local, then
+    project .env, then shell. We build the list of candidate files in that
+    precedence order, then apply them to os.environ in REVERSE (lowest first)
+    so each higher-priority file overwrites on top.
+    """
+    # 1. Collect candidate files in precedence order (highest first).
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def _push(p: Path) -> None:
+        p = p.expanduser().resolve()
+        if p in seen or not p.is_file():
+            return
+        seen.add(p)
+        candidates.append(p)
+
+    for f in extra or []:
+        _push(Path(f))
+
+    cwd = Path.cwd().resolve()
+    project_found = False
+    for parent in (cwd, *cwd.parents):
+        before = len(candidates)
+        for name in _ENV_FILENAMES:
+            _push(parent / name)
+        if len(candidates) > before:
+            project_found = True
+            break  # stop at the first directory that had any .env file
+
+    # 2. Apply files lowest-precedence first so highest wins in os.environ.
+    loaded: list[Path] = []
+    for p in reversed(candidates):
+        vals = _parse_env_file(p)
+        any_taken = False
+        for k, v in vals.items():
+            if not k.startswith(_ENV_PREFIXES):
+                continue
+            os.environ[k] = v
+            any_taken = True
+        if any_taken:
+            loaded.append(p)
+
+    return loaded
+
+
+def _suggest_env_setup(missing: str) -> str:
+    """Build a 'where do I set this?' hint shown when required config is missing."""
+    cwd = Path.cwd()
+    return (
+        f"{missing}\n\n"
+        "Set these in whichever is most convenient — project files win over shell env:\n\n"
+        f"  Project-level (preferred):  {cwd / '.env'}\n"
+        "    # .env\n"
+        "    HERMES_URL=https://hermes.example.com\n"
+        "    HERMES_PASSWORD=...\n\n"
+        "  Global (Claude Code settings):\n"
+        "    ~/.claude/settings.json → \"env\": { \"HERMES_URL\": \"...\", \"HERMES_PASSWORD\": \"...\" }\n"
+        "    (or export them in your shell profile)\n"
+    )
 
 
 # ─── transport ────────────────────────────────────────────────────────────────
@@ -134,12 +251,12 @@ def _resolve_password() -> str:
     if coolify_url and coolify_key and app_uuid:
         return _fetch_coolify_password(coolify_url, coolify_key, app_uuid)
 
-    raise SystemExit(
+    raise SystemExit(_suggest_env_setup(
         "No password source configured. Set one of:\n"
         "  HERMES_PASSWORD=...                          (plain value)\n"
         "  HERMES_PASSWORD_CMD='pass show hermes'       (run a command)\n"
         "  COOLIFY_URL + COOLIFY_API_KEY + HERMES_APP_UUID   (fetch from Coolify)"
-    )
+    ))
 
 
 def _fetch_coolify_password(coolify_url: str, coolify_key: str, app_uuid: str) -> str:
@@ -219,12 +336,12 @@ class HermesClient:
             self.host = host
             self._override_host = True
         else:
-            raise SystemExit(
+            raise SystemExit(_suggest_env_setup(
                 "No Hermes URL configured. Set either:\n"
                 "  HERMES_URL=https://hermes.example.com\n"
                 "or for reverse-proxy-by-Host setups:\n"
                 "  HERMES_VPS_IP=1.2.3.4 HERMES_HOST=hermes.example.com"
-            )
+            ))
 
         pw = _resolve_password()
         self.cookie, self.token = _login(
@@ -449,6 +566,75 @@ def cmd_cron_create(client: HermesClient, args: argparse.Namespace) -> None:
     _dump_json(data)
 
 
+# ─── chat (OpenAI-compatible passthrough) ─────────────────────────────────────
+#
+# Bearer-auth against /v1/chat/completions. Doesn't use HermesClient — the
+# chat API has its own auth surface (API_SERVER_KEY), distinct from the
+# admin session cookie. Keeps this path independent so cron jobs or other
+# agents can invoke it without an admin password.
+
+
+def cmd_chat(args: argparse.Namespace) -> None:
+    url = os.environ.get("HERMES_URL", "").rstrip("/")
+    key = os.environ.get("HERMES_CHAT_API_KEY", "")
+    if not url:
+        raise SystemExit(_suggest_env_setup(
+            "HERMES_URL not set. e.g. HERMES_URL=https://hermes.example.com"
+        ))
+    if not key:
+        raise SystemExit(_suggest_env_setup(
+            "HERMES_CHAT_API_KEY not set. This is the API_SERVER_KEY configured "
+            "in Hermes env (not the admin password)."
+        ))
+
+    messages: list[dict[str, str]] = []
+    if args.system:
+        messages.append({"role": "system", "content": args.system})
+    messages.append({"role": "user", "content": args.prompt})
+
+    body = json.dumps({
+        "model": args.model,
+        "messages": messages,
+        "max_tokens": args.max_tokens,
+    }).encode()
+
+    parsed = urlparse(url)
+    conn_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    conn = conn_cls(parsed.netloc, timeout=120)
+    conn.request(
+        "POST", "/v1/chat/completions",
+        body=body,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+    )
+    resp = conn.getresponse()
+    raw = resp.read().decode("utf-8", errors="replace")
+    conn.close()
+
+    if resp.status >= 300:
+        print(f"HTTP {resp.status}: {raw}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        print(raw)
+        return
+
+    if args.json:
+        _dump_json(data)
+        return
+
+    choices = data.get("choices") or []
+    if not choices:
+        print(raw)
+        return
+    content = (choices[0].get("message") or {}).get("content", "")
+    print(content)
+
+
 # ─── argparse wiring ──────────────────────────────────────────────────────────
 
 
@@ -456,6 +642,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="hermes-remote",
         description="Remote CLI for a Hermes Agent deployment",
+    )
+    p.add_argument(
+        "--env-file",
+        action="append",
+        default=[],
+        help="Additional .env file(s) to load (highest precedence). "
+             "Project .env/.env.local (walked up from cwd) are auto-loaded and "
+             "override shell env; --env-file overrides those in turn.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -554,13 +748,44 @@ def build_parser() -> argparse.ArgumentParser:
     cc.add_argument("--model", help="Override model for this job (e.g. haiku)")
     cc.set_defaults(func=cmd_cron_create)
 
+    # chat — OpenAI-compatible /v1/chat/completions passthrough.
+    # Uses bearer auth via HERMES_CHAT_API_KEY; no session cookie needed.
+    ch = sub.add_parser(
+        "chat",
+        help="One-shot chat call to /v1/chat/completions (needs HERMES_CHAT_API_KEY)",
+    )
+    ch.add_argument("prompt", help="User message to send")
+    ch.add_argument(
+        "--model",
+        default="hermes-agent",
+        help="Model id (default: hermes-agent — uses Hermes's configured default)",
+    )
+    ch.add_argument(
+        "--max-tokens",
+        type=int,
+        default=1024,
+        help="Max output tokens (default: 1024)",
+    )
+    ch.add_argument("--system", help="Optional system message prepended to the request")
+    ch.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the full JSON response instead of just the assistant text",
+    )
+    ch.set_defaults(func=cmd_chat, needs_client=False)
+
     return p
 
 
 def main() -> None:
-    args = build_parser().parse_args()
-    client = HermesClient()
-    args.func(client, args)
+    parser = build_parser()
+    args = parser.parse_args()
+    _autoload_env_files(args.env_file)
+    if getattr(args, "needs_client", True):
+        client = HermesClient()
+        args.func(client, args)
+    else:
+        args.func(args)
 
 
 if __name__ == "__main__":

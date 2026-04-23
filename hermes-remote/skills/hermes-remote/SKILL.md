@@ -1,7 +1,7 @@
 ---
 name: hermes-remote
-description: Manage a remote Hermes Agent deployment from the CLI — list/create/pause/trigger cron jobs, check status, inspect env vars, swap models. Use this skill whenever you need to control a Hermes instance that lives on another machine (VPS, Coolify app, etc.), since the upstream `hermes` CLI only talks to a local gateway.
-when_to_use: Trigger on phrases like "list the hermes crons", "pause the hermes cron", "check the hermes model", "what is hermes running", "swap the hermes model to X", "trigger the gbrain sync cron", "what's on the remote hermes", "show hermes env", "restart hermes", anything about scheduled tasks on a remote Hermes.
+description: Manage a remote Hermes Agent deployment from the CLI — list/create/pause/trigger cron jobs, check status, inspect env vars, swap models, and send one-shot chat calls to the OpenAI-compatible /v1/chat/completions endpoint. Use this skill whenever you need to control a Hermes instance that lives on another machine (VPS, Coolify app, etc.), since the upstream `hermes` CLI only talks to a local gateway.
+when_to_use: Trigger on phrases like "list the hermes crons", "pause the hermes cron", "check the hermes model", "what is hermes running", "swap the hermes model to X", "trigger the gbrain sync cron", "what's on the remote hermes", "show hermes env", "restart hermes", "ask hermes", "chat with hermes", "one-shot to hermes", anything about scheduled tasks or a direct chat call to a remote Hermes.
 allowed-tools: Bash(hermes-remote:*) Bash(python3 *hermes-remote*:*)
 ---
 
@@ -18,11 +18,37 @@ The binary lives at `${CLAUDE_SKILL_DIR}/../../bin/hermes-remote` inside this pl
 - The user wants to create a new cron — **always use the skillify pattern below**, not a prompt-only job.
 - The user wants to inspect which env vars Hermes can see vs has missing.
 
-Do NOT use this for chat-style conversations with the Hermes agent. This is for admin / control-plane ops.
+For one-shot chat calls (`/v1/chat/completions`), use `hermes-remote chat "<prompt>"` — needs `HERMES_CHAT_API_KEY` set (distinct from the admin password).
+
+```bash
+hermes-remote chat "status?"                               # quick one-shot
+hermes-remote chat --model anthropic/claude-haiku-4-5 ...  # override per-call
+hermes-remote chat --max-tokens 200 "..."                  # cap output
+hermes-remote chat --system "Be terse." "what is k8s?"     # add system prompt
+hermes-remote chat --json "..."                            # full response body
+```
+
+For multi-turn conversations or streaming, use an OpenAI-compatible SDK pointed at `$HERMES_URL/v1` — this wrapper is for one-shot calls and cron-friendly scripting.
 
 ## Configure
 
-Everything is env-driven. Set one URL mode and one password source.
+Config is layered. Highest precedence first:
+
+1. `--env-file <path>` passed on the CLI
+2. `.env.local` / `.env` found by walking up from the current working directory
+3. Shell environment (including vars exported via Claude Code settings)
+
+**Project `.env` files override the shell** — opposite of the usual rule. This
+lets you drop a `.env` in whichever repo you're working in and have it win
+over any globals, without having to unset anything.
+
+Only `HERMES_*` and `COOLIFY_*` keys are picked up from .env files.
+
+If no URL or password is configured, the CLI prints a suggestion showing
+exactly where to put them (project `.env` preferred, or `~/.claude/settings.json`
+for a global default).
+
+Set one URL mode and one password source.
 
 **URL — one of:**
 
