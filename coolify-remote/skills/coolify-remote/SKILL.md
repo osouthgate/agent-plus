@@ -32,6 +32,12 @@ Layered config, highest precedence first:
 # .env (project-level, preferred)
 COOLIFY_URL=http://1.2.3.4:8000
 COOLIFY_API_KEY=...
+
+# Optional — only needed for `app exec`:
+COOLIFY_SSH_HOST=1.2.3.4         # default: host parsed from COOLIFY_URL
+COOLIFY_SSH_USER=root            # default: root
+COOLIFY_SSH_KEY=~/.ssh/agent-plus # default: ssh's own defaults
+COOLIFY_SSH_PORT=22              # default: 22
 ```
 
 Or globally in `~/.claude/settings.json`:
@@ -58,6 +64,9 @@ coolify-remote tls enable <app> --domain https://app.example.com
 
 coolify-remote deploy <app> [--wait]          # trigger; optionally block to completion
 
+coolify-remote app exec <app> -- <cmd>        # run cmd inside the app's container
+coolify-remote app exec <app> -t -- <cmd>     # allocate a TTY (for interactive tools)
+
 coolify-remote server list                    # Coolify-managed hosts
 ```
 
@@ -71,6 +80,47 @@ Every command takes `<app>` which is matched against `name`, then `uuid`, then `
 coolify-remote deploy hermes --wait                      # works
 coolify-remote deploy b1c6e2f0-4a3d-4d77-ae6f-123456789ab --wait   # UUID also works
 ```
+
+## Running commands inside a container (`app exec`)
+
+Coolify has **no REST exec endpoint** — every obvious path (`/applications/{uuid}/execute`, `/exec`, `/command`, `/run`, `/terminal`, `/shell` on both application and server routes) returns HTTP 404. The web UI's terminal is a WebSocket feature gated by `is_terminal_enabled`. Rather than wrap that, this command SSHes to the Coolify host and runs `docker exec` on the matching container.
+
+```bash
+coolify-remote app exec hermes -- whoami                          # prints `root`
+coolify-remote app exec hermes -- ls /data | head
+coolify-remote app exec hermes -- sh -c 'cat /app/.env | wc -l'
+coolify-remote app exec hermes -t -- sh                           # interactive shell
+coolify-remote app exec hermes -v -- whoami                       # print the ssh command too
+```
+
+**How it works:** resolves the app by name → UUID, SSHes to `$COOLIFY_SSH_HOST` (or the hostname parsed from `COOLIFY_URL`), runs `docker ps --filter name=<uuid>` to find the live container (Coolify names them `<uuid>-<timestamp>`), then `docker exec -i` into it. Stdout, stderr, and exit codes all propagate to your local shell — so cron/skillify scripts can branch on `$?`.
+
+**What you need on the host:** working key-based SSH as root (or whichever user can talk to the Docker socket). The CLI won't prompt for a password — if your key isn't already set up, `COOLIFY_SSH_KEY=~/.ssh/mykey` points it at one.
+
+**Cron-friendly pattern** (inherited from Hermes's skillify model):
+
+```bash
+# Run a real health check inside the container; only escalate on failure.
+coolify-remote app exec hermes -- sh -c 'curl -sf http://localhost:3000/health' \
+  || echo "hermes unhealthy" >&2
+# exit code 0 = healthy, non-zero = agent reports it
+```
+
+**Container not running?** The command exits with code 2 and a clear `no running container found for app <uuid>` message — distinguishable from a real command that happened to produce no output.
+
+**Coolify label quirk:** an earlier implementation tried `--filter label=coolify.applicationId=<uuid>` — that label doesn't exist on Coolify's application containers (only on the proxy layer). Container-name-prefix matching works reliably across Coolify versions.
+
+**Windows / Git Bash gotcha:** MSYS rewrites absolute Linux paths in arguments before they reach Python. `coolify-remote app exec hermes -- cat /etc/os-release` becomes `cat C:/Program Files/Git/etc/os-release` *locally*, then fails in the container. Two fixes, both reliable:
+
+```bash
+# Wrap in sh -c so the path is inside a shell string MSYS doesn't touch:
+coolify-remote app exec hermes -- sh -c 'cat /etc/os-release'
+
+# Or disable path conversion for this call:
+MSYS_NO_PATHCONV=1 coolify-remote app exec hermes -- cat /etc/os-release
+```
+
+Affects every Windows CLI that shells out with Unix-style paths — not specific to this wrapper.
 
 ## Env propagation gotcha (READ THIS)
 

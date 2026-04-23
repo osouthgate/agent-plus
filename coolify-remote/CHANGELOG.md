@@ -4,6 +4,17 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## Unreleased
+
+### Added
+- `app exec <app> -- <cmd>` — run a shell command inside the app's running Docker container. SSH-based (to `$COOLIFY_SSH_HOST` or the host parsed from `COOLIFY_URL`) + `docker exec`, because Coolify has no REST exec endpoint — every obvious path (`/applications/{uuid}/execute`, `/exec`, `/command`, `/run`, `/terminal`, `/shell`) returns 404. The web UI's terminal is WebSocket-based, not worth wrapping. Stdout/stderr/exit-code all propagate — suitable for cron/skillify patterns. Supports `-t` for TTY, `-v` to print the ssh command. Motivation: unblocks Phase 2.5 cron-script deployment onto the Hermes container (see `rainshift/rayna-setup/TODO.md:195`). [2026-04-23]
+- SSH env vars: `COOLIFY_SSH_HOST`, `COOLIFY_SSH_USER` (default `root`), `COOLIFY_SSH_KEY`, `COOLIFY_SSH_PORT` (default 22). [2026-04-23]
+
+### Encoded gotchas
+- **Container lookup is by name prefix, not label.** Initial implementation filtered by `label=coolify.applicationId=<uuid>` — that label doesn't exist on Coolify's application containers (only on proxy-layer services). Coolify names running containers `<app-uuid>-<timestamp>`, so `docker ps --filter name=<uuid>` matches reliably across versions.
+- **No REST exec endpoint exists.** Documented in the SKILL with the 8 paths we probed, so future agents don't waste time looking.
+- **Windows / Git Bash MSYS path rewriting**: absolute Linux paths in arguments get mangled (`/etc/foo` → `C:/Program Files/Git/etc/foo`) before Python sees them. SKILL documents both workarounds (`sh -c '...'` wrap or `MSYS_NO_PATHCONV=1`).
+
 ## 0.1.0 — 2026-04-23
 
 Initial release.

@@ -22,6 +22,12 @@ Env vars read:
   COOLIFY_URL          e.g. http://1.2.3.4:8000 or https://coolify.example.com
   COOLIFY_API_KEY      Bearer token from Coolify → Keys & Tokens
 
+For `app exec` (SSH-based, since Coolify has no REST exec endpoint):
+  COOLIFY_SSH_HOST     override for the SSH target (default: host parsed from COOLIFY_URL)
+  COOLIFY_SSH_USER     SSH user (default: root)
+  COOLIFY_SSH_KEY      SSH private key path (default: ssh's own defaults / agent)
+  COOLIFY_SSH_PORT     SSH port (default: 22)
+
 Python 3.9+, stdlib only.
 """
 
@@ -30,6 +36,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
+import subprocess
 import sys
 import time
 import urllib.error
@@ -235,6 +243,94 @@ def cmd_app_show(client: CoolifyClient, args: argparse.Namespace) -> None:
     # Re-fetch by UUID to get the full record (list endpoint may summarise).
     status, full = client.call("GET", f"/api/v1/applications/{app['uuid']}")
     _dump_json(full if status < 300 else app)
+
+
+def _resolve_ssh_host() -> str:
+    """Figure out where to SSH. Priority: COOLIFY_SSH_HOST explicit override →
+    hostname/IP parsed from COOLIFY_URL. Fails with a useful hint otherwise.
+
+    Coolify has no REST exec endpoint (`/applications/{uuid}/execute` et al
+    return 404). The web UI uses a WebSocket terminal; we take the simpler
+    path and shell out to `ssh host 'docker exec …'`. For single-VPS setups
+    (is_coolify_host=true) this is the same box hosting the workload anyway.
+    """
+    explicit = os.environ.get("COOLIFY_SSH_HOST", "").strip()
+    if explicit:
+        return explicit
+    url = os.environ.get("COOLIFY_URL", "")
+    if url:
+        try:
+            parsed = urllib.parse.urlparse(url)
+            if parsed.hostname:
+                return parsed.hostname
+        except Exception:
+            pass
+    raise SystemExit(
+        "Cannot determine SSH host. Set COOLIFY_SSH_HOST explicitly, or make "
+        "sure COOLIFY_URL contains a real hostname/IP (not 'host.docker.internal')."
+    )
+
+
+def cmd_app_exec(client: CoolifyClient, args: argparse.Namespace) -> None:
+    """Run a shell command inside the app's running Docker container.
+
+    Implementation: SSH to the Coolify host and `docker exec` into the
+    container Coolify tagged with the app's UUID. Needs ssh on PATH and
+    a working key-based connection to the host (no password prompts).
+    """
+    # argparse.REMAINDER keeps the leading `--` sentinel in args.command;
+    # strip it so we don't forward it to `sh -c` as a no-op argument.
+    if args.command and args.command[0] == "--":
+        args.command = args.command[1:]
+    if not args.command:
+        raise SystemExit(
+            "No command given. Pass it after --, e.g.\n"
+            "  coolify-remote app exec hermes -- ls /data"
+        )
+
+    app = client.resolve_app(args.app)
+    uuid = app["uuid"]
+    host = _resolve_ssh_host()
+    user = os.environ.get("COOLIFY_SSH_USER", "root")
+    port = os.environ.get("COOLIFY_SSH_PORT", "22")
+    key = os.environ.get("COOLIFY_SSH_KEY", "").strip()
+
+    # Compose the remote-side command. One round trip: find the container by
+    # name prefix (Coolify names running containers `<app-uuid>-<timestamp>`),
+    # then docker exec into it. Uses `--filter name=<uuid>` which does prefix
+    # matching by default — matches whichever timestamped deploy is live.
+    # Fails cleanly with exit 2 if no container is running for this app.
+    user_cmd = " ".join(shlex.quote(a) for a in args.command)
+    docker_flags = "-i" + ("t" if args.tty else "")
+    remote = (
+        f"CID=$(docker ps --filter name={shlex.quote(uuid)} "
+        f"--format '{{{{.ID}}}}' | head -n1); "
+        f'if [ -z "$CID" ]; then '
+        f'echo "coolify-remote: no running container found for app {uuid}" >&2; exit 2; '
+        f"fi; "
+        f"docker exec {docker_flags} \"$CID\" sh -c {shlex.quote(user_cmd)}"
+    )
+
+    ssh_cmd = ["ssh"]
+    if args.tty:
+        ssh_cmd.append("-t")
+    ssh_cmd += ["-p", port]
+    if key:
+        ssh_cmd += ["-i", key]
+    # Silence the "Warning: Permanently added ... to known hosts" noise for
+    # cron-style use; user can override with --verbose.
+    if not args.verbose:
+        ssh_cmd += ["-o", "LogLevel=ERROR"]
+    ssh_cmd += [f"{user}@{host}", remote]
+
+    if args.verbose:
+        print(f"→ {' '.join(shlex.quote(a) for a in ssh_cmd)}", file=sys.stderr)
+
+    try:
+        result = subprocess.run(ssh_cmd)
+    except FileNotFoundError:
+        raise SystemExit("ssh not found on PATH")
+    sys.exit(result.returncode)
 
 
 def cmd_env_list(client: CoolifyClient, args: argparse.Namespace) -> None:
@@ -482,6 +578,21 @@ def build_parser() -> argparse.ArgumentParser:
     ash = app_sub.add_parser("show", help="Show full JSON for one app")
     ash.add_argument("app", help="App name or UUID")
     ash.set_defaults(func=cmd_app_show)
+
+    ax = app_sub.add_parser(
+        "exec",
+        help="Run a shell command inside the app's container "
+             "(SSH + docker exec under the hood — no REST exec endpoint exists)",
+    )
+    ax.add_argument("app", help="App name or UUID")
+    ax.add_argument("-t", "--tty", action="store_true", help="Allocate a TTY (for interactive tools)")
+    ax.add_argument("-v", "--verbose", action="store_true", help="Print the ssh command before running")
+    ax.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="Command to run inside the container. Prefix with -- to separate from flags.",
+    )
+    ax.set_defaults(func=cmd_app_exec)
 
     # env
     sp = sub.add_parser("env", help="Manage application env vars")
