@@ -1,0 +1,897 @@
+#!/usr/bin/env python3
+"""openrouter-remote — CLI for OpenRouter.
+
+Three surfaces:
+
+  - Balance:       GET /api/v1/credits           (needs user key sk-or-...)
+  - Models:        GET /api/v1/models            (no auth)
+  - Key mgmt:      /api/v1/keys*                 (needs PROVISIONING key — distinct)
+
+Configuration (highest precedence first):
+  1. --env-file <path>
+  2. ./.env.local, ./.env     (walked up from cwd)
+  3. Shell environment         (including Claude Code settings)
+
+Project .env files WIN over the shell.
+
+Env vars:
+  OPENROUTER_API_KEY            User key (sk-or-...). Needed for `balance`.
+  OPENROUTER_PROVISIONING_KEY   Management key. Needed for `keys` subcommands.
+                                Generate at https://openrouter.ai/settings/provisioning-keys
+
+Python 3.9+, stdlib only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+API_BASE = "https://openrouter.ai/api/v1"
+
+# ─── .env autoloading ─────────────────────────────────────────────────────────
+
+_ENV_FILENAMES = (".env.local", ".env")
+_ENV_PREFIXES = ("OPENROUTER_",)
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v = v[1:-1]
+        if k:
+            out[k] = v
+    return out
+
+
+def _autoload_env_files(extra: list[str] | None = None) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def _push(p: Path) -> None:
+        p = p.expanduser().resolve()
+        if p in seen or not p.is_file():
+            return
+        seen.add(p)
+        candidates.append(p)
+
+    for f in extra or []:
+        _push(Path(f))
+
+    cwd = Path.cwd().resolve()
+    for parent in (cwd, *cwd.parents):
+        before = len(candidates)
+        for name in _ENV_FILENAMES:
+            _push(parent / name)
+        if len(candidates) > before:
+            break
+
+    loaded: list[Path] = []
+    for p in reversed(candidates):
+        vals = _parse_env_file(p)
+        any_taken = False
+        for k, v in vals.items():
+            if not k.startswith(_ENV_PREFIXES):
+                continue
+            os.environ[k] = v
+            any_taken = True
+        if any_taken:
+            loaded.append(p)
+    return loaded
+
+
+def _suggest_env_setup(missing: str, needs: str) -> str:
+    cwd = Path.cwd()
+    return (
+        f"{missing}\n\n"
+        f"Set in whichever is most convenient — project files win over shell env:\n\n"
+        f"  Project-level (preferred):  {cwd / '.env'}\n"
+        f"    # .env\n"
+        f"    {needs}=...\n\n"
+        f"  Global (Claude Code settings):\n"
+        f"    ~/.claude/settings.json → \"env\": {{ \"{needs}\": \"...\" }}\n"
+        f"    (or export it in your shell profile)\n"
+    )
+
+
+# ─── transport ────────────────────────────────────────────────────────────────
+
+
+def _http(
+    method: str,
+    path: str,
+    *,
+    token: str | None,
+    body: Any = None,
+    query: dict[str, Any] | None = None,
+    timeout: float = 30.0,
+) -> tuple[int, Any]:
+    url = API_BASE + path
+    if query:
+        url += "?" + urllib.parse.urlencode(
+            {k: v for k, v in query.items() if v is not None}
+        )
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    data: bytes | None = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            status = resp.status
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        status = e.code
+    try:
+        parsed = json.loads(raw) if raw else None
+    except json.JSONDecodeError:
+        parsed = raw
+    return status, parsed
+
+
+def _user_key() -> str:
+    k = os.environ.get("OPENROUTER_API_KEY", "")
+    if not k:
+        raise SystemExit(
+            _suggest_env_setup(
+                "OPENROUTER_API_KEY (sk-or-...) is not set.",
+                "OPENROUTER_API_KEY",
+            )
+        )
+    return k
+
+
+def _provisioning_key() -> str:
+    k = os.environ.get("OPENROUTER_PROVISIONING_KEY", "")
+    if not k:
+        raise SystemExit(
+            _suggest_env_setup(
+                "OPENROUTER_PROVISIONING_KEY is not set. Key-management endpoints "
+                "need a provisioning key (distinct from your regular sk-or-... key) "
+                "— generate one at https://openrouter.ai/settings/provisioning-keys",
+                "OPENROUTER_PROVISIONING_KEY",
+            )
+        )
+    return k
+
+
+# ─── pretty printers ──────────────────────────────────────────────────────────
+
+
+def _dump_json(obj: Any) -> None:
+    json.dump(obj, sys.stdout, indent=2, sort_keys=True, default=str)
+    sys.stdout.write("\n")
+
+
+def _fmt_usd(x: float | None) -> str:
+    if x is None:
+        return "-"
+    if x < 0:
+        # OpenRouter's meta-routers (openrouter/auto etc.) use -1 as a sentinel
+        # meaning "varies by underlying model".
+        return "varies"
+    if x == 0:
+        return "$0"
+    # Prices are per-token; show $/million for readability.
+    return f"${x * 1_000_000:.2f}/M"
+
+
+def _fmt_ctx(n: int | None) -> str:
+    if not n:
+        return "?"
+    if n >= 1000:
+        return f"{n // 1000}k"
+    return str(n)
+
+
+# ─── subcommands: balance ─────────────────────────────────────────────────────
+
+
+def cmd_balance(args: argparse.Namespace) -> None:
+    status, data = _http("GET", "/credits", token=_user_key())
+    if status >= 300:
+        raise SystemExit(f"GET /credits failed: HTTP {status}: {data!r}")
+    d = (data or {}).get("data", {})
+    total = float(d.get("total_credits") or 0)
+    used = float(d.get("total_usage") or 0)
+    remaining = total - used
+    if args.json:
+        _dump_json({
+            "total_credits": total,
+            "total_usage": used,
+            "remaining": remaining,
+        })
+    else:
+        print(f"total_credits: ${total:.4f}")
+        print(f"total_usage:   ${used:.4f}")
+        print(f"remaining:     ${remaining:.4f}")
+
+    # Cron-friendly exit codes for [SILENT] pattern in Hermes.
+    if args.alert_below is not None and remaining < args.alert_below:
+        print(
+            f"ALERT: remaining ${remaining:.4f} < threshold ${args.alert_below:.4f}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
+# ─── subcommands: models ──────────────────────────────────────────────────────
+
+
+def _fetch_models() -> list[dict]:
+    status, data = _http("GET", "/models", token=None)
+    if status >= 300 or not isinstance(data, dict):
+        raise SystemExit(f"GET /models failed: HTTP {status}: {data!r}")
+    return data.get("data", []) or []
+
+
+def _model_matches(m: dict, args: argparse.Namespace) -> bool:
+    pricing = m.get("pricing") or {}
+    p_in = float(pricing.get("prompt") or 0)
+    p_out = float(pricing.get("completion") or 0)
+    ctx = int(m.get("context_length") or 0)
+    arch = m.get("architecture") or {}
+    modalities = set(arch.get("input_modalities") or [])
+    sparams = set(m.get("supported_parameters") or [])
+    mid = (m.get("id") or "").lower()
+    name = (m.get("name") or "").lower()
+    desc = (m.get("description") or "").lower()
+
+    if args.free:
+        # Genuinely free = exactly 0. Negative prices are the meta-router
+        # "varies" sentinel and should NOT be treated as free.
+        if p_in != 0 or p_out != 0:
+            return False
+    if args.provider:
+        prov = mid.split("/", 1)[0] if "/" in mid else ""
+        if prov != args.provider.lower():
+            return False
+    if args.min_context and ctx < args.min_context:
+        return False
+    if args.max_price_input is not None:
+        # user expresses in $/M tokens
+        if p_in * 1_000_000 > args.max_price_input:
+            return False
+    if args.max_price_output is not None:
+        if p_out * 1_000_000 > args.max_price_output:
+            return False
+    if args.supports:
+        wanted = {w.strip().lower() for w in args.supports.split(",") if w.strip()}
+        # Map shorthand → actual check
+        for w in wanted:
+            if w in ("tools", "tool_use", "tool-use"):
+                if "tools" not in sparams and "tool_choice" not in sparams:
+                    return False
+            elif w in ("vision", "image", "images"):
+                if "image" not in modalities:
+                    return False
+            elif w in ("reasoning", "thinking"):
+                if "reasoning" not in sparams and "include_reasoning" not in sparams:
+                    return False
+            elif w in ("json", "structured", "response_format"):
+                if "response_format" not in sparams:
+                    return False
+            else:
+                if w not in sparams and w not in modalities:
+                    return False
+    if args.search:
+        q = args.search.lower()
+        if q not in mid and q not in name and q not in desc:
+            return False
+    return True
+
+
+def _print_model_row(m: dict) -> None:
+    pricing = m.get("pricing") or {}
+    p_in = float(pricing.get("prompt") or 0)
+    p_out = float(pricing.get("completion") or 0)
+    ctx = int(m.get("context_length") or 0)
+    print(
+        f"  {m.get('id',''):48s}  in:{_fmt_usd(p_in):>12s}  out:{_fmt_usd(p_out):>12s}  ctx:{_fmt_ctx(ctx):>6s}"
+    )
+
+
+def cmd_models_list(args: argparse.Namespace) -> None:
+    models = _fetch_models()
+    filtered = [m for m in models if _model_matches(m, args)]
+
+    if args.sort == "price-in":
+        filtered.sort(key=lambda m: float((m.get("pricing") or {}).get("prompt") or 0))
+    elif args.sort == "price-out":
+        filtered.sort(key=lambda m: float((m.get("pricing") or {}).get("completion") or 0))
+    elif args.sort == "context":
+        filtered.sort(key=lambda m: -int(m.get("context_length") or 0))
+    elif args.sort == "name":
+        filtered.sort(key=lambda m: m.get("id", ""))
+
+    if args.limit:
+        filtered = filtered[: args.limit]
+
+    if args.json:
+        _dump_json(filtered)
+        return
+    print(f"{len(filtered)} model(s) (of {len(models)} total):")
+    for m in filtered:
+        _print_model_row(m)
+
+
+def cmd_models_show(args: argparse.Namespace) -> None:
+    models = _fetch_models()
+    match = next((m for m in models if m.get("id") == args.id), None)
+    if not match:
+        # try suffix match for convenience
+        candidates = [m for m in models if args.id in (m.get("id") or "")]
+        if len(candidates) == 1:
+            match = candidates[0]
+        elif len(candidates) > 1:
+            names = ", ".join(c.get("id", "?") for c in candidates[:10])
+            raise SystemExit(f"Ambiguous id {args.id!r}, matches: {names}{'...' if len(candidates)>10 else ''}")
+    if not match:
+        raise SystemExit(f"No model with id matching {args.id!r}")
+    if args.json:
+        _dump_json(match)
+        return
+    _dump_json(match)
+
+
+def cmd_models_cheap(args: argparse.Namespace) -> None:
+    """Shortcut: sort by input price, optionally filtered by capability."""
+    args.sort = "price-in"
+    if not args.limit:
+        args.limit = 20
+    cmd_models_list(args)
+
+
+def cmd_models_endpoints(args: argparse.Namespace) -> None:
+    """Per-provider endpoints for a single model — throughput, latency, uptime,
+    provider pricing, quantization. This is where the real 'which provider
+    should I route to' data lives (the bulk /models list only shows top_provider).
+    """
+    # Resolve id via the bulk list (supports suffix matching).
+    models = _fetch_models()
+    match = next((m for m in models if m.get("id") == args.id), None)
+    if not match:
+        candidates = [m for m in models if args.id in (m.get("id") or "")]
+        if len(candidates) == 1:
+            match = candidates[0]
+        elif len(candidates) > 1:
+            names = ", ".join(c.get("id", "?") for c in candidates[:10])
+            raise SystemExit(f"Ambiguous id {args.id!r}, matches: {names}")
+    if not match:
+        raise SystemExit(f"No model matching {args.id!r}")
+
+    mid = match["id"]
+    status, data = _http("GET", f"/models/{mid}/endpoints", token=None)
+    if status >= 300 or not isinstance(data, dict):
+        raise SystemExit(f"GET /models/{mid}/endpoints failed: HTTP {status}: {data!r}")
+    endpoints = (data.get("data") or {}).get("endpoints") or []
+    if not isinstance(endpoints, list):
+        raise SystemExit(f"Unexpected shape from /endpoints: {data!r}")
+
+    # Filter out disabled providers unless --all.
+    if not args.all:
+        endpoints = [e for e in endpoints if e.get("status", 0) >= 0]
+
+    def _f(x: Any) -> float | None:
+        if x is None:
+            return None
+        try:
+            return float(x)
+        except (TypeError, ValueError):
+            return None
+
+    key_map = {
+        "throughput": lambda e: -(_f(e.get("throughput_last_30m")) or -1),  # desc, null last
+        "latency": lambda e: _f(e.get("latency_last_30m")) or 1e9,         # asc, null last
+        "price-in": lambda e: _f((e.get("pricing") or {}).get("prompt")) or 1e9,
+        "price-out": lambda e: _f((e.get("pricing") or {}).get("completion")) or 1e9,
+        "uptime": lambda e: -(_f(e.get("uptime_last_30m")) or 0),
+        "context": lambda e: -(_f(e.get("context_length")) or 0),
+        "name": lambda e: (e.get("provider_name") or "").lower(),
+    }
+    endpoints.sort(key=key_map.get(args.sort, key_map["throughput"]))
+
+    if args.limit:
+        endpoints = endpoints[: args.limit]
+
+    if args.json:
+        _dump_json({"id": mid, "endpoints": endpoints})
+        return
+
+    print(f"{mid} — {len(endpoints)} endpoint(s):\n")
+    print(
+        f"  {'provider':28s} {'quant':10s} {'ctx':>8s} {'tput t/s':>10s} "
+        f"{'latency':>10s} {'up30m':>7s} {'$in':>12s} {'$out':>12s}"
+    )
+    for e in endpoints:
+        pricing = e.get("pricing") or {}
+        p_in = _f(pricing.get("prompt"))
+        p_out = _f(pricing.get("completion"))
+        tput = _f(e.get("throughput_last_30m"))
+        lat = _f(e.get("latency_last_30m"))
+        up = _f(e.get("uptime_last_30m"))
+        ctx = int(e.get("context_length") or 0)
+        quant = e.get("quantization") or "?"
+        prov = e.get("provider_name") or e.get("tag") or "?"
+        tag = e.get("tag") or ""
+        label = (prov if prov == tag or not tag else f"{prov} ({tag})")[:28]
+        print(
+            f"  {label:28s} {quant:10s} {_fmt_ctx(ctx):>8s} "
+            f"{(f'{tput:.1f}' if tput is not None else '-'):>10s} "
+            f"{(f'{lat:.2f}s' if lat is not None else '-'):>10s} "
+            f"{(f'{up:.1f}%' if up is not None else '-'):>7s} "
+            f"{_fmt_usd(p_in):>12s} {_fmt_usd(p_out):>12s}"
+        )
+
+
+# ─── subcommands: usage ───────────────────────────────────────────────────────
+
+
+def _fetch_all_keys(token: str) -> list[dict]:
+    out: list[dict] = []
+    offset = 0
+    while True:
+        status, data = _http("GET", "/keys", token=token, query={"offset": offset})
+        if status >= 300 or not isinstance(data, dict):
+            raise SystemExit(f"GET /keys failed: HTTP {status}: {data!r}")
+        page = data.get("data") or []
+        out.extend(page)
+        if len(page) < 20:
+            break
+        offset += len(page)
+    return out
+
+
+def cmd_usage(args: argparse.Namespace) -> None:
+    """Aggregate usage across all keys. Also prints account-level totals.
+
+    Pulls usage_daily/weekly/monthly off every key (provisioning key required),
+    plus total credits/usage from /credits (user key).
+    """
+    # Account totals via /credits (only needs user key, cheap).
+    user_key = os.environ.get("OPENROUTER_API_KEY")
+    credits = None
+    if user_key:
+        status, data = _http("GET", "/credits", token=user_key)
+        if status < 300:
+            credits = (data or {}).get("data")
+
+    # Per-key usage via /keys (needs provisioning key).
+    keys = _fetch_all_keys(_provisioning_key())
+
+    if args.key:
+        keys = [
+            k for k in keys
+            if k.get("hash") == args.key
+            or (k.get("hash") or "").startswith(args.key)
+            or k.get("name") == args.key
+            or k.get("label") == args.key
+        ]
+        if not keys:
+            raise SystemExit(f"No key matching {args.key!r}")
+
+    def _f(x: Any) -> float:
+        try:
+            return float(x or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    totals = {
+        "daily": sum(_f(k.get("usage_daily")) for k in keys),
+        "weekly": sum(_f(k.get("usage_weekly")) for k in keys),
+        "monthly": sum(_f(k.get("usage_monthly")) for k in keys),
+        "all_time": sum(_f(k.get("usage")) for k in keys),
+        "byok_daily": sum(_f(k.get("byok_usage_daily")) for k in keys),
+        "byok_weekly": sum(_f(k.get("byok_usage_weekly")) for k in keys),
+        "byok_monthly": sum(_f(k.get("byok_usage_monthly")) for k in keys),
+        "byok_all_time": sum(_f(k.get("byok_usage")) for k in keys),
+    }
+
+    if args.json:
+        _dump_json({
+            "credits": credits,
+            "totals": totals,
+            "per_key": [
+                {
+                    "hash": k.get("hash"),
+                    "name": k.get("name") or k.get("label"),
+                    "disabled": k.get("disabled"),
+                    "usage": _f(k.get("usage")),
+                    "usage_daily": _f(k.get("usage_daily")),
+                    "usage_weekly": _f(k.get("usage_weekly")),
+                    "usage_monthly": _f(k.get("usage_monthly")),
+                    "byok_usage": _f(k.get("byok_usage")),
+                    "limit": k.get("limit"),
+                    "limit_remaining": k.get("limit_remaining"),
+                }
+                for k in keys
+            ],
+        })
+        return
+
+    # Text mode: account summary, then totals, then per-key.
+    if credits:
+        total_c = _f(credits.get("total_credits"))
+        total_u = _f(credits.get("total_usage"))
+        print("Account (all-time):")
+        print(f"  credits:   ${total_c:.4f}")
+        print(f"  used:      ${total_u:.4f}")
+        print(f"  remaining: ${total_c - total_u:.4f}")
+        print()
+
+    scope = f" for {args.key!r}" if args.key else f" across {len(keys)} key(s)"
+    print(f"Usage totals{scope}:")
+    print(f"  today:       ${totals['daily']:.4f}")
+    print(f"  this week:   ${totals['weekly']:.4f}")
+    print(f"  this month:  ${totals['monthly']:.4f}")
+    print(f"  all-time:    ${totals['all_time']:.4f}")
+    if totals["byok_all_time"] > 0:
+        print(f"  byok-all-time: ${totals['byok_all_time']:.4f}")
+
+    if args.by_key or not args.key:
+        print("\nPer-key (sorted by monthly usage, descending):")
+        print(f"  {'':1s} {'name':30s}  {'today':>10s}  {'week':>10s}  {'month':>10s}  {'all-time':>10s}")
+        for k in sorted(keys, key=lambda x: -_f(x.get("usage_monthly"))):
+            dis = "x" if k.get("disabled") else " "
+            name = (k.get("name") or k.get("label") or k.get("hash", "")[:16])[:30]
+            print(
+                f"  {dis} {name:30s}  "
+                f"${_f(k.get('usage_daily')):>9.4f}  "
+                f"${_f(k.get('usage_weekly')):>9.4f}  "
+                f"${_f(k.get('usage_monthly')):>9.4f}  "
+                f"${_f(k.get('usage')):>9.4f}"
+            )
+
+
+# ─── subcommands: integrations (BYOK) ─────────────────────────────────────────
+#
+# OpenRouter does NOT expose a public REST API for BYOK provider keys.
+# Management is web-UI-only at https://openrouter.ai/settings/integrations.
+# Verified against the public docs 2026-04-23:
+#   - https://openrouter.ai/docs/guides/overview/auth/byok
+#   - https://openrouter.ai/docs/features/provisioning-api-keys
+# The provisioning key grants access to /api/v1/keys user-key CRUD only, not
+# BYOK integrations. A prior version of this CLI shipped best-guess POST bodies
+# against /api/v1/keys/integrations; that endpoint 404s and always will.
+
+
+_BYOK_UI_URL = "https://openrouter.ai/settings/integrations"
+_BYOK_DOCS_URL = "https://openrouter.ai/docs/guides/overview/auth/byok"
+
+
+def cmd_integrations_unsupported(args: argparse.Namespace) -> None:
+    print(
+        "BYOK provider integrations are managed via the OpenRouter web UI — "
+        "no public REST API exists.\n"
+        f"  Manage keys: {_BYOK_UI_URL}\n"
+        f"  BYOK docs:   {_BYOK_DOCS_URL}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+# ─── subcommands: keys (management) ───────────────────────────────────────────
+
+
+def _print_key_row(k: dict) -> None:
+    name = k.get("name") or k.get("label") or "-"
+    limit = k.get("limit")
+    rem = k.get("limit_remaining")
+    usage = k.get("usage") or 0
+    disabled = "x" if k.get("disabled") else " "
+    lim_str = f"${float(limit):.2f}" if limit is not None else "-"
+    rem_str = f"${float(rem):.2f}" if rem is not None else "-"
+    print(
+        f"  [{disabled}]  {str(k.get('hash',''))[:16]:16s}  "
+        f"{name:30s}  usage:${float(usage):>8.4f}  limit:{lim_str:>8s}  rem:{rem_str:>8s}"
+    )
+
+
+def cmd_keys_list(args: argparse.Namespace) -> None:
+    token = _provisioning_key()
+    out: list[dict] = []
+    offset = 0
+    while True:
+        status, data = _http("GET", "/keys", token=token, query={"offset": offset})
+        if status >= 300 or not isinstance(data, dict):
+            raise SystemExit(f"GET /keys failed: HTTP {status}: {data!r}")
+        page = data.get("data") or []
+        out.extend(page)
+        if len(page) < 20 or not args.all:
+            break
+        offset += len(page)
+    if args.json:
+        _dump_json(out)
+        return
+    print(f"{len(out)} key(s):")
+    for k in sorted(out, key=lambda x: x.get("name") or x.get("label") or ""):
+        _print_key_row(k)
+
+
+def _resolve_key_hash(token: str, ident: str) -> str:
+    """Accept a hash prefix OR a name/label. Returns the full hash."""
+    status, data = _http("GET", "/keys", token=token)
+    if status >= 300 or not isinstance(data, dict):
+        raise SystemExit(f"GET /keys failed: HTTP {status}: {data!r}")
+    keys = data.get("data") or []
+    # Exact hash
+    for k in keys:
+        if k.get("hash") == ident:
+            return ident
+    # Hash prefix
+    prefix_hits = [k for k in keys if (k.get("hash") or "").startswith(ident)]
+    if len(prefix_hits) == 1:
+        return prefix_hits[0]["hash"]
+    # Name / label
+    name_hits = [k for k in keys if k.get("name") == ident or k.get("label") == ident]
+    if len(name_hits) == 1:
+        return name_hits[0]["hash"]
+    if prefix_hits or name_hits:
+        raise SystemExit(f"Ambiguous key {ident!r} — matches multiple. Use a full hash.")
+    raise SystemExit(f"No key matching {ident!r}")
+
+
+def cmd_keys_show(args: argparse.Namespace) -> None:
+    token = _provisioning_key()
+    h = _resolve_key_hash(token, args.key)
+    status, data = _http("GET", f"/keys/{h}", token=token)
+    if status >= 300:
+        raise SystemExit(f"GET /keys/{h} failed: HTTP {status}: {data!r}")
+    _dump_json(data)
+
+
+def cmd_keys_create(args: argparse.Namespace) -> None:
+    token = _provisioning_key()
+    body: dict[str, Any] = {"name": args.name}
+    if args.limit is not None:
+        body["limit"] = args.limit
+    if args.include_byok_in_limit:
+        body["include_byok_in_limit"] = True
+    if args.limit_reset:
+        body["limit_reset"] = args.limit_reset
+    status, data = _http("POST", "/keys/", token=token, body=body)
+    if status >= 300:
+        print(f"HTTP {status}: create failed", file=sys.stderr)
+        _dump_json(data)
+        sys.exit(1)
+    print(f"HTTP {status}: key created")
+    _dump_json(data)
+    print(
+        "\n⚠  The `key` field above is only shown ONCE — save it now.",
+        file=sys.stderr,
+    )
+
+
+def _patch_key(key: str, body: dict) -> None:
+    token = _provisioning_key()
+    h = _resolve_key_hash(token, key)
+    status, data = _http("PATCH", f"/keys/{h}", token=token, body=body)
+    if status >= 300:
+        print(f"HTTP {status}: PATCH failed", file=sys.stderr)
+        _dump_json(data)
+        sys.exit(1)
+    print(f"HTTP {status}: updated {h[:16]}…")
+    _dump_json(data)
+
+
+def cmd_keys_disable(args: argparse.Namespace) -> None:
+    _patch_key(args.key, {"disabled": True})
+
+
+def cmd_keys_enable(args: argparse.Namespace) -> None:
+    _patch_key(args.key, {"disabled": False})
+
+
+def cmd_keys_set_limit(args: argparse.Namespace) -> None:
+    body: dict[str, Any] = {"limit": args.amount}
+    if args.reset:
+        body["limit_reset"] = args.reset
+    _patch_key(args.key, body)
+
+
+def cmd_keys_rename(args: argparse.Namespace) -> None:
+    _patch_key(args.key, {"name": args.name})
+
+
+def cmd_keys_delete(args: argparse.Namespace) -> None:
+    token = _provisioning_key()
+    h = _resolve_key_hash(token, args.key)
+    if not args.yes:
+        resp = input(f"Delete key {h[:16]}…? [y/N] ")
+        if resp.strip().lower() != "y":
+            print("aborted")
+            return
+    status, data = _http("DELETE", f"/keys/{h}", token=token)
+    if status >= 300:
+        print(f"HTTP {status}: delete failed", file=sys.stderr)
+        _dump_json(data)
+        sys.exit(1)
+    print(f"HTTP {status}: deleted {h[:16]}…")
+
+
+# ─── argparse wiring ──────────────────────────────────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="openrouter-remote",
+        description="CLI for OpenRouter — balance, models, key management",
+    )
+    p.add_argument(
+        "--env-file",
+        action="append",
+        default=[],
+        help="Additional .env file(s) to load (highest precedence).",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # balance
+    sp = sub.add_parser("balance", help="Check credit balance and usage")
+    sp.add_argument("--json", action="store_true")
+    sp.add_argument(
+        "--alert-below",
+        type=float,
+        metavar="USD",
+        help="Exit 1 if remaining < this amount. For [SILENT] cron patterns.",
+    )
+    sp.set_defaults(func=cmd_balance)
+
+    # usage
+    sp = sub.add_parser(
+        "usage",
+        help="Aggregate usage stats across all keys (daily/weekly/monthly/all-time). "
+             "Needs OPENROUTER_PROVISIONING_KEY for per-key data.",
+    )
+    sp.add_argument("--key", help="Filter to one key (hash prefix or name)")
+    sp.add_argument("--by-key", action="store_true", help="Force per-key breakdown even for single key")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_usage)
+
+    # models
+    sp = sub.add_parser("models", help="Inspect OpenRouter's model catalogue")
+    m_sub = sp.add_subparsers(dest="models_cmd", required=True)
+
+    def _add_filter_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--free", action="store_true", help="Only :free (zero-priced) models")
+        p.add_argument("--provider", help='Filter by provider prefix (e.g. "anthropic", "openai")')
+        p.add_argument("--supports", help='Comma-separated capabilities: tools, vision, reasoning, json')
+        p.add_argument("--min-context", type=int, help="Minimum context_length (tokens)")
+        p.add_argument("--max-price-input", type=float, metavar="USD/M",
+                       help="Max prompt price in $/million tokens")
+        p.add_argument("--max-price-output", type=float, metavar="USD/M",
+                       help="Max completion price in $/million tokens")
+        p.add_argument("--search", help="Substring match against id / name / description")
+        p.add_argument(
+            "--sort",
+            choices=["name", "price-in", "price-out", "context"],
+            default="name",
+        )
+        p.add_argument("--limit", type=int, help="Show only the first N results")
+        p.add_argument("--json", action="store_true")
+
+    ml = m_sub.add_parser("list", help="List models with filters")
+    _add_filter_args(ml)
+    ml.set_defaults(func=cmd_models_list)
+
+    ms = m_sub.add_parser("show", help="Show full detail for one model (by id or suffix)")
+    ms.add_argument("id")
+    ms.add_argument("--json", action="store_true")
+    ms.set_defaults(func=cmd_models_show)
+
+    mc = m_sub.add_parser(
+        "cheap",
+        help="List cheapest models (sorted by input price; accepts same filters as list)",
+    )
+    _add_filter_args(mc)
+    mc.set_defaults(func=cmd_models_cheap)
+
+    me = m_sub.add_parser(
+        "endpoints",
+        help="Per-provider endpoints for a model — throughput, latency, uptime, quant, pricing",
+    )
+    me.add_argument("id", help="Model id (e.g. anthropic/claude-sonnet-4.5)")
+    me.add_argument(
+        "--sort",
+        choices=["throughput", "latency", "price-in", "price-out", "uptime", "context", "name"],
+        default="throughput",
+    )
+    me.add_argument("--limit", type=int)
+    me.add_argument("--all", action="store_true", help="Include disabled/degraded endpoints")
+    me.add_argument("--json", action="store_true")
+    me.set_defaults(func=cmd_models_endpoints)
+
+    # integrations (BYOK) — web-UI-only, no public REST API exists.
+    # Subcommand kept (with trailing args absorbed) so old invocations get a
+    # clear pointer instead of an argparse error.
+    sp = sub.add_parser(
+        "integrations",
+        help="BYOK provider keys are web-UI-only — prints the settings URL.",
+    )
+    sp.add_argument("args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    sp.set_defaults(func=cmd_integrations_unsupported)
+
+    # keys
+    sp = sub.add_parser("keys", help="Manage API keys (needs OPENROUTER_PROVISIONING_KEY)")
+    k_sub = sp.add_subparsers(dest="keys_cmd", required=True)
+
+    kl = k_sub.add_parser("list", help="List your API keys")
+    kl.add_argument("--all", action="store_true", help="Paginate through all keys (default: first page)")
+    kl.add_argument("--json", action="store_true")
+    kl.set_defaults(func=cmd_keys_list)
+
+    ks = k_sub.add_parser("show", help="Show one key (by hash prefix or name)")
+    ks.add_argument("key")
+    ks.set_defaults(func=cmd_keys_show)
+
+    kc = k_sub.add_parser("create", help="Create a new API key (key string shown once)")
+    kc.add_argument("--name", required=True)
+    kc.add_argument("--limit", type=float, help="Credit limit in USD")
+    kc.add_argument(
+        "--limit-reset",
+        choices=["daily", "weekly", "monthly"],
+        help="Auto-reset the limit on this cadence",
+    )
+    kc.add_argument("--include-byok-in-limit", action="store_true")
+    kc.set_defaults(func=cmd_keys_create)
+
+    kd = k_sub.add_parser("disable", help="Disable (but don't delete) a key")
+    kd.add_argument("key")
+    kd.set_defaults(func=cmd_keys_disable)
+
+    ke = k_sub.add_parser("enable", help="Re-enable a disabled key")
+    ke.add_argument("key")
+    ke.set_defaults(func=cmd_keys_enable)
+
+    ksl = k_sub.add_parser("set-limit", help="Change the credit limit on a key")
+    ksl.add_argument("key")
+    ksl.add_argument("amount", type=float, help="New limit in USD (pass 0 to remove)")
+    ksl.add_argument("--reset", choices=["daily", "weekly", "monthly"])
+    ksl.set_defaults(func=cmd_keys_set_limit)
+
+    kr = k_sub.add_parser("rename", help="Rename a key")
+    kr.add_argument("key")
+    kr.add_argument("name")
+    kr.set_defaults(func=cmd_keys_rename)
+
+    kx = k_sub.add_parser("delete", help="Delete a key permanently")
+    kx.add_argument("key")
+    kx.add_argument("-y", "--yes", action="store_true")
+    kx.set_defaults(func=cmd_keys_delete)
+
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    _autoload_env_files(args.env_file)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
