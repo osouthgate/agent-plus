@@ -295,18 +295,29 @@ def cmd_app_exec(client: CoolifyClient, args: argparse.Namespace) -> None:
     port = os.environ.get("COOLIFY_SSH_PORT", "22")
     key = os.environ.get("COOLIFY_SSH_KEY", "").strip()
 
-    # Compose the remote-side command. One round trip: find the container by
-    # name prefix (Coolify names running containers `<app-uuid>-<timestamp>`),
-    # then docker exec into it. Uses `--filter name=<uuid>` which does prefix
-    # matching by default — matches whichever timestamped deploy is live.
-    # Fails cleanly with exit 2 if no container is running for this app.
+    # Compose the remote-side command. Find the container by name prefix
+    # (Coolify names running containers `<app-uuid>-<timestamp>`), pick the
+    # newest if a blue/green rollout has more than one matching, then
+    # docker exec into it. Exits:
+    #   0 — exec ran (remote command's exit code is propagated by docker exec)
+    #   2 — no running container for this app
+    #   3 — more than one matching container; picked newest but warned
+    # The sort-by-CreatedAt + head is deterministic across Docker versions:
+    # `docker ps` shows newest first by default, but we sort explicitly so a
+    # future change to that default doesn't silently flip which container
+    # `app exec` targets.
     user_cmd = " ".join(shlex.quote(a) for a in args.command)
     docker_flags = "-i" + ("t" if args.tty else "")
     remote = (
-        f"CID=$(docker ps --filter name={shlex.quote(uuid)} "
-        f"--format '{{{{.ID}}}}' | head -n1); "
-        f'if [ -z "$CID" ]; then '
+        f"MATCHES=$(docker ps --filter name={shlex.quote(uuid)} "
+        f"--format '{{{{.CreatedAt}}}}\\t{{{{.ID}}}}' | sort -r); "
+        f'if [ -z "$MATCHES" ]; then '
         f'echo "coolify-remote: no running container found for app {uuid}" >&2; exit 2; '
+        f"fi; "
+        f'COUNT=$(echo "$MATCHES" | wc -l | tr -d " "); '
+        f'CID=$(echo "$MATCHES" | head -n1 | cut -f2); '
+        f'if [ "$COUNT" -gt 1 ]; then '
+        f'echo "coolify-remote: WARNING $COUNT containers match app {uuid}; running against newest ($CID)" >&2; '
         f"fi; "
         f"docker exec {docker_flags} \"$CID\" sh -c {shlex.quote(user_cmd)}"
     )
@@ -317,6 +328,12 @@ def cmd_app_exec(client: CoolifyClient, args: argparse.Namespace) -> None:
     ssh_cmd += ["-p", port]
     if key:
         ssh_cmd += ["-i", key]
+    # `accept-new` by default so first-contact doesn't hang a cron on the
+    # interactive fingerprint prompt. It still refuses on mismatch, so host
+    # key rotation is caught. Escape hatch: --ssh-strict (maps to default
+    # StrictHostKeyChecking=ask, for when you want to be paranoid).
+    if not args.ssh_strict:
+        ssh_cmd += ["-o", "StrictHostKeyChecking=accept-new"]
     # Silence the "Warning: Permanently added ... to known hosts" noise for
     # cron-style use; user can override with --verbose.
     if not args.verbose:
@@ -587,6 +604,12 @@ def build_parser() -> argparse.ArgumentParser:
     ax.add_argument("app", help="App name or UUID")
     ax.add_argument("-t", "--tty", action="store_true", help="Allocate a TTY (for interactive tools)")
     ax.add_argument("-v", "--verbose", action="store_true", help="Print the ssh command before running")
+    ax.add_argument(
+        "--ssh-strict",
+        action="store_true",
+        help="Use ssh's default StrictHostKeyChecking behaviour (interactive prompt on first contact). "
+             "Default is accept-new, which is cron-safe but trusts the host on first connection.",
+    )
     ax.add_argument(
         "command",
         nargs=argparse.REMAINDER,
