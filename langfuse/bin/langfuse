@@ -1,0 +1,836 @@
+#!/usr/bin/env python3
+"""
+langfuse — remote CLI for Langfuse instances (cloud or self-hosted).
+
+Subcommands:
+  export-prompts <file>      Dump all prompts + all versions from an instance to JSON
+  import-prompts <file>      Upload a JSON dump to an instance (preserves versions/labels/tags)
+  migrate-prompts            Export from --from instance and import to --to instance in one shot
+  trace-ping [--name N]      Send a smoke-test trace; prints the trace URL
+  health [--all]             GET /api/public/health on the active (or all) instance(s)
+  list-instances             Show configured instances
+  show-instance [NAME]       Show the resolved config for one instance
+  get-traces <id> ...        Fetch traces by ID (JSON to stdout)
+  get-observations <id> ...  Fetch observations by ID
+  get-sessions <id> ...      Fetch sessions by ID (includes inline traces[])
+  get-users <id> ...         Per-user aggregate metrics (uses /metrics/daily)
+  list-user-traces <uid>     List recent traces for a user (--limit, --from/to-timestamp)
+  list-user-sessions <uid>   List recent sessions for a user
+  monitor-user <uid>         One-shot user summary: metrics + sessions + latest trace + ERRORs
+
+Configuration (per-instance):
+  LANGFUSE_BASE_URL      (default active instance)
+  LANGFUSE_PUBLIC_KEY
+  LANGFUSE_SECRET_KEY
+
+Named instances via env prefix — pick with `--instance <name>` or `--from/--to`:
+  LANGFUSE_<NAME>_BASE_URL
+  LANGFUSE_<NAME>_PUBLIC_KEY
+  LANGFUSE_<NAME>_SECRET_KEY
+Example:
+  export LANGFUSE_CLOUD_BASE_URL=https://cloud.langfuse.com
+  export LANGFUSE_CLOUD_PUBLIC_KEY=pk-lf-...
+  export LANGFUSE_CLOUD_SECRET_KEY=sk-lf-...
+  langfuse --instance cloud trace-ping
+
+Or a JSON config file at $LANGFUSE_CONFIG (default ~/.config/langfuse/instances.json):
+  {
+    "default": "prod",
+    "instances": {
+      "prod":      {"base_url": "...", "public_key": "pk-lf-...", "secret_key": "sk-lf-..."},
+      "dev-ollie": {...}
+    }
+  }
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+from pathlib import Path
+
+
+# ──────────────────────────── .env autoloading ────────────────────────────
+
+# Load .env files before any other config resolution so a LANGFUSE_* key present
+# in a project's .env shows up as if it were in the shell. Shell env wins on
+# conflict — we never overwrite an explicitly-exported variable.
+
+_ENV_FILENAMES = (".env.local", ".env")
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v = v[1:-1]
+        if k:
+            out[k] = v
+    return out
+
+
+def _autoload_env_files(extra: list[str] | None = None) -> list[Path]:
+    """Walk cwd upward looking for .env files; add any LANGFUSE_* keys to os.environ
+    unless they're already set. Returns the list of files loaded."""
+    loaded: list[Path] = []
+    seen: set[Path] = set()
+
+    def _load(p: Path) -> None:
+        if p in seen or not p.is_file():
+            return
+        seen.add(p)
+        vals = _parse_env_file(p)
+        any_taken = False
+        for k, v in vals.items():
+            if not k.startswith("LANGFUSE_"):
+                continue
+            if k not in os.environ:
+                os.environ[k] = v
+                any_taken = True
+        if any_taken:
+            loaded.append(p)
+
+    # Explicit --env-file overrides first (highest precedence after real env).
+    for f in extra or []:
+        _load(Path(f).expanduser().resolve())
+
+    # Walk up from cwd to root, picking the first .env / .env.local we find at each level.
+    cwd = Path.cwd().resolve()
+    for parent in (cwd, *cwd.parents):
+        for name in _ENV_FILENAMES:
+            _load(parent / name)
+        # Stop climbing past the first dir that actually had a langfuse key.
+        if loaded:
+            break
+
+    return loaded
+
+
+# ──────────────────────────── config resolution ────────────────────────────
+
+DEFAULT_CONFIG = Path(os.environ.get("LANGFUSE_CONFIG", str(Path.home() / ".config" / "langfuse" / "instances.json")))
+
+
+def _load_config_file() -> dict:
+    if DEFAULT_CONFIG.exists():
+        try:
+            return json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+        except Exception as e:
+            die(f"failed to read {DEFAULT_CONFIG}: {e}")
+    return {}
+
+
+def list_instances() -> dict:
+    """Return a dict {name: {base_url, public_key, secret_key}} from env + config file."""
+    out: dict[str, dict] = {}
+
+    cfg = _load_config_file()
+    for name, v in (cfg.get("instances") or {}).items():
+        out[name] = {
+            "base_url": v.get("base_url") or v.get("base"),
+            "public_key": v.get("public_key") or v.get("pk"),
+            "secret_key": v.get("secret_key") or v.get("sk"),
+            "_source": f"config:{DEFAULT_CONFIG}",
+        }
+
+    # env-prefixed instances
+    prefixes: dict[str, dict] = {}
+    for key, val in os.environ.items():
+        if not key.startswith("LANGFUSE_"):
+            continue
+        rest = key[len("LANGFUSE_") :]
+        for suffix in ("_BASE_URL", "_PUBLIC_KEY", "_SECRET_KEY"):
+            if rest.endswith(suffix) and rest != suffix[1:]:
+                name = rest[: -len(suffix)].lower().replace("_", "-")
+                prefixes.setdefault(name, {})[suffix.strip("_").lower()] = val
+    for name, v in prefixes.items():
+        merged = out.get(name, {})
+        merged.update(
+            {
+                "base_url": v.get("base_url") or merged.get("base_url"),
+                "public_key": v.get("public_key") or merged.get("public_key"),
+                "secret_key": v.get("secret_key") or merged.get("secret_key"),
+                "_source": merged.get("_source", "env"),
+            }
+        )
+        out[name] = merged
+
+    # Default unnamed instance (LANGFUSE_BASE_URL / _PUBLIC_KEY / _SECRET_KEY)
+    base = os.environ.get("LANGFUSE_BASE_URL")
+    pk = os.environ.get("LANGFUSE_PUBLIC_KEY")
+    sk = os.environ.get("LANGFUSE_SECRET_KEY")
+    if base and pk and sk:
+        out.setdefault(
+            "default",
+            {"base_url": base, "public_key": pk, "secret_key": sk, "_source": "env"},
+        )
+
+    return out
+
+
+def default_instance_name(instances: dict) -> str | None:
+    cfg = _load_config_file()
+    if cfg.get("default") and cfg["default"] in instances:
+        return cfg["default"]
+    if "default" in instances:
+        return "default"
+    if len(instances) == 1:
+        return next(iter(instances))
+    return None
+
+
+def resolve(name: str | None) -> dict:
+    instances = list_instances()
+    if not instances:
+        die("no Langfuse instances configured. Set LANGFUSE_BASE_URL/_PUBLIC_KEY/_SECRET_KEY or create ~/.config/langfuse/instances.json")
+    if name is None:
+        name = default_instance_name(instances)
+        if name is None:
+            die(
+                "multiple instances configured, none marked default. Pass --instance <name>. Known: "
+                + ", ".join(sorted(instances))
+            )
+    if name not in instances:
+        die(f"unknown instance {name!r}. Known: {', '.join(sorted(instances))}")
+    inst = instances[name]
+    missing = [k for k in ("base_url", "public_key", "secret_key") if not inst.get(k)]
+    if missing:
+        die(f"instance {name!r} missing fields: {', '.join(missing)}")
+    inst = dict(inst)
+    inst["name"] = name
+    return inst
+
+
+# ──────────────────────────── http helpers ────────────────────────────
+
+def _auth_header(inst: dict) -> str:
+    token = base64.b64encode(f"{inst['public_key']}:{inst['secret_key']}".encode()).decode()
+    return f"Basic {token}"
+
+
+def _request(inst: dict, method: str, path: str, *, query: dict | None = None, body: dict | None = None, timeout: float = 60.0) -> tuple[int, bytes, dict]:
+    url = inst["base_url"].rstrip("/") + path
+    if query:
+        from urllib.parse import urlencode
+        url += ("&" if "?" in url else "?") + urlencode(query)
+    data = None
+    headers = {
+        "Authorization": _auth_header(inst),
+        "Accept": "application/json",
+        "User-Agent": "langfuse-remote/0.1",
+    }
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    ctx = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            return resp.status, resp.read(), dict(resp.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), dict(e.headers or {})
+
+
+def api_get(inst: dict, path: str, query: dict | None = None) -> dict:
+    code, body, _ = _request(inst, "GET", path, query=query)
+    if code >= 400:
+        raise RuntimeError(f"GET {path} -> {code}: {body[:300].decode('utf-8', 'replace')}")
+    return json.loads(body or b"{}")
+
+
+def api_get_optional(inst: dict, path: str, query: dict | None = None) -> tuple[int, dict | str]:
+    """Like api_get but returns (status, parsed-or-raw). Caller decides on 404 vs hard-fail.
+
+    Used by the read-only debug commands so a single missing ID doesn't poison a batch.
+    """
+    code, body, _ = _request(inst, "GET", path, query=query)
+    text = body.decode("utf-8", "replace") if body else ""
+    if code == 200:
+        try:
+            return code, json.loads(body or b"{}")
+        except Exception:
+            return code, text
+    return code, text
+
+
+def api_post(inst: dict, path: str, payload: dict) -> tuple[int, dict | str]:
+    code, body, _ = _request(inst, "POST", path, body=payload)
+    try:
+        return code, json.loads(body or b"{}")
+    except Exception:
+        return code, body.decode("utf-8", "replace")
+
+
+# ──────────────────────────── prompts ────────────────────────────
+
+def list_prompt_names(inst: dict) -> list[str]:
+    names: list[str] = []
+    page = 1
+    while True:
+        body = api_get(inst, "/api/public/v2/prompts", {"page": page, "limit": 100})
+        for p in body.get("data", []):
+            names.append(p["name"])
+        meta = body.get("meta", {})
+        if page >= meta.get("totalPages", 1):
+            break
+        page += 1
+    return names
+
+
+def fetch_prompt_versions(inst: dict, name: str) -> list[dict]:
+    """Fetch latest to discover max version, then each version in turn."""
+    latest = api_get(inst, f"/api/public/v2/prompts/{name}")
+    versions = {latest["version"]: latest}
+    for v in range(1, latest["version"] + 1):
+        if v in versions:
+            continue
+        try:
+            versions[v] = api_get(inst, f"/api/public/v2/prompts/{name}", {"version": v})
+        except RuntimeError as e:
+            if "404" in str(e):
+                continue
+            raise
+    return [versions[v] for v in sorted(versions)]
+
+
+def cmd_export_prompts(args: argparse.Namespace) -> int:
+    inst = resolve(args.instance)
+    eprint(f"Exporting from {inst['name']} ({inst['base_url']})")
+    names = list_prompt_names(inst)
+    eprint(f"Found {len(names)} prompt names")
+    out: dict[str, list[dict]] = {}
+    for i, name in enumerate(names, 1):
+        versions = fetch_prompt_versions(inst, name)
+        out[name] = versions
+        eprint(f"  [{i}/{len(names)}] {name}: {len(versions)} versions")
+    Path(args.file).write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+    total = sum(len(v) for v in out.values())
+    print(f"wrote {args.file} — {len(out)} prompts, {total} versions")
+    return 0
+
+
+def cmd_import_prompts(args: argparse.Namespace) -> int:
+    inst = resolve(args.instance)
+    data = json.loads(Path(args.file).read_text(encoding="utf-8"))
+    total = sum(len(v) for v in data.values())
+    eprint(f"Importing {total} versions across {len(data)} prompts to {inst['name']} ({inst['base_url']})")
+    i = 0
+    failures = 0
+    for name, versions in data.items():
+        for v in versions:
+            i += 1
+            payload = {
+                "name": v["name"],
+                "type": v.get("type", "text"),
+                "prompt": v["prompt"],
+                "labels": [l for l in (v.get("labels") or []) if l != "latest"],
+                "tags": v.get("tags") or [],
+                "config": v.get("config") or {},
+                "commitMessage": v.get("commitMessage") or f"imported (orig v{v['version']})",
+            }
+            code, resp = api_post(inst, "/api/public/v2/prompts", payload)
+            if code >= 400:
+                failures += 1
+                snippet = (resp if isinstance(resp, str) else json.dumps(resp))[:200]
+                eprint(f"  [{i}/{total}] FAIL {name} v{v['version']}: {code} {snippet}")
+                continue
+            new_v = resp.get("version") if isinstance(resp, dict) else "?"
+            eprint(f"  [{i}/{total}] {name} orig v{v['version']} -> new v{new_v}")
+            time.sleep(0.05)
+    print(f"done — {total - failures}/{total} uploaded" + (f" ({failures} failed)" if failures else ""))
+    return 0 if failures == 0 else 2
+
+
+def cmd_migrate_prompts(args: argparse.Namespace) -> int:
+    src = resolve(args.source)
+    dst = resolve(args.target)
+    if src["base_url"] == dst["base_url"] and src["public_key"] == dst["public_key"]:
+        die("source and target resolve to the same instance")
+    tmp = Path(args.file or (Path.cwd() / f"langfuse-prompts-{int(time.time())}.json"))
+    args.instance = args.source
+    args.file = str(tmp)
+    cmd_export_prompts(args)
+    args.instance = args.target
+    rc = cmd_import_prompts(args)
+    if args.keep:
+        eprint(f"kept dump at {tmp}")
+    else:
+        tmp.unlink(missing_ok=True)
+    return rc
+
+
+# ──────────────────────────── trace ping ────────────────────────────
+
+def cmd_trace_ping(args: argparse.Namespace) -> int:
+    inst = resolve(args.instance)
+    trace_id = uuid.uuid4().hex
+    gen_id = uuid.uuid4().hex
+    now = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    # Use public ingestion API (supports batched events)
+    batch = [
+        {
+            "id": uuid.uuid4().hex,
+            "type": "trace-create",
+            "timestamp": now,
+            "body": {
+                "id": trace_id,
+                "name": args.name,
+                "userId": args.user,
+                "tags": ["smoke-test"],
+                "metadata": {"source": "langfuse plugin trace-ping"},
+                "input": "ping",
+                "output": "pong",
+            },
+        },
+        {
+            "id": uuid.uuid4().hex,
+            "type": "generation-create",
+            "timestamp": now,
+            "body": {
+                "id": gen_id,
+                "traceId": trace_id,
+                "name": "ping-generation",
+                "model": "claude-opus-4-7",
+                "input": [{"role": "user", "content": "ping"}],
+                "output": {"role": "assistant", "content": "pong"},
+                "startTime": now,
+                "endTime": now,
+                "usage": {"input": 1, "output": 1, "total": 2, "unit": "TOKENS"},
+            },
+        },
+    ]
+    code, resp = api_post(inst, "/api/public/ingestion", {"batch": batch})
+    url = f"{inst['base_url'].rstrip('/')}/trace/{trace_id}"
+    if code >= 400:
+        print(f"ingestion failed ({code}): {resp}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps({"trace_id": trace_id, "url": url, "response": resp}, indent=2))
+    else:
+        print(f"trace sent to {inst['name']}")
+        print(f"  id:  {trace_id}")
+        print(f"  url: {url}")
+    return 0
+
+
+# ──────────────────────────── health ────────────────────────────
+
+def _check_health(inst: dict) -> tuple[bool, str]:
+    try:
+        code, body, _ = _request(inst, "GET", "/api/public/health", timeout=10)
+        if code == 200:
+            return True, body.decode("utf-8", "replace").strip() or "ok"
+        return False, f"HTTP {code}: {body[:200].decode('utf-8', 'replace')}"
+    except Exception as e:
+        return False, f"error: {e}"
+
+
+def cmd_health(args: argparse.Namespace) -> int:
+    if args.all:
+        instances = list_instances()
+        worst = 0
+        for name in sorted(instances):
+            inst = dict(instances[name])
+            inst["name"] = name
+            ok, msg = _check_health(inst)
+            flag = "OK " if ok else "BAD"
+            print(f"{flag}  {name:20}  {inst['base_url']}  {msg[:120]}")
+            if not ok:
+                worst = 2
+        return worst
+    inst = resolve(args.instance)
+    ok, msg = _check_health(inst)
+    print(f"{'OK' if ok else 'BAD'}  {inst['name']}  {inst['base_url']}  {msg}")
+    return 0 if ok else 2
+
+
+# ──────────────────────────── instance introspection ────────────────────────────
+
+def _redact(s: str | None) -> str:
+    if not s:
+        return "<missing>"
+    return s[:6] + "…" + s[-4:] if len(s) > 12 else "***"
+
+
+def cmd_list_instances(args: argparse.Namespace) -> int:
+    instances = list_instances()
+    if not instances:
+        print("no instances configured")
+        return 0
+    default = default_instance_name(instances)
+    for name in sorted(instances):
+        inst = instances[name]
+        marker = " *" if name == default else "  "
+        print(
+            f"{marker} {name:20} {inst.get('base_url', '<no url>'):50} "
+            f"pk={_redact(inst.get('public_key'))} sk={_redact(inst.get('secret_key'))} "
+            f"[{inst.get('_source', '?')}]"
+        )
+    if default:
+        print(f"\n* = default (pick with --instance <name>)")
+    return 0
+
+
+def cmd_show_instance(args: argparse.Namespace) -> int:
+    inst = resolve(args.instance)
+    print(json.dumps({
+        "name": inst["name"],
+        "base_url": inst["base_url"],
+        "public_key": _redact(inst["public_key"]),
+        "secret_key": _redact(inst["secret_key"]),
+    }, indent=2))
+    return 0
+
+
+# ──────────────────────────── debug / read-only inspection ────────────────────────────
+#
+# Read-only commands for inspecting a specific user's recent activity on a
+# Langfuse instance — designed so an AI agent can pipe stdout to `jq` or parse
+# directly. All JSON-on-stdout. 404 on a single ID becomes
+# {"id": "...", "error": "not_found"} rather than a hard failure. Auth /
+# connectivity errors still hard-fail.
+#
+# Endpoint notes (verified against Langfuse 3.x public REST API):
+#   GET /api/public/traces/{id}              — full trace incl. inline observations
+#   GET /api/public/observations/{id}        — single observation
+#   GET /api/public/sessions/{id}            — session incl. inline traces[]
+#   GET /api/public/traces?userId=&limit=    — user traces (list)
+#   GET /api/public/sessions?userId=&limit=  — user sessions (list)
+#   GET /api/public/metrics/daily?userId=    — per-user aggregate metrics
+#                                              (there is NO /api/public/users/{id};
+#                                              that path 404s with an HTML body).
+
+
+def _emit_json(args: argparse.Namespace, obj: dict) -> None:
+    indent = 2 if getattr(args, "pretty", False) else None
+    print(json.dumps(obj, indent=indent, ensure_ascii=False))
+
+
+def _fetch_by_id(inst: dict, label: str, path_template: str, ids: list[str]) -> list[dict]:
+    """Fetch each id via path_template.format(id=...). 404 -> {id, error: not_found}.
+    Any other error bubbles up (hard fail on auth / connectivity)."""
+    out: list[dict] = []
+    for i in ids:
+        code, resp = api_get_optional(inst, path_template.format(id=i))
+        if code == 200 and isinstance(resp, dict):
+            out.append(resp)
+        elif code == 404:
+            out.append({"id": i, "error": "not_found"})
+        else:
+            snippet = resp if isinstance(resp, str) else json.dumps(resp)
+            raise RuntimeError(f"GET {label} {i} -> {code}: {snippet[:200]}")
+    return out
+
+
+def cmd_get_traces(args: argparse.Namespace) -> int:
+    inst = resolve(args.instance)
+    traces = _fetch_by_id(inst, "trace", "/api/public/traces/{id}", args.ids)
+    _emit_json(args, {"traces": traces})
+    return 0
+
+
+def cmd_get_observations(args: argparse.Namespace) -> int:
+    inst = resolve(args.instance)
+    obs = _fetch_by_id(inst, "observation", "/api/public/observations/{id}", args.ids)
+    _emit_json(args, {"observations": obs})
+    return 0
+
+
+def cmd_get_sessions(args: argparse.Namespace) -> int:
+    inst = resolve(args.instance)
+    sessions = _fetch_by_id(inst, "session", "/api/public/sessions/{id}", args.ids)
+    _emit_json(args, {"sessions": sessions})
+    return 0
+
+
+def cmd_get_users(args: argparse.Namespace) -> int:
+    """No dedicated /api/public/users/{id} endpoint exists — use metrics/daily filtered by userId.
+
+    Returns aggregate counts (traces, observations, cost, usage) per day. If the
+    user has no activity the data array will be empty, which we surface as
+    {id, error: "not_found"} for agent consistency with the other get-* commands.
+    """
+    inst = resolve(args.instance)
+    users: list[dict] = []
+    for uid in args.ids:
+        code, resp = api_get_optional(inst, "/api/public/metrics/daily", {"userId": uid})
+        if code == 200 and isinstance(resp, dict):
+            data = resp.get("data") or []
+            if not data:
+                users.append({"id": uid, "error": "not_found"})
+                continue
+            totals = {
+                "countTraces": sum(d.get("countTraces") or 0 for d in data),
+                "countObservations": sum(d.get("countObservations") or 0 for d in data),
+                "totalCost": sum(d.get("totalCost") or 0 for d in data),
+            }
+            users.append({"id": uid, "totals": totals, "daily": data, "meta": resp.get("meta")})
+        else:
+            snippet = resp if isinstance(resp, str) else json.dumps(resp)
+            raise RuntimeError(f"GET metrics/daily userId={uid} -> {code}: {snippet[:200]}")
+    _emit_json(args, {"users": users})
+    return 0
+
+
+def _trim_trace_summary(t: dict) -> dict:
+    """Agent-friendly subset of the fields Langfuse returns on a trace list row."""
+    keep = ("id", "name", "timestamp", "environment", "sessionId", "tags", "latency", "totalCost", "userId", "release")
+    return {k: t.get(k) for k in keep if k in t}
+
+
+def _list_user_traces(inst: dict, user_id: str, limit: int, from_ts: str | None = None, to_ts: str | None = None) -> dict:
+    q: dict = {"userId": user_id, "limit": limit}
+    if from_ts:
+        q["fromTimestamp"] = from_ts
+    if to_ts:
+        q["toTimestamp"] = to_ts
+    body = api_get(inst, "/api/public/traces", q)
+    return body
+
+
+def cmd_list_user_traces(args: argparse.Namespace) -> int:
+    inst = resolve(args.instance)
+    body = _list_user_traces(inst, args.user_id, args.limit, args.from_timestamp, args.to_timestamp)
+    traces = [_trim_trace_summary(t) for t in (body.get("data") or [])]
+    _emit_json(args, {"userId": args.user_id, "traces": traces, "meta": body.get("meta")})
+    return 0
+
+
+def cmd_list_user_sessions(args: argparse.Namespace) -> int:
+    """Uses /api/public/sessions?userId= which Langfuse supports directly.
+
+    Session rows from the list endpoint are minimal: {id, createdAt, projectId,
+    environment}. No trace count / totals in the list response — those require
+    a per-session GET (see monitor-user).
+    """
+    inst = resolve(args.instance)
+    body = api_get(inst, "/api/public/sessions", {"userId": args.user_id, "limit": args.limit})
+    _emit_json(args, {"userId": args.user_id, "sessions": body.get("data") or [], "meta": body.get("meta")})
+    return 0
+
+
+def cmd_monitor_user(args: argparse.Namespace) -> int:
+    """Compound debug command — single JSON blob structured for fast agent parsing.
+
+    Pulls: user daily-metrics summary, last N sessions (via sessions?userId=),
+    and for each session the latest trace + observation count + total latency +
+    any ERROR-level observations extracted from the trace's inline observations.
+    """
+    inst = resolve(args.instance)
+    uid = args.user_id
+    limit = args.limit
+
+    # 1. user summary (daily metrics)
+    user_summary: dict
+    code, resp = api_get_optional(inst, "/api/public/metrics/daily", {"userId": uid})
+    if code == 200 and isinstance(resp, dict):
+        data = resp.get("data") or []
+        user_summary = {
+            "id": uid,
+            "totals": {
+                "countTraces": sum(d.get("countTraces") or 0 for d in data),
+                "countObservations": sum(d.get("countObservations") or 0 for d in data),
+                "totalCost": sum(d.get("totalCost") or 0 for d in data),
+            },
+            "daily": data,
+        }
+    else:
+        snippet = resp if isinstance(resp, str) else json.dumps(resp)
+        raise RuntimeError(f"GET metrics/daily userId={uid} -> {code}: {snippet[:200]}")
+
+    # 2. sessions
+    sess_body = api_get(inst, "/api/public/sessions", {"userId": uid, "limit": limit})
+    session_rows = sess_body.get("data") or []
+
+    enriched_sessions: list[dict] = []
+    for s in session_rows:
+        sid = s.get("id")
+        entry: dict = {
+            "id": sid,
+            "createdAt": s.get("createdAt"),
+            "environment": s.get("environment"),
+            "traceCount": 0,
+            "latestTrace": None,
+            "errors": [],
+        }
+        if not sid:
+            enriched_sessions.append(entry)
+            continue
+
+        # Fetch session detail — includes inline traces[]
+        code, sresp = api_get_optional(inst, f"/api/public/sessions/{sid}")
+        if code != 200 or not isinstance(sresp, dict):
+            entry["error"] = f"session_fetch_failed_{code}"
+            enriched_sessions.append(entry)
+            continue
+
+        traces = sresp.get("traces") or []
+        entry["traceCount"] = len(traces)
+
+        if traces:
+            # Latest by timestamp
+            latest = max(traces, key=lambda t: t.get("timestamp") or "")
+            tid = latest.get("id")
+            # Full trace to get inline observations
+            code2, tresp = api_get_optional(inst, f"/api/public/traces/{tid}")
+            if code2 == 200 and isinstance(tresp, dict):
+                obs = tresp.get("observations") or []
+                total_latency = 0.0
+                errors: list[dict] = []
+                for o in obs:
+                    lat = o.get("latency")
+                    if isinstance(lat, (int, float)):
+                        total_latency += lat
+                    if (o.get("level") or "").upper() == "ERROR":
+                        errors.append({
+                            "id": o.get("id"),
+                            "name": o.get("name"),
+                            "statusMessage": o.get("statusMessage"),
+                            "startTime": o.get("startTime"),
+                        })
+                entry["latestTrace"] = {
+                    **_trim_trace_summary(tresp),
+                    "observationCount": len(obs),
+                    "totalObservationLatency": total_latency,
+                }
+                entry["errors"] = errors
+            else:
+                entry["latestTrace"] = _trim_trace_summary(latest)
+
+        enriched_sessions.append(entry)
+
+    _emit_json(args, {"user": user_summary, "sessions": enriched_sessions})
+    return 0
+
+
+# ──────────────────────────── plumbing ────────────────────────────
+
+def eprint(*a, **kw):
+    print(*a, **kw, file=sys.stderr)
+
+
+def die(msg: str, code: int = 1):
+    eprint(f"langfuse: {msg}")
+    sys.exit(code)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="langfuse", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--instance", "-i", help="Named instance (see `langfuse list-instances`). Default: config default or single configured.")
+    p.add_argument("--env-file", action="append", default=[], help="Additional .env file to load before config resolution (repeatable). Auto-discovery still runs.")
+    p.add_argument("--no-autoload", action="store_true", help="Disable .env auto-discovery from cwd upward.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("export-prompts", help="Dump all prompts + versions to JSON")
+    sp.add_argument("file", help="Output JSON path")
+    sp.set_defaults(func=cmd_export_prompts)
+
+    sp = sub.add_parser("import-prompts", help="Upload a JSON dump to an instance")
+    sp.add_argument("file", help="Input JSON path")
+    sp.set_defaults(func=cmd_import_prompts)
+
+    sp = sub.add_parser("migrate-prompts", help="Export from --from then import to --to in one shot")
+    sp.add_argument("--from", dest="source", required=True, help="source instance name")
+    sp.add_argument("--to", dest="target", required=True, help="target instance name")
+    sp.add_argument("--file", help="dump file path (default: temp file in cwd)")
+    sp.add_argument("--keep", action="store_true", help="keep the dump file after import")
+    sp.set_defaults(func=cmd_migrate_prompts)
+
+    sp = sub.add_parser("trace-ping", help="Send a smoke-test trace and print its URL")
+    sp.add_argument("--name", default="smoke-test", help="trace name")
+    sp.add_argument("--user", default="langfuse-plugin", help="userId on the trace")
+    sp.add_argument("--json", action="store_true", help="print JSON instead of human text")
+    sp.set_defaults(func=cmd_trace_ping)
+
+    sp = sub.add_parser("health", help="Hit /api/public/health on an instance")
+    sp.add_argument("--all", action="store_true", help="check every configured instance")
+    sp.set_defaults(func=cmd_health)
+
+    sp = sub.add_parser("list-instances", help="List configured instances")
+    sp.set_defaults(func=cmd_list_instances)
+
+    sp = sub.add_parser("show-instance", help="Show resolved config for one instance")
+    sp.set_defaults(func=cmd_show_instance)
+
+    # ── read-only debug / inspection ──────────────────────────────────────
+    sp = sub.add_parser("get-traces", help="Fetch one or more traces by ID (JSON to stdout)")
+    sp.add_argument("ids", nargs="+", help="Trace ID(s)")
+    sp.add_argument("--pretty", action="store_true", help="Indent JSON output")
+    sp.set_defaults(func=cmd_get_traces)
+
+    sp = sub.add_parser("get-observations", help="Fetch one or more observations by ID")
+    sp.add_argument("ids", nargs="+", help="Observation ID(s)")
+    sp.add_argument("--pretty", action="store_true")
+    sp.set_defaults(func=cmd_get_observations)
+
+    sp = sub.add_parser("get-sessions", help="Fetch one or more sessions by ID (includes inline traces[])")
+    sp.add_argument("ids", nargs="+", help="Session ID(s)")
+    sp.add_argument("--pretty", action="store_true")
+    sp.set_defaults(func=cmd_get_sessions)
+
+    sp = sub.add_parser("get-users", help="Fetch per-user aggregate metrics (trace/observation counts, cost)")
+    sp.add_argument("ids", nargs="+", help="User ID(s)")
+    sp.add_argument("--pretty", action="store_true")
+    sp.set_defaults(func=cmd_get_users)
+
+    sp = sub.add_parser("list-user-traces", help="List recent traces for a user")
+    sp.add_argument("user_id", help="Langfuse userId")
+    sp.add_argument("--limit", type=int, default=20, help="Max traces (default 20)")
+    sp.add_argument("--from-timestamp", dest="from_timestamp", help="ISO8601 lower bound")
+    sp.add_argument("--to-timestamp", dest="to_timestamp", help="ISO8601 upper bound")
+    sp.add_argument("--pretty", action="store_true")
+    sp.set_defaults(func=cmd_list_user_traces)
+
+    sp = sub.add_parser("list-user-sessions", help="List recent sessions for a user")
+    sp.add_argument("user_id", help="Langfuse userId")
+    sp.add_argument("--limit", type=int, default=20, help="Max sessions (default 20)")
+    sp.add_argument("--pretty", action="store_true")
+    sp.set_defaults(func=cmd_list_user_sessions)
+
+    sp = sub.add_parser("monitor-user", help="Compound read-only summary for a user: metrics + last N sessions + latest trace + ERROR observations")
+    sp.add_argument("user_id", help="Langfuse userId")
+    sp.add_argument("--limit", type=int, default=5, help="Sessions to include (default 5)")
+    sp.add_argument("--pretty", action="store_true")
+    sp.set_defaults(func=cmd_monitor_user)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if not args.no_autoload:
+        loaded = _autoload_env_files(args.env_file)
+        if loaded and os.environ.get("LANGFUSE_DEBUG"):
+            eprint(f"loaded env from: {', '.join(str(p) for p in loaded)}")
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        return 130
+    except RuntimeError as e:
+        die(str(e), 2)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -7,6 +7,7 @@ A collection of [Claude Code](https://claude.com/claude-code) plugins I use day-
 | Plugin | What it does |
 | :--- | :--- |
 | [`hermes-remote`](./hermes-remote) | CLI for managing a remote [Hermes Agent](https://github.com/NousResearch/hermes-agent) deployment — cron jobs, env, status, model. |
+| [`langfuse`](./langfuse) | CLI for managing [Langfuse](https://langfuse.com) instances (cloud or self-hosted) — export/import prompts for backup and cross-env migration, smoke-test trace ingestion, health checks across multiple named instances. |
 
 More coming as I skillify workflows I keep repeating.
 
