@@ -1,0 +1,744 @@
+#!/usr/bin/env python3
+"""supabase-remote — CLI for day-to-day Supabase project ops.
+
+Wraps the Supabase Management API (projects listing) and the local `supabase`
+CLI (SQL execution, type generation) to give a consistent agent-friendly
+interface: resolve projects by name, strip the "untrusted data" envelope that
+`supabase db query` emits in agent mode, audit RLS, and regenerate types.
+
+Scope is intentionally generic — anything project-specific (e.g. Rainshift's
+Rayna member/comms helpers) lives in that project's own ops/ directory and
+shells out to `sql-inline` here for the heavy lifting.
+
+Configuration (highest precedence first):
+  1. --env-file <path>
+  2. $CWD/rayna-setup/.env.local   (if it exists — rainshift convenience)
+  3. $CWD/.env.local, $CWD/.env    (walked up from cwd)
+  4. ~/.agent-plus/.env
+  5. Shell environment              (including Claude Code settings)
+
+Project .env files WIN over the shell.
+
+Env vars read:
+  SUPABASE_ACCESS_TOKEN   Personal access token from
+                          https://supabase.com/dashboard/account/tokens
+                          Required for `projects *` and anything hitting the
+                          Management API.
+
+  SUPABASE_DB_URL         Optional direct Postgres connection string for
+                          SQL commands. Used with psql if set; otherwise we
+                          shell out to `supabase db query --linked`.
+
+  SUPABASE_PROJECT_REF    Optional default project ref so `--project` can be
+                          omitted on commands that target a single project.
+
+All env vars validated at first use (not at startup) with a clear error.
+
+Python 3.9+, stdlib only. No pip installs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+API_BASE = "https://api.supabase.com/v1"
+
+# ─── .env autoloading ─────────────────────────────────────────────────────────
+
+_ENV_FILENAMES = (".env.local", ".env")
+_ENV_PREFIXES = ("SUPABASE_",)
+
+
+def _parse_env_file(path: Path) -> dict:
+    out: dict = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+            v = v[1:-1]
+        if k:
+            out[k] = v
+    return out
+
+
+def _autoload_env_files(extra: list | None = None) -> list:
+    """Populate os.environ from .env files. Project files override the shell
+    for SUPABASE_* keys.
+
+    Candidates collected high-precedence first, then applied low-to-high so
+    each higher-priority file overwrites on top.
+    """
+    candidates: list = []
+    seen: set = set()
+
+    def _push(p: Path) -> None:
+        try:
+            p = p.expanduser().resolve()
+        except Exception:
+            return
+        if p in seen or not p.is_file():
+            return
+        seen.add(p)
+        candidates.append(p)
+
+    # 1. --env-file (highest)
+    for f in extra or []:
+        _push(Path(f))
+
+    # 2. $CWD/rayna-setup/.env.local (rainshift convenience)
+    cwd = Path.cwd().resolve()
+    _push(cwd / "rayna-setup" / ".env.local")
+
+    # 3. Walk up from cwd for project .env/.env.local
+    for parent in (cwd, *cwd.parents):
+        before = len(candidates)
+        for name in _ENV_FILENAMES:
+            _push(parent / name)
+        if len(candidates) > before:
+            break
+
+    # 4. ~/.agent-plus/.env (lowest, but still beats shell)
+    _push(Path.home() / ".agent-plus" / ".env")
+
+    loaded: list = []
+    for p in reversed(candidates):
+        vals = _parse_env_file(p)
+        any_taken = False
+        for k, v in vals.items():
+            if not k.startswith(_ENV_PREFIXES):
+                continue
+            os.environ[k] = v
+            any_taken = True
+        if any_taken:
+            loaded.append(p)
+    return loaded
+
+
+def _suggest_env_setup(missing: str) -> str:
+    cwd = Path.cwd()
+    return (
+        f"{missing}\n\n"
+        "Set these in whichever is most convenient — project files win over shell env:\n\n"
+        f"  Project-level (preferred):  {cwd / '.env'}\n"
+        "    # .env\n"
+        "    SUPABASE_ACCESS_TOKEN=sbp_...\n"
+        "    SUPABASE_PROJECT_REF=abcxyz123   # optional default\n\n"
+        "  Global (Claude Code settings):\n"
+        "    ~/.claude/settings.json → \"env\": { \"SUPABASE_ACCESS_TOKEN\": \"...\" }\n\n"
+        "  Get a personal access token at:\n"
+        "    https://supabase.com/dashboard/account/tokens\n"
+    )
+
+
+# ─── secret scrubbing ─────────────────────────────────────────────────────────
+
+
+def _scrub(s: str) -> str:
+    """Remove any SUPABASE_ACCESS_TOKEN value from a string before printing.
+
+    Also scrubs sbp_ prefixed tokens generically as a belt-and-braces pass.
+    """
+    tok = os.environ.get("SUPABASE_ACCESS_TOKEN", "")
+    out = s
+    if tok:
+        out = out.replace(tok, "<redacted>")
+    out = re.sub(r"sbp_[A-Za-z0-9]{20,}", "<redacted>", out)
+    return out
+
+
+# ─── HTTP ─────────────────────────────────────────────────────────────────────
+
+
+def _require_token() -> str:
+    tok = os.environ.get("SUPABASE_ACCESS_TOKEN", "").strip()
+    if not tok:
+        raise SystemExit(_suggest_env_setup(
+            "SUPABASE_ACCESS_TOKEN is not set. This is a personal access token, "
+            "distinct from any project's anon/service keys."
+        ))
+    return tok
+
+
+def _api_call(
+    method: str,
+    path: str,
+    *,
+    query: dict | None = None,
+    body: Any = None,
+    timeout: float = 30.0,
+    debug: bool = False,
+) -> tuple:
+    url = f"{API_BASE}{path}"
+    if query:
+        url += "?" + urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
+    tok = _require_token()
+    headers = {
+        "Authorization": f"Bearer {tok}",
+        "Accept": "application/json",
+        "User-Agent": "supabase-remote/0.1",
+    }
+    data: bytes | None = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    if debug:
+        sys.stderr.write(f"[debug] {method} {_scrub(url)}\n")
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            status = resp.status
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        status = e.code
+    except urllib.error.URLError as e:
+        raise SystemExit(f"Network error calling Supabase API: {_scrub(str(e))}")
+    try:
+        parsed = json.loads(raw) if raw else None
+    except json.JSONDecodeError:
+        parsed = raw.decode("utf-8", errors="replace")
+    return status, parsed
+
+
+# ─── helpers ──────────────────────────────────────────────────────────────────
+
+
+def _dump_json(obj: Any) -> None:
+    json.dump(obj, sys.stdout, indent=2, sort_keys=True, default=str)
+    sys.stdout.write("\n")
+
+
+def _read_linked_ref() -> str | None:
+    """If cwd (or a parent) has supabase/.temp/project-ref, return it."""
+    cwd = Path.cwd().resolve()
+    for parent in (cwd, *cwd.parents):
+        candidate = parent / "supabase" / ".temp" / "project-ref"
+        if candidate.is_file():
+            try:
+                return candidate.read_text(encoding="utf-8").strip()
+            except Exception:
+                return None
+    return None
+
+
+def _fetch_projects(debug: bool = False) -> list:
+    status, data = _api_call("GET", "/projects", debug=debug)
+    if status >= 300:
+        raise SystemExit(
+            f"GET /v1/projects failed: HTTP {status}: {_scrub(json.dumps(data))}"
+        )
+    if not isinstance(data, list):
+        raise SystemExit(
+            f"Unexpected response from /v1/projects: {_scrub(json.dumps(data))}"
+        )
+    return data
+
+
+def _resolve_project_ref(ident: str | None, *, debug: bool = False) -> str:
+    """Resolve a project identifier (name substring or ref) to a canonical ref.
+
+    If ident is None, use SUPABASE_PROJECT_REF then the linked project file.
+    """
+    if not ident:
+        ident = os.environ.get("SUPABASE_PROJECT_REF", "").strip() or _read_linked_ref()
+        if not ident:
+            raise SystemExit(
+                "No project specified. Pass --project <name-or-ref>, set "
+                "SUPABASE_PROJECT_REF, or run this from a directory with "
+                "supabase/.temp/project-ref (i.e. a `supabase link`-ed repo)."
+            )
+    projects = _fetch_projects(debug=debug)
+    # Exact ref match first.
+    for p in projects:
+        if p.get("id") == ident or p.get("ref") == ident:
+            return p.get("id") or p.get("ref")
+    # Case-insensitive substring name match.
+    lower = ident.lower()
+    matches = [p for p in projects if lower in (p.get("name", "") or "").lower()]
+    if len(matches) == 1:
+        return matches[0].get("id") or matches[0].get("ref")
+    if len(matches) > 1:
+        names = ", ".join(m.get("name", "?") for m in matches)
+        raise SystemExit(f"Ambiguous project {ident!r}; matches: {names}")
+    # Last attempt: treat ident as a raw ref even if not in the token's list.
+    if re.fullmatch(r"[a-z0-9]{20}", ident):
+        return ident
+    names = ", ".join(p.get("name", "?") for p in projects) or "(none)"
+    raise SystemExit(f"No project matching {ident!r}. Known: {names}")
+
+
+def _have(binary: str) -> bool:
+    return shutil.which(binary) is not None
+
+
+# ─── SQL execution ────────────────────────────────────────────────────────────
+
+
+_WRITE_PREFIX_RE = re.compile(
+    r"^\s*(insert|update|delete|drop|truncate|alter|create|grant|revoke)\b",
+    re.IGNORECASE,
+)
+
+
+def _run_sql(
+    *,
+    sql: str | None = None,
+    sql_file: str | None = None,
+    project_ref: str | None,
+    debug: bool = False,
+) -> list:
+    """Run SQL via `supabase db query` or psql. Returns parsed rows (a list of
+    dicts). Strips the agent-mode JSON envelope if one is present.
+
+    Exactly one of sql/sql_file must be provided.
+    """
+    if (sql is None) == (sql_file is None):
+        raise ValueError("Pass exactly one of sql / sql_file")
+
+    db_url = os.environ.get("SUPABASE_DB_URL", "").strip()
+    if db_url:
+        if not _have("psql"):
+            raise SystemExit(
+                "SUPABASE_DB_URL is set but psql is not on PATH. Install psql "
+                "(postgresql-client) or unset SUPABASE_DB_URL to fall back to "
+                "`supabase db query --linked`."
+            )
+        cmd = ["psql", db_url, "-At", "-c"]
+        if sql_file is not None:
+            cmd = ["psql", db_url, "-At", "-f", sql_file]
+        else:
+            cmd.append(sql)
+        if debug:
+            sys.stderr.write(f"[debug] {' '.join(cmd[:2])} ... (args hidden)\n")
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True)
+        except FileNotFoundError:
+            raise SystemExit("psql not found on PATH")
+        if res.returncode != 0:
+            raise SystemExit(
+                f"psql failed (exit {res.returncode}):\n{_scrub(res.stderr)}"
+            )
+        # psql -At returns plain lines, not JSON. Wrap as [{"result": line}, ...]
+        return [{"result": line} for line in res.stdout.splitlines() if line.strip()]
+
+    if not _have("supabase"):
+        raise SystemExit(
+            "`supabase` CLI not found on PATH. Install it "
+            "(https://supabase.com/docs/guides/cli) or set SUPABASE_DB_URL to use psql."
+        )
+
+    # Use `--agent no` so the output is plain JSON without the untrusted-data envelope.
+    # --linked requires a ref either from supabase/.temp or SUPABASE_ACCESS_TOKEN + SUPABASE_PROJECT_REF.
+    cmd = ["supabase", "db", "query", "--agent", "no", "--output", "json", "--linked"]
+    if sql_file is not None:
+        cmd += ["-f", sql_file]
+    else:
+        cmd.append(sql or "")
+
+    env = os.environ.copy()
+    if project_ref:
+        env["SUPABASE_PROJECT_ID"] = project_ref
+        env["SUPABASE_PROJECT_REF"] = project_ref
+
+    if debug:
+        sys.stderr.write(f"[debug] {' '.join(cmd[:6])} ...\n")
+
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    except FileNotFoundError:
+        raise SystemExit("`supabase` CLI not found on PATH")
+
+    if res.returncode != 0:
+        raise SystemExit(
+            f"supabase db query failed (exit {res.returncode}):\n"
+            f"{_scrub(res.stderr or res.stdout)}"
+        )
+
+    out = res.stdout.strip()
+    if not out:
+        return []
+    try:
+        parsed = json.loads(out)
+    except json.JSONDecodeError:
+        # Not JSON — return as a single row.
+        return [{"result": out}]
+
+    # Strip the "untrusted data" envelope if present. --agent no should avoid
+    # it but belt-and-braces in case a future CLI version re-enables it.
+    if isinstance(parsed, dict):
+        for key in ("data", "rows", "result"):
+            if key in parsed and isinstance(parsed[key], list):
+                return parsed[key]
+        # Last resort: wrap the dict as one row.
+        return [parsed]
+    if isinstance(parsed, list):
+        return parsed
+    return [{"result": parsed}]
+
+
+def _sql_escape_literal(s: str) -> str:
+    """Escape a string for safe inclusion as a SQL literal (single-quoted).
+    We use parameterised queries where we can, but some internal introspection
+    queries concatenate table names — those names come from an allow-list only.
+    """
+    return s.replace("'", "''")
+
+
+# ─── subcommands: projects ────────────────────────────────────────────────────
+
+
+def cmd_projects_list(args: argparse.Namespace) -> None:
+    projects = _fetch_projects(debug=args.debug)
+    if args.json:
+        _dump_json(projects)
+        return
+    linked = _read_linked_ref()
+    print(f"{len(projects)} project(s):")
+    print(f"  {'name':30s} {'ref':22s} {'region':14s} created_at")
+    for p in sorted(projects, key=lambda x: x.get("name", "")):
+        ref = p.get("id") or p.get("ref") or ""
+        marker = " *" if ref == linked else "  "
+        print(
+            f"{marker}{p.get('name',''):28s} {ref:22s} "
+            f"{p.get('region',''):14s} {p.get('created_at','')}"
+        )
+    if linked:
+        print(f"\n* = currently linked (from ./supabase/.temp/project-ref)")
+
+
+def cmd_projects_resolve(args: argparse.Namespace) -> None:
+    ref = _resolve_project_ref(args.ident, debug=args.debug)
+    print(ref)
+
+
+# ─── subcommands: sql ─────────────────────────────────────────────────────────
+
+
+def _detect_last_mutated_table(sql_text: str) -> str | None:
+    """Scan SQL text for the final `insert into <table>` / `update <table>`.
+
+    Returns the unqualified table name (strips quotes/schema prefix). Used for
+    --verify-rows post-run count. None if no DML found.
+    """
+    matches = []
+    for m in re.finditer(
+        r"\b(?:insert\s+into|update)\s+(?:\"?(\w+)\"?\.)?\"?(\w+)\"?",
+        sql_text,
+        re.IGNORECASE,
+    ):
+        matches.append(m.group(2))
+    return matches[-1] if matches else None
+
+
+def cmd_sql(args: argparse.Namespace) -> None:
+    path = Path(args.file).expanduser().resolve()
+    if not path.is_file():
+        raise SystemExit(f"SQL file not found: {path}")
+    ref = _resolve_project_ref(args.project, debug=args.debug) if args.project else None
+
+    sql_text = path.read_text(encoding="utf-8")
+
+    rows = _run_sql(sql_file=str(path), project_ref=ref, debug=args.debug)
+    if args.json:
+        _dump_json(rows)
+    else:
+        if not rows:
+            print("(no rows returned)")
+        else:
+            _dump_json(rows)
+
+    if args.verify_rows is not None:
+        table = _detect_last_mutated_table(sql_text)
+        if not table:
+            print(
+                "--verify-rows given but couldn't detect a mutated table in the SQL. "
+                "Skipping verification.",
+                file=sys.stderr,
+            )
+            return
+        # Very small allow-list check: identifiers must be [a-zA-Z_][a-zA-Z0-9_]*
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
+            raise SystemExit(f"Refusing to verify on suspicious table name: {table!r}")
+        count_rows = _run_sql(
+            sql=f'select count(*)::bigint as n from "{table}"',
+            project_ref=ref,
+            debug=args.debug,
+        )
+        actual = None
+        if count_rows:
+            first = count_rows[0]
+            if isinstance(first, dict):
+                actual = first.get("n") or first.get("count") or next(iter(first.values()), None)
+        try:
+            actual_i = int(actual) if actual is not None else None
+        except (TypeError, ValueError):
+            actual_i = None
+        if actual_i != args.verify_rows:
+            print(
+                f"--verify-rows mismatch: expected {args.verify_rows} in "
+                f"{table!r}, got {actual_i!r}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print(f"verify: {table}: {actual_i} row(s) — OK")
+
+
+def cmd_sql_inline(args: argparse.Namespace) -> None:
+    query = args.query
+    if _WRITE_PREFIX_RE.match(query) and not args.write:
+        raise SystemExit(
+            "Refusing to run a write query without --write. Add --write to "
+            "confirm, or use `supabase-remote sql <file>` for larger scripts."
+        )
+    ref = _resolve_project_ref(args.project, debug=args.debug) if args.project else None
+    rows = _run_sql(sql=query, project_ref=ref, debug=args.debug)
+    if args.json:
+        _dump_json(rows)
+        return
+    if not rows:
+        print("(no rows)")
+        return
+    _dump_json(rows)
+
+
+# ─── subcommands: rls-audit ───────────────────────────────────────────────────
+
+
+_RLS_AUDIT_SQL = """
+select
+  t.tablename                                          as table_name,
+  coalesce(c.relrowsecurity, false)                    as rls_enabled,
+  coalesce(pol.n, 0)::int                              as policy_count
+from pg_tables t
+left join pg_class c
+  on c.relname = t.tablename
+  and c.relnamespace = (select oid from pg_namespace where nspname = 'public')
+left join (
+  select schemaname, tablename, count(*) as n
+    from pg_policies
+   where schemaname = 'public'
+   group by 1, 2
+) pol on pol.tablename = t.tablename
+where t.schemaname = 'public'
+order by t.tablename;
+"""
+
+
+def cmd_rls_audit(args: argparse.Namespace) -> None:
+    ref = _resolve_project_ref(args.project, debug=args.debug) if args.project else None
+    rows = _run_sql(sql=_RLS_AUDIT_SQL, project_ref=ref, debug=args.debug)
+
+    # Coerce shapes — supabase CLI returns booleans as JSON bools, psql would
+    # give strings. Normalise.
+    normalised = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        name = r.get("table_name") or r.get("tablename") or r.get("result") or ""
+        rls = r.get("rls_enabled")
+        if isinstance(rls, str):
+            rls = rls.lower() in ("t", "true", "1")
+        count = r.get("policy_count") or 0
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            count = 0
+        normalised.append({"table": name, "rls": bool(rls), "policies": count})
+
+    if args.json:
+        _dump_json(normalised)
+        return
+
+    print(f"{'TABLE':28s} {'RLS':9s} {'POLICIES':9s} STATUS")
+    for r in normalised:
+        rls_label = "enabled" if r["rls"] else "DISABLED"
+        if not r["rls"] and r["policies"] == 0:
+            status = "NO RLS, NO POLICIES — FIX"
+        elif not r["rls"]:
+            status = "NO RLS — FIX"
+        elif r["policies"] == 0:
+            status = "RLS ON BUT NO POLICIES — FIX"
+        else:
+            status = "OK"
+        print(f"{r['table']:28s} {rls_label:9s} {r['policies']:<9d} {status}")
+
+
+# ─── subcommands: gen-types ───────────────────────────────────────────────────
+
+
+def cmd_gen_types(args: argparse.Namespace) -> None:
+    ref = _resolve_project_ref(args.project, debug=args.debug)
+    target = Path(args.target).expanduser().resolve()
+    if not target.parent.is_dir():
+        raise SystemExit(
+            f"Target directory does not exist: {target.parent}\n"
+            "Create it first — this command won't silently mkdir to avoid "
+            "dumping types in the wrong place."
+        )
+    if not _have("supabase"):
+        raise SystemExit(
+            "`supabase` CLI not found on PATH. Install it from "
+            "https://supabase.com/docs/guides/cli"
+        )
+    cmd = ["supabase", "gen", "types", "typescript", "--project-id", ref]
+    if args.debug:
+        sys.stderr.write(f"[debug] {' '.join(cmd)}\n")
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        raise SystemExit("`supabase` CLI not found on PATH")
+    if res.returncode != 0:
+        raise SystemExit(
+            f"supabase gen types failed (exit {res.returncode}):\n"
+            f"{_scrub(res.stderr)}"
+        )
+    # Atomic write.
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(res.stdout, encoding="utf-8")
+    os.replace(tmp, target)
+    print(f"Wrote {len(res.stdout):,} bytes to {target}")
+
+
+# ─── argparse wiring ──────────────────────────────────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="supabase-remote",
+        description="Remote CLI for day-to-day Supabase project ops "
+                    "(projects, SQL with JSON-envelope stripping, RLS audit, "
+                    "TypeScript gen-types).",
+        epilog="Examples:\n"
+               "  supabase-remote projects list\n"
+               "  supabase-remote sql migrations/001_initial.sql --project myproj\n"
+               "  supabase-remote sql-inline \"select count(*) from users\"\n"
+               "  supabase-remote rls-audit\n"
+               "  supabase-remote gen-types packages/db/types.ts\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--env-file",
+        action="append",
+        default=[],
+        help="Additional .env file(s) to load (highest precedence).",
+    )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print underlying HTTP and shell calls to stderr (token scrubbed).",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # projects
+    sp = sub.add_parser("projects", help="List and resolve Supabase projects")
+    proj_sub = sp.add_subparsers(dest="projects_cmd", required=True)
+
+    pl = proj_sub.add_parser(
+        "list",
+        help="List projects accessible with SUPABASE_ACCESS_TOKEN. "
+             "Marks the currently linked project (./supabase/.temp/project-ref).",
+    )
+    pl.add_argument("--json", action="store_true")
+    pl.set_defaults(func=cmd_projects_list)
+
+    pr = proj_sub.add_parser(
+        "resolve",
+        help="Resolve a project name (case-insensitive substring) or ref to the canonical ref.",
+    )
+    pr.add_argument("ident", help="Project name or ref")
+    pr.set_defaults(func=cmd_projects_resolve)
+
+    # sql
+    sq = sub.add_parser(
+        "sql",
+        help="Run a .sql file against the linked/specified project. "
+             "Strips the agent-mode JSON envelope. Optionally verify post-run row count.",
+        epilog="Example:\n"
+               "  supabase-remote sql seed.sql --project myproj --verify-rows 10\n",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sq.add_argument("file", help="Path to the .sql file")
+    sq.add_argument("--project", help="Project name or ref (defaults to SUPABASE_PROJECT_REF / linked)")
+    sq.add_argument(
+        "--verify-rows",
+        type=int,
+        help="Expected row count in the last mutated table after the script runs. Exits 2 on mismatch.",
+    )
+    sq.add_argument("--json", action="store_true")
+    sq.set_defaults(func=cmd_sql)
+
+    # sql-inline
+    si = sub.add_parser(
+        "sql-inline",
+        help='One-shot inline SQL. Read queries only unless --write is passed. '
+             'Example: supabase-remote sql-inline "select count(*) from users"',
+    )
+    si.add_argument("query", help="SQL string")
+    si.add_argument("--project", help="Project name or ref")
+    si.add_argument(
+        "--write",
+        action="store_true",
+        help="Required for INSERT/UPDATE/DELETE/DROP/TRUNCATE/ALTER/CREATE/GRANT/REVOKE.",
+    )
+    si.add_argument("--json", action="store_true")
+    si.set_defaults(func=cmd_sql_inline)
+
+    # rls-audit
+    ra = sub.add_parser(
+        "rls-audit",
+        help="Per-table RLS status + policy count for the public schema. "
+             "Flags tables with RLS off or no policies.",
+    )
+    ra.add_argument("--project", help="Project name or ref")
+    ra.add_argument("--json", action="store_true")
+    ra.set_defaults(func=cmd_rls_audit)
+
+    # gen-types
+    gt = sub.add_parser(
+        "gen-types",
+        help="Write TypeScript types from the project schema to a file "
+             "(wraps `supabase gen types typescript --project-id <ref>`).",
+    )
+    gt.add_argument("target", help="Target .ts path. Parent directory must already exist.")
+    gt.add_argument("--project", help="Project name or ref")
+    gt.set_defaults(func=cmd_gen_types)
+
+    return p
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    _autoload_env_files(args.env_file)
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        sys.stderr.write("\ninterrupted\n")
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
