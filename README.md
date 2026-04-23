@@ -30,13 +30,43 @@ Every plugin in this repo follows the same patterns so switching between them is
 
 Each plugin keeps its own `CHANGELOG.md` for release notes and incident / pain-point logging. Keep it short: what changed, why it matters, date.
 
-## Install one plugin
+## Install
+
+### Recommended — marketplace install (persistent, no clone needed)
+
+Add this repo as a marketplace once, then install any plugin by name:
 
 ```bash
-claude --plugin-dir /path/to/agent-plus/<plugin-name>
+claude plugin marketplace add osouthgate/agent-plus
+claude plugin install hermes-remote@agent-plus     # or any other plugin
+claude plugin install coolify-remote@agent-plus
+claude plugin install hcloud-remote@agent-plus
+claude plugin install openrouter-remote@agent-plus
+claude plugin install langfuse@agent-plus
+claude plugin install railway-ops@agent-plus
 ```
 
-Stack multiple by repeating the flag. When a plugin in this repo is ready to use, its own README has install and config details.
+Updates later:
+
+```bash
+claude plugin marketplace update agent-plus
+claude plugin update hermes-remote
+```
+
+### Alt — session-only, from a local clone (for dev / testing)
+
+`--plugin-dir` loads a plugin for the current session only — nothing persisted. Useful when hacking on a plugin or trying one before installing:
+
+```bash
+git clone https://github.com/osouthgate/agent-plus
+claude --plugin-dir ./agent-plus/hermes-remote     # this shell only
+```
+
+Stack multiple plugins by repeating the flag. Each plugin's own README has its config details.
+
+### Standalone (no Claude Code at all)
+
+Every plugin's `bin/<plugin>` file is a stdlib-only Python 3 script. Copy it anywhere on `$PATH` and run it — no pip install, no venv, no Claude Code required. See each plugin's README for the one-line `curl -O` install.
 
 ## Philosophy
 

@@ -1,0 +1,42 @@
+{
+  "name": "agent-plus",
+  "owner": {
+    "name": "Oliver Southgate",
+    "url": "https://github.com/osouthgate"
+  },
+  "metadata": {
+    "description": "Stdlib-only Python CLIs for managing remote infrastructure from Claude Code — Hermes Agent, Coolify, Hetzner Cloud, OpenRouter, Langfuse, Railway. Every plugin is a single-file CLI with zero dependencies; all usable standalone outside Claude Code too."
+  },
+  "plugins": [
+    {
+      "name": "hermes-remote",
+      "source": "./hermes-remote",
+      "description": "Remote CLI for managing a Hermes Agent deployment — cron jobs, env, status, model, config, and one-shot chat via /v1/chat/completions."
+    },
+    {
+      "name": "coolify-remote",
+      "source": "./coolify-remote",
+      "description": "Remote CLI for Coolify PaaS — apps, env vars with post-write verification, domains, TLS, deploys with --wait, and app exec via SSH + docker exec."
+    },
+    {
+      "name": "hcloud-remote",
+      "source": "./hcloud-remote",
+      "description": "Minimal Hetzner Cloud CLI — server list/show/reboot, snapshot create/list, ssh by name. Deliberately narrow (no volumes, networks, or LBs)."
+    },
+    {
+      "name": "openrouter-remote",
+      "source": "./openrouter-remote",
+      "description": "OpenRouter CLI — balance with cron-friendly --alert-below, per-key usage stats, model catalogue search, per-provider endpoints, and API key management."
+    },
+    {
+      "name": "langfuse",
+      "source": "./langfuse",
+      "description": "Langfuse CLI — export/import prompts for backup and cross-env migration, smoke-test traces, health checks across multiple named instances."
+    },
+    {
+      "name": "railway-ops",
+      "source": "./railway-ops",
+      "description": "Read-first Railway CLI wrapper — single-call env overviews (services, deploy status, errors, env var NAMES-only) for fast incident triage."
+    }
+  ]
+}
