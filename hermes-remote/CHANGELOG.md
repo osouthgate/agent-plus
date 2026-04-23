@@ -7,6 +7,7 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 ## Unreleased
 
 ### Changed
+- `chat` now honours `HERMES_VPS_IP + HERMES_HOST` fallback for reverse-proxy-by-Host setups — previously only `HERMES_URL` was read, leaving `chat` broken for users whose admin CLI worked via the IP+Host path. URL resolution factored into a shared `_resolve_hermes_url()` helper; `chat` also routes through the same `_request` transport so the Host header override is applied consistently. [2026-04-23]
 - `chat --max-tokens` default bumped 1024 → 2048. 1024 was truncating moderately complex responses mid-sentence. [2026-04-23]
 
 ### Added

@@ -314,34 +314,32 @@ def _login(base_url: str, override_host: str, user: str, password: str) -> tuple
     return cookie, token_match.group(1).decode()
 
 
+def _resolve_hermes_url() -> tuple[str, str, bool]:
+    """Return (base_url, host, override_host) from HERMES_URL or HERMES_VPS_IP+HOST.
+
+    Shared between HermesClient (admin API) and cmd_chat (OpenAI-compat endpoint)
+    so both honour the same fallback. Raises SystemExit with setup help if neither
+    form is configured.
+    """
+    url = os.environ.get("HERMES_URL", "").rstrip("/")
+    vps_ip = os.environ.get("HERMES_VPS_IP", "")
+    host = os.environ.get("HERMES_HOST", "")
+    if url:
+        return url, urlparse(url).netloc, False
+    if vps_ip and host:
+        return f"http://{vps_ip}", host, True
+    raise SystemExit(_suggest_env_setup(
+        "No Hermes URL configured. Set either:\n"
+        "  HERMES_URL=https://hermes.example.com\n"
+        "or for reverse-proxy-by-Host setups:\n"
+        "  HERMES_VPS_IP=1.2.3.4 HERMES_HOST=hermes.example.com"
+    ))
+
+
 class HermesClient:
     def __init__(self) -> None:
         self.user = os.environ.get("HERMES_ADMIN_USER", DEFAULT_ADMIN_USER)
-
-        # Two routing modes:
-        #  1) HERMES_URL set → talk to it directly, normal DNS, no Host override.
-        #  2) HERMES_VPS_IP + HERMES_HOST set → hit IP:80 directly, pass Host
-        #     header for reverse-proxy routing. Useful when local DNS is flaky.
-        url = os.environ.get("HERMES_URL", "").rstrip("/")
-        vps_ip = os.environ.get("HERMES_VPS_IP", "")
-        host = os.environ.get("HERMES_HOST", "")
-
-        if url:
-            parsed = urlparse(url)
-            self.base_url = url
-            self.host = parsed.netloc  # http.client will use this, no override needed
-            self._override_host = False
-        elif vps_ip and host:
-            self.base_url = f"http://{vps_ip}"
-            self.host = host
-            self._override_host = True
-        else:
-            raise SystemExit(_suggest_env_setup(
-                "No Hermes URL configured. Set either:\n"
-                "  HERMES_URL=https://hermes.example.com\n"
-                "or for reverse-proxy-by-Host setups:\n"
-                "  HERMES_VPS_IP=1.2.3.4 HERMES_HOST=hermes.example.com"
-            ))
+        self.base_url, self.host, self._override_host = _resolve_hermes_url()
 
         pw = _resolve_password()
         self.cookie, self.token = _login(
@@ -575,17 +573,13 @@ def cmd_cron_create(client: HermesClient, args: argparse.Namespace) -> None:
 
 
 def cmd_chat(args: argparse.Namespace) -> None:
-    url = os.environ.get("HERMES_URL", "").rstrip("/")
     key = os.environ.get("HERMES_CHAT_API_KEY", "")
-    if not url:
-        raise SystemExit(_suggest_env_setup(
-            "HERMES_URL not set. e.g. HERMES_URL=https://hermes.example.com"
-        ))
     if not key:
         raise SystemExit(_suggest_env_setup(
             "HERMES_CHAT_API_KEY not set. This is the API_SERVER_KEY configured "
             "in Hermes env (not the admin password)."
         ))
+    base_url, host, override_host = _resolve_hermes_url()
 
     messages: list[dict[str, str]] = []
     if args.system:
@@ -598,23 +592,26 @@ def cmd_chat(args: argparse.Namespace) -> None:
         "max_tokens": args.max_tokens,
     }).encode()
 
-    parsed = urlparse(url)
-    conn_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
-    conn = conn_cls(parsed.netloc, timeout=120)
-    conn.request(
-        "POST", "/v1/chat/completions",
-        body=body,
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-        },
-    )
-    resp = conn.getresponse()
-    raw = resp.read().decode("utf-8", errors="replace")
-    conn.close()
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    if override_host:
+        headers["Host"] = host
 
-    if resp.status >= 300:
-        print(f"HTTP {resp.status}: {raw}", file=sys.stderr)
+    # Reuse the same http.client transport HermesClient uses so Host override
+    # works identically against IP:80 + Traefik.
+    resp_status, raw_bytes, _ = _request(
+        "POST",
+        f"{base_url}/v1/chat/completions",
+        headers=headers,
+        data=body,
+        timeout=120.0,
+    )
+    raw = raw_bytes.decode("utf-8", errors="replace")
+
+    if resp_status >= 300:
+        print(f"HTTP {resp_status}: {raw}", file=sys.stderr)
         sys.exit(1)
 
     try:
