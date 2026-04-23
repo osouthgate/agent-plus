@@ -62,6 +62,8 @@ export HERMES_ADMIN_USER="you@example.com"
 hermes-remote status                    # gateway state + connected platforms
 hermes-remote model                     # current LLM + context window
 hermes-remote env list [--all]          # env vars Hermes knows about
+hermes-remote config get [key]          # read full config, or a dotted-path key
+hermes-remote config set <key> <value>  # mutate config.yaml via /api/config
 hermes-remote cron list                 # all cron jobs, one line each
 hermes-remote cron show <id-or-name>    # full JSON for one job
 hermes-remote cron pause <id>
@@ -76,6 +78,24 @@ hermes-remote cron create \
 ```
 
 Most subcommands take `--json` for piping to `jq`.
+
+## Changing the LLM model (READ THIS)
+
+**Hermes's `config.yaml` overrides env vars for keys it knows about.** The `LLM_MODEL` env var only sets the default at first boot. Once config.yaml has a model, `LLM_MODEL` is ignored — so setting it in Coolify / Docker env and redeploying won't change anything.
+
+To actually change the model, write it via the config API:
+
+```bash
+hermes-remote config set model anthropic/claude-haiku-4-5
+```
+
+No redeploy needed — it's live. Verify:
+
+```bash
+hermes-remote model   # reads /api/model/info; should match immediately
+```
+
+Same applies to any other config.yaml key (agent.max_turns, compression.threshold, telegram.channel_prompts, etc.) — `config set` is the mutation path.
 
 ## Skillify cron pattern (READ BEFORE CREATING A CRON)
 

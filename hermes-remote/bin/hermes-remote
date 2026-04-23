@@ -308,6 +308,68 @@ def cmd_model(client: HermesClient, args: argparse.Namespace) -> None:
         print(f"context:  {ctx:,} tokens")
 
 
+def cmd_config_get(client: HermesClient, args: argparse.Namespace) -> None:
+    status, data = client.call("GET", "/api/config")
+    if args.key:
+        # Simple dotted-path lookup: `agent.max_turns` -> data["agent"]["max_turns"]
+        val: Any = data
+        for part in args.key.split("."):
+            if isinstance(val, dict) and part in val:
+                val = val[part]
+            else:
+                raise SystemExit(f"Key {args.key!r} not found in config")
+        if isinstance(val, (dict, list)):
+            _dump_json(val)
+        else:
+            print(val)
+        return
+    if args.json:
+        _dump_json(data)
+        return
+    # Terse default — just top-level scalars and the active model.
+    print(f"model: {data.get('model')}")
+    for k in ("model_context_length", "timezone"):
+        if data.get(k) not in ("", 0, None):
+            print(f"{k}: {data.get(k)}")
+
+
+def cmd_config_set(client: HermesClient, args: argparse.Namespace) -> None:
+    """Set a single dotted-path key in Hermes's config.yaml.
+
+    Hermes's /api/config overrides env vars for keys it tracks. For example,
+    setting `LLM_MODEL` on the container has no effect once config.yaml has
+    a model; this command is how to actually change it.
+
+    The endpoint wants the full config object back, so we GET, mutate, PUT.
+    """
+    # Parse value as JSON if possible (for ints, bools, lists), else string.
+    try:
+        new_value = json.loads(args.value)
+    except (json.JSONDecodeError, TypeError):
+        new_value = args.value
+
+    status, current = client.call("GET", "/api/config")
+    if not isinstance(current, dict):
+        raise SystemExit("Could not load current config")
+
+    # Walk the dotted path, setting the terminal key.
+    parts = args.key.split(".")
+    cursor = current
+    for part in parts[:-1]:
+        if part not in cursor or not isinstance(cursor[part], dict):
+            cursor[part] = {}
+        cursor = cursor[part]
+    old = cursor.get(parts[-1])
+    cursor[parts[-1]] = new_value
+
+    status, data = client.call("PUT", "/api/config", body={"config": current})
+    if status >= 300:
+        print(f"HTTP {status}: PUT /api/config failed", file=sys.stderr)
+        _dump_json(data)
+        sys.exit(1)
+    print(f"{args.key}: {old!r} -> {new_value!r}")
+
+
 def cmd_env_list(client: HermesClient, args: argparse.Namespace) -> None:
     status, data = client.call("GET", "/api/env")
     set_only = {k: v for k, v in data.items() if v.get("is_set")}
@@ -404,6 +466,31 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("model", help="Show current LLM model")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_model)
+
+    sp = sub.add_parser(
+        "config", help="Read and mutate Hermes's config.yaml (overrides env)"
+    )
+    cfg_sub = sp.add_subparsers(dest="config_cmd", required=True)
+
+    cg = cfg_sub.add_parser("get", help="Read the current config (or a key)")
+    cg.add_argument(
+        "key",
+        nargs="?",
+        help='Optional dotted path, e.g. "model" or "agent.max_turns"',
+    )
+    cg.add_argument("--json", action="store_true")
+    cg.set_defaults(func=cmd_config_get)
+
+    csset = cfg_sub.add_parser("set", help="Set a config key (e.g. model)")
+    csset.add_argument(
+        "key",
+        help='Dotted path, e.g. "model" or "agent.max_turns"',
+    )
+    csset.add_argument(
+        "value",
+        help="Value. Parsed as JSON if possible (for numbers/bools/lists), else string.",
+    )
+    csset.set_defaults(func=cmd_config_set)
 
     sp = sub.add_parser("env", help="Inspect Hermes-tracked env vars")
     env_sub = sp.add_subparsers(dest="env_cmd", required=True)
