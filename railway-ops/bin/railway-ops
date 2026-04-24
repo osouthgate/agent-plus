@@ -795,6 +795,51 @@ def build_service_snapshot(
     }
 
 
+def _resolve_env_name(env_arg: Optional[str], status: dict[str, Any]) -> Optional[str]:
+    """Resolve a user-supplied `--env` argument to the canonical Railway env name.
+
+    Tries, in order: exact match, case-insensitive exact, case-insensitive
+    prefix, case-insensitive substring. This lets users type `--env prod` and
+    have it land on `production`. Raises SystemExit on ambiguous substring
+    matches; passes through unchanged if env_arg is None or there's no hit
+    (the CLI will then produce its natural "environment not found" error).
+    """
+    if not env_arg:
+        return None
+    edges = ((status.get("environments") or {}).get("edges")) or []
+    names: list[str] = []
+    for e in edges:
+        if isinstance(e, dict):
+            node = e.get("node") or {}
+            n = node.get("name")
+            if isinstance(n, str):
+                names.append(n)
+    if not names:
+        return env_arg
+    for n in names:
+        if n == env_arg:
+            return n
+    lower = env_arg.lower()
+    for n in names:
+        if n.lower() == lower:
+            return n
+    prefix = [n for n in names if n.lower().startswith(lower)]
+    if len(prefix) == 1:
+        return prefix[0]
+    if len(prefix) > 1:
+        raise SystemExit(
+            f"railway-ops: ambiguous env {env_arg!r}; matches: {', '.join(prefix)}"
+        )
+    substr = [n for n in names if lower in n.lower()]
+    if len(substr) == 1:
+        return substr[0]
+    if len(substr) > 1:
+        raise SystemExit(
+            f"railway-ops: ambiguous env {env_arg!r}; matches: {', '.join(substr)}"
+        )
+    return env_arg
+
+
 def _resolve_environment_id(status: dict[str, Any], env_name: Optional[str]) -> Optional[str]:
     """Pick the environment ID matching `env_name` from `railway status --json`.
 
@@ -927,8 +972,25 @@ def emit(data: Any, pretty: bool) -> None:
         print(json.dumps(data, default=str))
 
 
+def _resolve_cli_env(args: argparse.Namespace) -> None:
+    """Mutate args.env in place so `--env prod` becomes `--env production`
+    before any downstream command sees it. No-op if env is None or already
+    canonical. Uses `railway status --json` to read the env list."""
+    if not getattr(args, "env", None):
+        return
+    try:
+        status = get_status()
+    except SystemExit:
+        return  # no linked project; let the downstream command fail naturally
+    resolved = _resolve_env_name(args.env, status)
+    if resolved and resolved != args.env:
+        sys.stderr.write(f"railway-ops: --env {args.env!r} → {resolved!r}\n")
+        args.env = resolved
+
+
 def cmd_overview(args: argparse.Namespace) -> None:
     check_prereqs()
+    _resolve_cli_env(args)
     data = build_overview(
         args.env,
         args.since,
@@ -958,6 +1020,7 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 def cmd_errors(args: argparse.Namespace) -> None:
     check_prereqs()
+    _resolve_cli_env(args)
     since = args.since
     since_source = "flag"
     # --since-deploy: use the currently-active deploy's createdAt as the
@@ -1006,6 +1069,7 @@ def cmd_errors(args: argparse.Namespace) -> None:
 
 def cmd_envs(args: argparse.Namespace) -> None:
     check_prereqs()
+    _resolve_cli_env(args)
     names = fetch_env_var_names(args.service, args.env)
     emit({
         "service": args.service,
@@ -1017,6 +1081,7 @@ def cmd_envs(args: argparse.Namespace) -> None:
 
 def cmd_services(args: argparse.Namespace) -> None:
     check_prereqs()
+    _resolve_cli_env(args)
     services = list_services(args.env)
     emit({
         "env": args.env or "<linked>",

@@ -451,6 +451,50 @@ class TestSlimDeploy(unittest.TestCase):
         self.assertIsNone(slim["prNumber"])
 
 
+class TestResolveEnvName(unittest.TestCase):
+    """--env prod should resolve to 'production' without error."""
+
+    status = {
+        "environments": {
+            "edges": [
+                {"node": {"id": "e-prod", "name": "production"}},
+                {"node": {"id": "e-stage", "name": "staging"}},
+                {"node": {"id": "e-dev", "name": "development"}},
+            ]
+        }
+    }
+
+    def test_exact_match(self) -> None:
+        self.assertEqual(ro._resolve_env_name("production", self.status), "production")
+
+    def test_prefix_match_short_form(self) -> None:
+        self.assertEqual(ro._resolve_env_name("prod", self.status), "production")
+        self.assertEqual(ro._resolve_env_name("stag", self.status), "staging")
+        self.assertEqual(ro._resolve_env_name("dev", self.status), "development")
+
+    def test_case_insensitive(self) -> None:
+        self.assertEqual(ro._resolve_env_name("PROD", self.status), "production")
+        self.assertEqual(ro._resolve_env_name("Staging", self.status), "staging")
+
+    def test_none_passthrough(self) -> None:
+        self.assertIsNone(ro._resolve_env_name(None, self.status))
+
+    def test_unknown_env_passthrough(self) -> None:
+        # No match — pass through unchanged so the CLI produces its natural error
+        self.assertEqual(ro._resolve_env_name("preview", self.status), "preview")
+
+    def test_ambiguous_raises(self) -> None:
+        status = {"environments": {"edges": [
+            {"node": {"id": "e1", "name": "production"}},
+            {"node": {"id": "e2", "name": "production-canary"}},
+        ]}}
+        with self.assertRaises(SystemExit):
+            ro._resolve_env_name("prod", status)
+
+    def test_empty_status_passthrough(self) -> None:
+        self.assertEqual(ro._resolve_env_name("prod", {}), "prod")
+
+
 class TestResolveEnvironmentId(unittest.TestCase):
     def test_matches_env_name_case_insensitive(self) -> None:
         status = {
