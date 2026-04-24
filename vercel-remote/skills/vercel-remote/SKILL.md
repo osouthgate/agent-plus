@@ -2,14 +2,14 @@
 name: vercel-remote
 description: Read-first wrapper around the Vercel REST API. Single-call project overviews (deployments, domains, env NAMES-only, warnings) for incident triage. Use whenever the user wants the state of a Vercel project — what deployed, what's failing, which env vars exist, which domains are verified — without you chaining `vercel list`, `vercel inspect`, `vercel env ls`, `vercel domains ls` per project. Also covers deployment logs via `logs` and async deploys via Deploy Hooks with `--wait`.
 when_to_use: Trigger on phrases like "what's happening on vercel", "is prod up", "vercel status", "why is <project> broken", "latest deployment on <project>", "env vars on <project>", "vercel overview", "check domains on <project>", "tail the logs on <deployment>", "trigger a vercel deploy".
-allowed-tools: Bash(.claude/skills/vercel-remote/bin/vercel-remote:*)
+allowed-tools: Bash(vercel-remote:*) Bash(python3 *vercel-remote*:*)
 ---
 
 # vercel-remote
 
 Project-scoped CLI that wraps the Vercel REST API into a read-first, JSON-output overview tool. Stdlib-only Python 3 (no pip installs, no venvs). Designed for agent-driven incident triage — one call returns the full project/deployments/domains/env-names picture so you don't burn tool calls chaining per-resource requests.
 
-The binary lives at `.claude/skills/vercel-remote/bin/vercel-remote` — invoke by that path.
+Lives at `${CLAUDE_SKILL_DIR}/../../bin/vercel-remote`; the plugin auto-adds `bin/` to PATH, so just run `vercel-remote ...`.
 
 ## Prerequisites
 

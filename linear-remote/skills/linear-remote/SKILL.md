@@ -2,14 +2,14 @@
 name: linear-remote
 description: Read-first wrapper around the Linear GraphQL API. Single-call issue context (comments + relations + state), name-resolved teams/projects/states/labels, `issues create --from-markdown` turns a design doc into a Linear issue without hand-stitching flags. Use whenever the user wants to read, triage, or write Linear issues — creating an issue from a markdown doc, fetching issue context (including comments and relations) without chaining 5+ MCP calls, listing project work by state, or moving an issue and waiting for webhook-driven transitions. Wraps a static personal API key, so it sidesteps the MCP OAuth browser-auth wall entirely.
 when_to_use: Trigger on phrases like "add this to linear", "create a linear issue", "what's on LOA-229", "list linear issues", "move this to In Review", "linear project status", "what's blocking <issue>", "triage linear", "tag assignee in linear", "turn this doc into a linear issue".
-allowed-tools: Bash(.claude/skills/linear-remote/bin/linear-remote:*)
+allowed-tools: Bash(linear-remote:*) Bash(python3 *linear-remote*:*)
 ---
 
 # linear-remote
 
 Project-scoped CLI that wraps the Linear GraphQL API into a read-first, JSON-output tool. Stdlib-only Python 3 (no pip, no venv). Designed for agent-driven Linear work — one call returns the full issue + comments + relations + state picture, name-resolved, with a first-class `--from-markdown` path for the "turn this design doc into an issue" workflow.
 
-The binary lives at `.claude/skills/linear-remote/bin/linear-remote` — invoke by that path.
+Lives at `${CLAUDE_SKILL_DIR}/../../bin/linear-remote`; the plugin auto-adds `bin/` to PATH, so just run `linear-remote ...`.
 
 ## Prerequisites
 

@@ -2,14 +2,14 @@
 name: railway-ops
 description: Read-first wrapper around the Railway CLI. Single-call env overviews (services, deploy status, recent errors/warnings, env var NAMES-only) for fast incident triage. Use whenever the user wants to see the state of a Railway environment — what's running, what's broken, which env vars exist on a service — without you having to chain `railway list`, `railway service status`, `railway logs`, `railway variables` per service.
 when_to_use: Trigger on phrases like "what's happening on railway", "show me prod", "railway status", "is the api up", "why is staging broken", "what's failing on railway", "env vars on <service>", "which env vars does api have", "is redis running", "show me recent errors on <service>", "give me a snapshot of production", "railway overview".
-allowed-tools: Bash(.claude/skills/railway-ops/bin/railway-ops:*)
+allowed-tools: Bash(railway-ops:*) Bash(python3 *railway-ops*:*)
 ---
 
 # railway-ops
 
 Project-scoped CLI that wraps the Railway CLI into a read-first, JSON-output overview tool. Stdlib-only Python 3. Designed for incident triage — one call returns the full project/services/errors/envs picture so you don't burn context chaining per-service `railway` invocations.
 
-The binary lives at `.claude/skills/railway-ops/bin/railway-ops` — invoke it by that path from the repo root (or any subdirectory of `osdb/`).
+Lives at `${CLAUDE_SKILL_DIR}/../../bin/railway-ops`; the plugin auto-adds `bin/` to PATH, so just run `railway-ops ...`.
 
 ## Prerequisites
 
@@ -31,7 +31,7 @@ The skill bails with a clear message if any of these preconditions are missing.
 **DB incident on a known service** — skip `overview`, go straight to the focused command with a high limit:
 
 ```bash
-.claude/skills/railway-ops/bin/railway-ops errors <service> --env production --since 24h --limit 50 --pretty
+railway-ops errors <service> --env production --since 24h --limit 50 --pretty
 ```
 
 `overview` caps each service's errors[] at 20 and is noisy when you already know which service is on fire. `errors` pulls 10× the log lines, caps errors/warnings at 50 by default, and emits a bucketed `errorKinds` summary (fingerprint → count) so a flood of 800 identical FK violations can't hide behind the truncation. Read `errorTotal` and `errorKinds` first — they reveal scale before you read any individual line.
@@ -46,30 +46,30 @@ All commands emit a single JSON document to stdout (the "JSON-first contract"). 
 # Single-call snapshot — the headline feature. Project, env, per-service
 # deploy status, recent errors + warnings (last 24h by default), env var
 # NAMES per service. Runs per-service fetches in parallel.
-.claude/skills/railway-ops/bin/railway-ops overview --env production --pretty
-.claude/skills/railway-ops/bin/railway-ops overview --env staging --since 1h --pretty
+railway-ops overview --env production --pretty
+railway-ops overview --env staging --since 1h --pretty
 
 # Narrow to a single service (case-insensitive substring match against name)
-.claude/skills/railway-ops/bin/railway-ops overview --env production --service api --pretty
+railway-ops overview --env production --service api --pretty
 
 # Override the per-service errors/warnings cap (default 20)
-.claude/skills/railway-ops/bin/railway-ops overview --env production --limit 50 --pretty
+railway-ops overview --env production --limit 50 --pretty
 
 # whoami + linked project + available environments
-.claude/skills/railway-ops/bin/railway-ops status --pretty
+railway-ops status --pretty
 
 # One service's errors + warnings (deeper than overview — bigger --limit)
-.claude/skills/railway-ops/bin/railway-ops errors api --env production --since 2h --limit 50 --pretty
+railway-ops errors api --env production --since 2h --limit 50 --pretty
 
 # Env var NAMES only for one service. Values are stripped at parse time and
 # never reach stdout or stderr.
-.claude/skills/railway-ops/bin/railway-ops envs api --env production --pretty
+railway-ops envs api --env production --pretty
 
 # Short per-service deploy-status list
-.claude/skills/railway-ops/bin/railway-ops services --env production --pretty
+railway-ops services --env production --pretty
 
 # All Railway projects visible to this account
-.claude/skills/railway-ops/bin/railway-ops projects --pretty
+railway-ops projects --pretty
 ```
 
 ## Hard safety rules (non-negotiable)
@@ -151,10 +151,10 @@ Parallelism: per-service log + variable fetches are fanned out across a thread p
 
 ## Testing
 
-Unit tests in `.claude/skills/railway-ops/test/` use Python's stdlib `unittest`. No Railway account needed — all tests stub the subprocess runner.
+Unit tests in `railway-ops/test/` use Python's stdlib `unittest`. No Railway account needed — all tests stub the subprocess runner. Run from the repo root:
 
 ```bash
-python -m unittest discover .claude/skills/railway-ops/test
+python -m unittest discover railway-ops/test
 ```
 
 ## How to use it with Claude

@@ -2,14 +2,14 @@
 name: github-remote
 description: Read-first wrapper around the GitHub REST API. Single-call PR/branch overviews (PR state + checks + reviews + workflow runs + mergeable) for triage. Use whenever the user wants the state of a PR, a branch's CI, or a failing run — without you chaining `gh pr view`, `gh pr checks`, `gh run view`, `gh pr list --head` per investigation. Resolves PRs and issues by branch/title. `run wait` polls on a run ID or branch. One write surface, `pr comment`.
 when_to_use: Trigger on phrases like "is this PR green", "what's the state of <branch>", "is this mergeable", "why did CI fail", "what's blocking this PR", "resolve the PR for <branch>", "tail the failing job logs", "wait for the run on <branch>", "post a comment on PR <N>".
-allowed-tools: Bash(.claude/skills/github-remote/bin/github-remote:*)
+allowed-tools: Bash(github-remote:*) Bash(python3 *github-remote*:*)
 ---
 
 # github-remote
 
 Project-scoped CLI that wraps the GitHub REST API into a read-first, JSON-output triage tool. Stdlib-only Python 3 (no pip installs, no venvs). Designed for agent-driven PR/CI inspection — one call returns PR state + checks + reviews + runs so you don't burn tool calls chaining `gh pr view` / `gh pr checks` / `gh run view` per investigation.
 
-The binary lives at `.claude/skills/github-remote/bin/github-remote` — invoke by that path.
+Lives at `${CLAUDE_SKILL_DIR}/../../bin/github-remote`; the plugin auto-adds `bin/` to PATH, so just run `github-remote ...`.
 
 ## Prerequisites
 
