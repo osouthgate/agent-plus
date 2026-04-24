@@ -2,17 +2,17 @@
 
 CLI for [OpenRouter](https://openrouter.ai) — balance, usage stats, model discovery with filtering, and API key management. One file, stdlib Python 3, no dependencies.
 
-Part of [agent-plus](../README.md) — a small collection of Claude Code plugins.
+Part of [agent-plus](../README.md) — Claude Code plugins that cut the tool-call and token cost of driving APIs from an agent.
 
 ## Why
 
 Three things that kept coming up:
 
-1. **"Am I about to run out of credits?"** — I want a one-liner, and a cron-friendly exit code for alerting.
-2. **"What's the cheapest model that supports tools and has 200k+ context?"** — the OpenRouter model list is 350+ entries; the web UI doesn't filter usefully for this.
-3. **"How do I disable / rotate / limit my keys?"** — the provisioning API exists but everyone hand-rolls curl for it.
+1. **"Am I about to run out of credits?"** — `balance --alert-below 5.00` exits `1` on low credit, designed for the Hermes `[SILENT]`-on-success cron pattern. Successful polls stay silent; only a low balance gets delivered.
+2. **"What's the cheapest model that supports tools and has 200k+ context?"** — the model list is 350+ entries. Dumping the whole catalogue into Claude's context is wasteful and slow. `models list --supports tools --min-context 200000 --max-price-input 1.0` **filters client-side and only returns matching rows**. The 350-entry blob never lands in Claude's context.
+3. **"How do I disable / rotate / limit my keys?"** — the [Management API](https://openrouter.ai/docs/guides/overview/auth/management-api-keys) exists but everyone hand-rolls curl for it. Here: `keys disable hermes-prod`, `keys set-limit hermes-prod 50.00`. Keys are referenceable by name or hash-prefix, not by the full 64-char hash.
 
-This plugin wraps all three into one CLI, using the [Management API](https://openrouter.ai/docs/guides/overview/auth/management-api-keys) for key ops.
+Plus: `usage` aggregates `usage_daily/weekly/monthly/all-time` across every key in one call — no per-key loops.
 
 ## Install
 

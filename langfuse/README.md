@@ -1,38 +1,59 @@
 # langfuse
 
-Remote CLI for managing Langfuse instances (cloud or self-hosted) from Claude Code.
+Remote CLI for managing [Langfuse](https://langfuse.com) instances (cloud or self-hosted) from Claude Code. Stdlib-only Python 3, no dependencies.
 
-Not a replacement for the Langfuse UI or SDKs. This is a control-plane / backup / migration tool for ops you'd otherwise hack together in one-off scripts:
+Part of [agent-plus](../README.md) — Claude Code plugins that cut the tool-call and token cost of driving APIs from an agent.
 
-- **Export / import prompts** — dump all prompts + all versions to JSON, restore anywhere.
-- **Migrate prompts** between instances (cloud → self-hosted, prod → dev) with version numbers, labels, tags, and config preserved.
-- **Trace ping** — send a smoke-test trace after a deploy to verify ingestion end-to-end.
-- **Health checks** across multiple named instances.
-- **Read-only debug** — given a Langfuse user ID, inspect that user's recent sessions, traces, and error observations without clicking through the UI. Designed for AI agents (`monitor-user` returns a single structured JSON blob).
+## Why
 
-Stdlib-only Python 3. No `pip install` required.
+Not a replacement for the Langfuse UI or SDKs. This is the control-plane / backup / migration tool you'd otherwise hack together in one-off scripts, plus a read-only debug entrypoint designed for AI agents.
 
-## Install
+**The headline win: `monitor-user`.** Triaging "what went wrong for user X" via the API means hitting `/users`, `/sessions`, per-session `/sessions/{id}`, per-trace `/traces/{id}` — four endpoints, N+1 calls per user. `monitor-user <id>` does all of that inside the CLI in parallel and returns **one structured JSON blob**: daily-metrics totals, the last N sessions, the latest trace per session, observation counts, total latency, and any `ERROR`-level observations. One tool call, enough context to triage.
+
+Plus the boring-but-necessary stuff: export/import prompts for backup, migrate prompts across instances (with version numbers, labels, tags, config preserved), smoke-test trace ingestion after a deploy, health-check every configured instance in one call.
+
+## Headline commands
 
 ```bash
-claude --plugin-dir /path/to/agent-plus/langfuse
+# Read-only debug — designed for AI agents
+langfuse monitor-user <user-id> --limit 5 --pretty
+langfuse get-traces <trace-id> [<trace-id> ...]
+langfuse get-sessions <session-id>
+langfuse list-user-traces <user-id> --from-timestamp 2026-04-01T00:00:00Z
+
+# Instance ops
+langfuse health                                      # current instance
+langfuse health --all                                # every configured instance in one call
+langfuse list-instances
+langfuse show-instance
+langfuse trace-ping --name deploy-verify             # smoke-test ingestion
+
+# Prompt backup / migration
+langfuse --instance prod export-prompts prod.json
+langfuse --instance prod import-prompts prod.json
+langfuse migrate-prompts --from cloud --to prod
+langfuse migrate-prompts --from cloud --to prod --file snapshot.json --keep
 ```
 
-Or install the whole `agent-plus` repo as a marketplace and enable `langfuse` from there.
+All commands take `--pretty` for indented JSON; otherwise output is compact and `jq`-ready. Unknown IDs come back as `{id, error: "not_found"}` instead of hard-failing — a batch of lookups keeps going. Auth / connectivity errors still hard-fail.
+
+Exit codes: `0` ok, `2` operational failure, `1` config error.
 
 ## Configure
 
-Options stack (shell env wins, then `--env-file`, then auto-loaded `.env`, then JSON config). Pick what fits.
+Layered, highest precedence first: shell env → `--env-file <path>` → auto-loaded project `.env.local` / `.env` → JSON config file. `--no-autoload` disables `.env` discovery.
 
-**Project `.env` auto-loading** — the default. The CLI walks up from cwd for `.env.local` / `.env` and picks up any `LANGFUSE_*` keys not already in the shell. So if your app already has `LANGFUSE_BASE_URL` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` in its `.env`, running `langfuse health` from that dir just works. `--env-file <path>` adds extra files (repeatable); `--no-autoload` disables discovery.
-
-**Single active instance** — in your shell profile, quickest for ad-hoc use:
+**Quickest — single instance in your shell profile:**
 
 ```bash
 export LANGFUSE_BASE_URL="https://langfuse.example.com"
 export LANGFUSE_PUBLIC_KEY="pk-lf-..."
 export LANGFUSE_SECRET_KEY="sk-lf-..."
 ```
+
+**Project `.env` auto-loading** (recommended when your app already has these keys):
+
+The CLI walks up from cwd for `.env.local` / `.env` and picks up any `LANGFUSE_*` key not already in the shell. If your app's `.env` has `LANGFUSE_BASE_URL` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`, running `langfuse health` from that dir just works.
 
 **Multiple named instances** — via env prefix, pick with `--instance <name>`:
 
@@ -60,66 +81,20 @@ export LANGFUSE_PROD_SECRET_KEY="sk-lf-..."
 
 Env wins on conflict. `langfuse list-instances` shows what's resolved.
 
-## Commands
+## Install
 
 ```bash
-langfuse list-instances
-langfuse show-instance
-langfuse --instance <name> show-instance
-
-langfuse health
-langfuse health --all
-
-langfuse trace-ping
-langfuse --instance dev-ollie trace-ping --name deploy-verify
-
-langfuse --instance prod export-prompts prod.json
-langfuse --instance prod import-prompts prod.json
-
-langfuse migrate-prompts --from cloud --to prod
-langfuse migrate-prompts --from cloud --to prod --file snapshot.json --keep
+claude --plugin-dir /path/to/agent-plus/langfuse
 ```
 
-## Debug commands (read-only)
+Or install the whole `agent-plus` repo as a marketplace and enable `langfuse` from there.
 
-All debug commands print JSON to stdout (add `--pretty` for indented output).
-Unknown IDs don't hard-fail — they come back as `{id, error: "not_found"}` so a
-batch of lookups keeps going. Auth / connectivity errors still hard-fail.
+## API quirks codified here
 
-```bash
-# Single-ID lookups (accept one or many IDs)
-langfuse get-traces <trace-id> [<trace-id> ...]
-langfuse get-observations <obs-id> [<obs-id> ...]
-langfuse get-sessions <session-id> [<session-id> ...]
-langfuse get-users <user-id> [<user-id> ...]
+The kind of stuff you'd otherwise have to discover by reading Langfuse's response bodies:
 
-# Recent activity for a user
-langfuse list-user-traces <user-id> --limit 10
-langfuse list-user-traces <user-id> --from-timestamp 2026-04-01T00:00:00Z --to-timestamp 2026-04-30T23:59:59Z
-langfuse list-user-sessions <user-id> --limit 10
-
-# One-shot structured summary for an AI agent
-langfuse monitor-user <user-id> --limit 5 --pretty
-```
-
-`monitor-user` is the entrypoint for AI-agent debugging: give it a Langfuse user
-ID and it returns a single JSON blob with the user's daily-metrics totals, the
-last N sessions, and for each session the latest trace plus its observation
-count, total observation latency, and any `ERROR`-level observations — enough
-context to triage "what went wrong for this user" without hitting the Langfuse UI.
-
-### API quirks
-
-- There is **no** `GET /api/public/users/{id}` endpoint on Langfuse 3.x — the path
-  returns a 404 HTML page. `get-users` uses `GET /api/public/metrics/daily?userId=…`
-  instead and aggregates the daily rows into a `totals` object.
-- `GET /api/public/sessions` (list) returns minimal rows (`{id, createdAt,
-  projectId, environment}`) with no trace count. `monitor-user` enriches each
-  row by calling `GET /api/public/sessions/{id}` (which includes inline
-  `traces[]`) and then `GET /api/public/traces/{latestId}` for observation
-  details.
-
-Exit codes: `0` ok, `2` operational failure, `1` config error.
+- **`GET /api/public/users/{id}` doesn't exist** on Langfuse 3.x — it returns a 404 HTML page. `get-users` uses `GET /api/public/metrics/daily?userId=...` and aggregates the daily rows into a `totals` object.
+- **`GET /api/public/sessions` (list) returns minimal rows** (`{id, createdAt, projectId, environment}`) — no trace count. `monitor-user` enriches each row with `GET /api/public/sessions/{id}` (includes inline `traces[]`) and then `GET /api/public/traces/{latestId}` for observation details. That's the "one blob per user" trick — all the N+1 hops happen server-side.
 
 ## License
 

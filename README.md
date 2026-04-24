@@ -1,40 +1,59 @@
 # agent-plus
 
-A collection of [Claude Code](https://claude.com/claude-code) plugins I use day-to-day. Each subdirectory is a self-contained plugin you can install with `--plugin-dir` today, or via a plugin marketplace once this repo is listed.
+A handful of [Claude Code](https://claude.com/claude-code) plugins that cut the tool-call and token cost of driving third-party APIs from an AI agent.
+
+Every plugin here exists because doing the same job by hand — `curl` + `jq` + raw CLI — made Claude burn round-trips, ingest giant payloads, or copy UUIDs across calls until someone got tired of watching the token meter climb and wrote a wrapper.
+
+## The time savings, concretely
+
+| Plugin | Without it | With it |
+| :--- | :--- | :--- |
+| [`hermes-remote`](./hermes-remote) | A recurring Sonnet-on-every-tick cron burned **~$10 / 12h**. | Skillify pattern — `--script` does the deterministic work, minimal Haiku prompt decides "report or `[SILENT]`". Three orders of magnitude cheaper; successful quiet runs cost pennies. |
+| [`railway-ops`](./railway-ops) | Five sequential `railway` calls per service × N services for incident triage — **~40s on a 5-service project**, plus raw logs and env var *values* landing in the transcript. | `overview` — one call, parallel under the hood, **~8s**, classified errors/warnings only, env var *names* only (values stripped by a canary-tested invariant). |
+| [`langfuse`](./langfuse) | Four separate API hits to piece together "what went wrong for user X" — users, sessions, traces, observations. | `monitor-user <id>` — **1 structured JSON blob** with daily totals, recent sessions, latest trace per session, error observations. |
+| [`coolify-remote`](./coolify-remote) | Set env var → redeploy → poll → verify in container. Four calls + a hand-rolled `until` loop that breaks on the Windows bash shim. | `env set hermes KEY=val --verify --deploy --wait` — **one call, one exit code**. |
+| [`openrouter-remote`](./openrouter-remote) | Pull the 350+ model catalogue into context, let Claude filter in-prompt. | `models list --supports tools --min-context 200000 --max-price-input 1.0` — client-side filter, **only matching rows ever reach Claude**. |
+| [`hcloud-remote`](./hcloud-remote) | `curl api.hetzner.cloud \| python3 -c "..."` — mangled by Windows bash shim, multiline heredocs break. | `hcloud-remote ssh hermes-vps` — resolves name to IP, execs ssh, in-process JSON parsing. |
+| [`supabase-remote`](./supabase-remote) | `supabase db query` returns a JSON envelope with an "untrusted data" preamble when it detects an agent — parsing without that knowledge produces junk. | `sql-inline` / `sql` strips the envelope, returns plain JSON. Plus `rls-audit` — one call, every table, RLS status + policy count. |
+
+These aren't theoretical. Each row is a pain point that got codified after burning time.
+
+## The five patterns that make this work
+
+Every plugin reinforces at least one of these. If you're writing a new plugin, start here:
+
+1. **Aggregate server-side, return one blob.** The CLI hits N endpoints in parallel, stitches the result, returns one structured payload. The agent sees one tool call.
+2. **Resolve by name, not ID.** `coolify-remote deploy hermes` — not `coolify-remote deploy b1c6e2f0-4a3d-4d77-ae6f-...`. UUIDs never touch the agent's context.
+3. **`--wait` on every async mutation.** Deploys, cron triggers, backups — if it returns an action ID, the CLI polls for you. No hand-rolled loops.
+4. **`--json` on every list / show.** Structured output into `jq` is the default. Human-formatted output is for interactive use.
+5. **Strip values the agent shouldn't see.** Env var values, secrets, long blobs — if the agent doesn't need it to decide the next step, it doesn't go into the transcript.
 
 ## Plugins
 
-| Plugin | What it does |
-| :--- | :--- |
-| [`hermes-remote`](./hermes-remote) | CLI for managing a remote [Hermes Agent](https://github.com/NousResearch/hermes-agent) deployment — cron jobs, env, status, model, `config get/set`. |
-| [`langfuse`](./langfuse) | CLI for managing [Langfuse](https://langfuse.com) instances (cloud or self-hosted) — export/import prompts for backup and cross-env migration, smoke-test trace ingestion, health checks across multiple named instances. |
-| [`coolify-remote`](./coolify-remote) | CLI for managing a [Coolify](https://coolify.io) PaaS instance — app lookup by name, env vars with post-write verify, domain set with correct field names, `deploy --wait` polling, bundled TLS enable. |
-| [`hcloud-remote`](./hcloud-remote) | Minimal CLI for day-to-day [Hetzner Cloud](https://hetzner.com/cloud) ops — `server list/show/reboot`, `snapshot create/list`, `ssh <name>`. Deliberately narrow (no volumes/networks/LBs). |
-| [`openrouter-remote`](./openrouter-remote) | CLI for [OpenRouter](https://openrouter.ai) — balance check (with `--alert-below` for crons), usage stats aggregated per key, model catalogue search/filter by price/context/capability, and API key management via the provisioning endpoint. |
-| [`railway-ops`](./railway-ops) | Read-first wrapper around the [Railway](https://railway.app) CLI — single-call env overviews (services, deploy status, recent errors/warnings, env var **names**-only) for fast incident triage. Never leaks env var values. |
+| Plugin | What it wraps | Headline commands |
+| :--- | :--- | :--- |
+| [`hermes-remote`](./hermes-remote) | [Hermes Agent](https://github.com/NousResearch/hermes-agent) deployments | `status`, `cron list/create/trigger`, `config get/set`, `chat`, `env list` |
+| [`langfuse`](./langfuse) | [Langfuse](https://langfuse.com) (cloud or self-hosted) | `health`, `monitor-user`, `export-prompts`, `migrate-prompts`, `trace-ping` |
+| [`coolify-remote`](./coolify-remote) | [Coolify](https://coolify.io) PaaS | `app list`, `env set --verify --deploy --wait`, `tls enable`, `deploy --wait`, `app exec` |
+| [`hcloud-remote`](./hcloud-remote) | [Hetzner Cloud](https://hetzner.com/cloud) (day-to-day ops only) | `server list/show/reboot`, `snapshot create/list`, `ssh <name>` |
+| [`openrouter-remote`](./openrouter-remote) | [OpenRouter](https://openrouter.ai) | `balance --alert-below`, `usage`, `models list/cheap/endpoints`, `keys create/disable/set-limit` |
+| [`railway-ops`](./railway-ops) | [Railway](https://railway.app) (read-only triage) | `overview`, `errors <service>`, `envs <service>` (names only) |
+| [`supabase-remote`](./supabase-remote) | [Supabase](https://supabase.com) | `projects list`, `sql`, `sql-inline`, `rls-audit`, `gen-types` |
 
-More coming as I skillify workflows I keep repeating.
+Per-plugin READMEs have the full reference and the specific gotchas they collapse.
 
 ## Shared conventions
 
-Every plugin in this repo follows the same patterns so switching between them is cheap:
+Same shape across every plugin so switching between them is cheap:
 
-- **Stdlib-only Python 3 CLI** in `bin/<plugin>`. No pip installs, no venvs. Run it standalone if you don't want the plugin wrapper.
-- **Layered `.env` autoloading**, precedence highest-first: `--env-file` → project `.env.local` / `.env` (walked up from cwd) → shell environment (including `~/.claude/settings.json` env). **Project `.env` files win over the shell** — drop one in the repo you're working in and it overrides whatever globals you have set, no unset required. Each plugin scopes autoload to its own prefixes (`HERMES_*`, `LANGFUSE_*`, `COOLIFY_*`, `HCLOUD_*`, `OPENROUTER_*`). **Exception**: `railway-ops` defers to the `railway` CLI's own auth (`railway login` / `~/.railway/config.json`) — no `.env` autoload.
-- **Helpful missing-config errors**: when a required env var is absent, the CLI prints both the preferred project-level location and the global Claude Code settings location.
-- **Resolve-by-name everywhere**: apps, servers, and instances are identified by human names in commands; the CLI looks up UUIDs/IDs internally. You never copy an opaque identifier across commands.
-- **`--json` on every list/show command** for piping to `jq`.
-- **`--wait` on mutating commands** that return async action IDs (deploys, etc.) so you can chain reliably instead of hand-rolling polling loops.
-
-## Per-plugin changelogs
-
-Each plugin keeps its own `CHANGELOG.md` for release notes and incident / pain-point logging. Keep it short: what changed, why it matters, date.
+- **Stdlib-only Python 3.** No `pip install`, no venvs. `bin/<plugin>` is one file — copy it anywhere on `$PATH` and run standalone if you don't want the Claude Code wrapper.
+- **Layered `.env` autoload**, highest precedence first: `--env-file` → project `.env.local` / `.env` (walked up from cwd) → shell env. **Project `.env` wins over shell** — drop one in the repo you're working in and it overrides whatever globals you have set. Each plugin scopes to its own prefix (`HERMES_*`, `COOLIFY_*`, `LANGFUSE_*`, etc.) so configs don't cross-pollute. Exception: `railway-ops` defers to the `railway` CLI's own auth.
+- **Missing-config errors point to both locations** — the project `.env` and `~/.claude/settings.json` — so the user knows where the value should live.
+- **Per-plugin `CHANGELOG.md`** for release notes and incident / pain-point logging. Short: what changed, why it matters, date.
 
 ## Install
 
-### Recommended — marketplace install (persistent, no clone needed)
-
-Add this repo as a marketplace once, then install any plugin by name:
+### Recommended — marketplace install (persistent)
 
 ```bash
 claude plugin marketplace add osouthgate/agent-plus
@@ -44,54 +63,58 @@ claude plugin install hcloud-remote@agent-plus
 claude plugin install openrouter-remote@agent-plus
 claude plugin install langfuse@agent-plus
 claude plugin install railway-ops@agent-plus
+claude plugin install supabase-remote@agent-plus
 ```
 
-Updates later:
+Update later:
 
 ```bash
 claude plugin marketplace update agent-plus
 claude plugin update hermes-remote
 ```
 
-### Alt — session-only, from a local clone (for dev / testing)
+### Session-only — from a local clone
 
-`--plugin-dir` loads a plugin for the current session only — nothing persisted. Useful when hacking on a plugin or trying one before installing:
+`--plugin-dir` loads a plugin for the current shell only. Good for hacking on a plugin or trying one before installing:
 
 ```bash
 git clone https://github.com/osouthgate/agent-plus
-claude --plugin-dir ./agent-plus/hermes-remote     # this shell only
+claude --plugin-dir ./agent-plus/hermes-remote
 ```
 
-Stack multiple plugins by repeating the flag. Each plugin's own README has its config details.
+Stack multiple plugins by repeating the flag.
 
-### Standalone (no Claude Code at all)
+### Standalone — no Claude Code at all
 
-Every plugin's `bin/<plugin>` file is a stdlib-only Python 3 script. Copy it anywhere on `$PATH` and run it — no pip install, no venv, no Claude Code required. See each plugin's README for the one-line `curl -O` install.
+Every `bin/<plugin>` is a stdlib Python 3 script. Copy to `$PATH`, run it. See each plugin's README for the one-line `curl -O` install.
 
 ## Philosophy
 
-Plugins here follow a rule I stole from [Garry Tan's skillify post](https://x.com/garrytan): **deterministic work belongs in scripts, not prompts**. The LLM orchestrates; the code does. Each plugin has a SKILL.md that teaches Claude when to reach for the bundled scripts, not how to reinvent them.
+Rule from [Garry Tan's skillify post](https://x.com/garrytan): **deterministic work belongs in scripts, not prompts.** The LLM orchestrates; the code does. Every plugin ships a `SKILL.md` that teaches Claude *when* to reach for the script, not how to reinvent it in a prompt.
 
-## Development
+That's the whole game. If a plugin's `bin/` script starts embedding LLM calls, something's wrong — the prompting belongs in the caller (Claude Code session, Hermes cron), the determinism belongs in the CLI.
 
-Plugins live as directories with the standard Claude Code plugin shape:
+## Contributing / development
+
+Plugins follow the standard Claude Code plugin shape:
 
 ```
-<plugin-name>/
+<plugin>/
 ├── .claude-plugin/plugin.json
-├── bin/                    # executables auto-added to PATH when plugin enabled
-├── skills/<skill-name>/SKILL.md
+├── bin/<plugin>                  # stdlib Python 3, ~500 lines max
+├── skills/<plugin>/SKILL.md
 ├── README.md
+├── CHANGELOG.md
 └── LICENSE (or inherits root)
 ```
 
-See [Claude Code plugin docs](https://code.claude.com/docs/en/plugins) for the full spec.
+See [Claude Code plugin docs](https://code.claude.com/docs/en/plugins) for the full spec, and [`AGENTS.md`](./AGENTS.md) for the writing conventions and doc-drift rules used in this repo.
 
-To iterate on a plugin locally without reinstalling:
+Iterate locally without reinstalling:
 
 ```bash
 claude --plugin-dir ./<plugin-name>
-# Edit SKILL.md / scripts
+# edit SKILL.md / bin/<name> / README.md
 # /reload-plugins to pick up changes
 ```
 
