@@ -54,6 +54,7 @@ Requires: GITHUB_TOKEN (or `gh` logged in). Optional: GITHUB_REPO.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -65,6 +66,41 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
+
+
+# ──────────────────────────── tool identity ────────────────────────────
+# Every JSON payload this tool emits carries a top-level `tool: {name, version}`
+# field so agents can self-diagnose version drift from the output alone — no
+# extra subprocess call needed. Version is read from the plugin manifest at
+# runtime so bumping plugin.json automatically flows through here.
+
+TOOL_NAME = "github-remote"
+
+
+@functools.lru_cache(maxsize=1)
+def _plugin_version() -> str:
+    """Read the plugin version from `.claude-plugin/plugin.json` relative to
+    this file. Returns 'unknown' on any error — never raises."""
+    try:
+        manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return str(data.get("version", "unknown"))
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+
+
+def _tool_meta() -> dict[str, str]:
+    return {"name": TOOL_NAME, "version": _plugin_version()}
+
+
+def _with_tool_meta(payload: Any) -> Any:
+    """Inject `tool: {name, version}` at the top of a dict payload. Pass-through
+    for non-dict payloads (list, str, None) so single-value responses stay the
+    shape they were."""
+    if isinstance(payload, dict) and "tool" not in payload:
+        return {"tool": _tool_meta(), **payload}
+    return payload
+
 
 # ──────────────────────────── constants ────────────────────────────
 
@@ -960,6 +996,8 @@ def emit_json(obj: Any, *, pretty: bool = False) -> None:
     # Strip internal _exit_nonzero sentinel before printing — caller handles exit.
     if isinstance(scrubbed, dict):
         scrubbed = {k: v for k, v in scrubbed.items() if k != "_exit_nonzero"}
+    # Inject tool meta at the top of dict payloads; non-dicts pass through unchanged.
+    scrubbed = _with_tool_meta(scrubbed)
     if pretty:
         print(json.dumps(scrubbed, indent=2, sort_keys=False, default=str))
     else:
@@ -1009,6 +1047,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    p.add_argument("--version", action="version",
+                   version=f"{TOOL_NAME} {_plugin_version()}")
     _add_common_args(p)
     sub = p.add_subparsers(dest="cmd", required=True)
 

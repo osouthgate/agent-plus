@@ -40,6 +40,7 @@ Python 3.9+, stdlib only. No pip installs.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -53,6 +54,39 @@ from pathlib import Path
 from typing import Any
 
 API_BASE = "https://api.supabase.com/v1"
+
+# ─── tool identity ────────────────────────────────────────────────────────────
+# Every JSON payload this tool emits carries a top-level `tool: {name, version}`
+# field so agents can self-diagnose version drift from the output alone — no
+# extra subprocess call needed. Version is read from the plugin manifest at
+# runtime so bumping plugin.json automatically flows through here.
+
+TOOL_NAME = "supabase-remote"
+
+
+@functools.lru_cache(maxsize=1)
+def _plugin_version() -> str:
+    """Read the plugin version from `.claude-plugin/plugin.json` relative to
+    this file. Returns 'unknown' on any error — never raises."""
+    try:
+        manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return str(data.get("version", "unknown"))
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+
+
+def _tool_meta() -> dict:
+    return {"name": TOOL_NAME, "version": _plugin_version()}
+
+
+def _with_tool_meta(payload: Any) -> Any:
+    """Inject `tool: {name, version}` at the top of a dict payload. Pass-through
+    for non-dict payloads (list, str, None) so single-value responses stay the
+    shape they were."""
+    if isinstance(payload, dict) and "tool" not in payload:
+        return {"tool": _tool_meta(), **payload}
+    return payload
 
 # ─── .env autoloading ─────────────────────────────────────────────────────────
 
@@ -224,7 +258,13 @@ def _api_call(
 
 
 def _dump_json(obj: Any) -> None:
-    json.dump(obj, sys.stdout, indent=2, sort_keys=True, default=str)
+    # Inject `tool: {name, version}` at emit time for dict payloads. Builders
+    # return bare payloads; the tool envelope is applied here so every JSON
+    # write path (list subcommands, sql rows, rls audit, projects current…)
+    # gets the meta without having to remember it. List/scalar payloads pass
+    # through unchanged.
+    wrapped = _with_tool_meta(obj)
+    json.dump(wrapped, sys.stdout, indent=2, default=str)
     sys.stdout.write("\n")
 
 
@@ -254,37 +294,69 @@ def _fetch_projects(debug: bool = False) -> list:
     return data
 
 
-def _resolve_project_ref(ident: str | None, *, debug: bool = False) -> str:
-    """Resolve a project identifier (name substring or ref) to a canonical ref.
+def _resolve_project_ref_with_source(
+    ident: str | None, *, debug: bool = False
+) -> tuple[str, str, str | None]:
+    """Resolve a project identifier to a canonical ref, tracking its source.
 
-    If ident is None, use SUPABASE_PROJECT_REF then the linked project file.
+    Returns a (ref, source, raw_input) tuple where source is one of:
+      - "argument"   : explicit ident passed in (e.g. --project)
+      - "env"        : SUPABASE_PROJECT_REF environment variable
+      - "linked"     : ./supabase/.temp/project-ref (a supabase link-ed repo)
+
+    raw_input is the original identifier (pre-resolution) that the source
+    provided, which is useful for showing "name" vs canonical "ref".
     """
-    if not ident:
-        ident = os.environ.get("SUPABASE_PROJECT_REF", "").strip() or _read_linked_ref()
-        if not ident:
-            raise SystemExit(
-                "No project specified. Pass --project <name-or-ref>, set "
-                "SUPABASE_PROJECT_REF, or run this from a directory with "
-                "supabase/.temp/project-ref (i.e. a `supabase link`-ed repo)."
-            )
+    if ident:
+        source = "argument"
+        raw = ident
+    else:
+        env_ref = os.environ.get("SUPABASE_PROJECT_REF", "").strip()
+        if env_ref:
+            source = "env"
+            raw = env_ref
+            ident = env_ref
+        else:
+            linked = _read_linked_ref()
+            if linked:
+                source = "linked"
+                raw = linked
+                ident = linked
+            else:
+                raise SystemExit(
+                    "No project specified. Pass --project <name-or-ref>, set "
+                    "SUPABASE_PROJECT_REF, or run this from a directory with "
+                    "supabase/.temp/project-ref (i.e. a `supabase link`-ed repo)."
+                )
     projects = _fetch_projects(debug=debug)
     # Exact ref match first.
     for p in projects:
         if p.get("id") == ident or p.get("ref") == ident:
-            return p.get("id") or p.get("ref")
+            return (p.get("id") or p.get("ref"), source, raw)
     # Case-insensitive substring name match.
     lower = ident.lower()
     matches = [p for p in projects if lower in (p.get("name", "") or "").lower()]
     if len(matches) == 1:
-        return matches[0].get("id") or matches[0].get("ref")
+        return (matches[0].get("id") or matches[0].get("ref"), source, raw)
     if len(matches) > 1:
         names = ", ".join(m.get("name", "?") for m in matches)
         raise SystemExit(f"Ambiguous project {ident!r}; matches: {names}")
     # Last attempt: treat ident as a raw ref even if not in the token's list.
     if re.fullmatch(r"[a-z0-9]{20}", ident):
-        return ident
+        return (ident, source, raw)
     names = ", ".join(p.get("name", "?") for p in projects) or "(none)"
     raise SystemExit(f"No project matching {ident!r}. Known: {names}")
+
+
+def _resolve_project_ref(ident: str | None, *, debug: bool = False) -> str:
+    """Resolve a project identifier (name substring or ref) to a canonical ref.
+
+    If ident is None, use SUPABASE_PROJECT_REF then the linked project file.
+    Thin wrapper around _resolve_project_ref_with_source for callers that
+    don't care about the resolution source.
+    """
+    ref, _source, _raw = _resolve_project_ref_with_source(ident, debug=debug)
+    return ref
 
 
 def _have(binary: str) -> bool:
@@ -431,6 +503,71 @@ def cmd_projects_resolve(args: argparse.Namespace) -> None:
     print(ref)
 
 
+def cmd_projects_current(args: argparse.Namespace) -> None:
+    """Show the resolved default project and where the resolution came from.
+
+    Resolution precedence (same as every other command):
+      1. SUPABASE_PROJECT_REF environment variable
+      2. ./supabase/.temp/project-ref (a `supabase link`-ed repo)
+
+    Intentionally does NOT accept a --project override: the point of this
+    command is to show the *default* that other commands will pick up when
+    no explicit --project is passed.
+    """
+    try:
+        ref, source, raw = _resolve_project_ref_with_source(None, debug=args.debug)
+    except SystemExit as exc:
+        # Convert the resolver's "no project found" error into a structured
+        # "no default" response so callers can handle it without parsing stderr.
+        if args.format == "json":
+            _dump_json(
+                {
+                    "resolved": False,
+                    "ref": None,
+                    "source": None,
+                    "raw_input": None,
+                    "error": str(exc),
+                }
+            )
+            return
+        raise
+
+    # Look up the human-friendly name if we can (best-effort; offline/no-token
+    # shouldn't break this command).
+    name = None
+    try:
+        for p in _fetch_projects(debug=args.debug):
+            if (p.get("id") or p.get("ref")) == ref:
+                name = p.get("name")
+                break
+    except SystemExit:
+        name = None
+
+    if args.format == "json":
+        _dump_json(
+            {
+                "resolved": True,
+                "ref": ref,
+                "name": name,
+                "source": source,
+                "raw_input": raw,
+            }
+        )
+        return
+
+    source_label = {
+        "argument": "--project argument",
+        "env": "SUPABASE_PROJECT_REF environment variable",
+        "linked": "./supabase/.temp/project-ref (supabase link)",
+    }.get(source, source)
+    print(f"ref:    {ref}")
+    if name:
+        print(f"name:   {name}")
+    print(f"source: {source_label}")
+    if raw and raw != ref:
+        print(f"input:  {raw}")
+
+
 # ─── subcommands: sql ─────────────────────────────────────────────────────────
 
 
@@ -565,7 +702,15 @@ def cmd_rls_audit(args: argparse.Namespace) -> None:
             count = 0
         normalised.append({"table": name, "rls": bool(rls), "policies": count})
 
-    if args.json:
+    # Resolve the output format. --format is the explicit form;
+    # --json is kept as a backwards-compatible shorthand for --format json.
+    fmt = getattr(args, "format", None) or ("json" if getattr(args, "json", False) else "table")
+    if getattr(args, "json", False) and fmt != "json":
+        sys.stderr.write(
+            "[warn] --json is deprecated; use --format json. "
+            "Ignoring --json because --format was set explicitly.\n"
+        )
+    if fmt == "json":
         _dump_json(normalised)
         return
 
@@ -601,6 +746,12 @@ def cmd_gen_types(args: argparse.Namespace) -> None:
             "https://supabase.com/docs/guides/cli"
         )
     cmd = ["supabase", "gen", "types", "typescript", "--project-id", ref]
+    # Forward each --schema to the underlying CLI. The Supabase CLI accepts
+    # repeated --schema flags, so we mirror that shape here.
+    for schema in getattr(args, "schema", None) or []:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", schema):
+            raise SystemExit(f"Refusing to forward suspicious schema name: {schema!r}")
+        cmd += ["--schema", schema]
     if args.debug:
         sys.stderr.write(f"[debug] {' '.join(cmd)}\n")
     try:
@@ -637,6 +788,11 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
+        "--version",
+        action="version",
+        version=f"{TOOL_NAME} {_plugin_version()}",
+    )
+    p.add_argument(
         "--env-file",
         action="append",
         default=[],
@@ -667,6 +823,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     pr.add_argument("ident", help="Project name or ref")
     pr.set_defaults(func=cmd_projects_resolve)
+
+    pc = proj_sub.add_parser(
+        "current",
+        help="Show the resolved default project and its source "
+             "(SUPABASE_PROJECT_REF env var, or ./supabase/.temp/project-ref from supabase link).",
+    )
+    pc.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format (default: text).",
+    )
+    pc.set_defaults(func=cmd_projects_current)
 
     # sql
     sq = sub.add_parser(
@@ -710,7 +879,19 @@ def build_parser() -> argparse.ArgumentParser:
              "Flags tables with RLS off or no policies.",
     )
     ra.add_argument("--project", help="Project name or ref")
-    ra.add_argument("--json", action="store_true")
+    ra.add_argument(
+        "--format",
+        choices=("table", "json"),
+        default=None,
+        help="Output format. 'table' is human-readable; 'json' is a stable "
+             "machine-readable array of {table, rls, policies}. Defaults to "
+             "'table' unless --json is passed.",
+    )
+    ra.add_argument(
+        "--json",
+        action="store_true",
+        help="Deprecated alias for --format json. Prefer --format json.",
+    )
     ra.set_defaults(func=cmd_rls_audit)
 
     # gen-types
@@ -721,6 +902,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     gt.add_argument("target", help="Target .ts path. Parent directory must already exist.")
     gt.add_argument("--project", help="Project name or ref")
+    gt.add_argument(
+        "--schema",
+        action="append",
+        metavar="NAME",
+        help="Schema to include (e.g. 'public', 'auth'). Repeat to include "
+             "multiple schemas. Defaults to the Supabase CLI default (public).",
+    )
     gt.set_defaults(func=cmd_gen_types)
 
     return p

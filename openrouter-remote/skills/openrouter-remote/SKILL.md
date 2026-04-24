@@ -15,6 +15,10 @@ Stdlib-only Python 3 CLI wrapping three OpenRouter surfaces:
 
 Lives at `${CLAUDE_SKILL_DIR}/../../bin/openrouter-remote`; the plugin auto-adds `bin/` to PATH.
 
+Every JSON payload carries a top-level `tool: {name, version}` field. Check it with `openrouter-remote --version`, or inspect live output via `openrouter-remote balance --json | jq .tool` — useful when debugging whether an agent is hitting a stale plugin install.
+
+**Pipe JSON through `jq`** for any non-trivial slicing — e.g. `models list --json --supports tools | jq '.[] | select(.context_length >= 200000) | .id'`, or `usage --json | jq '.totals.monthly'`. The CLI's built-in filters cover the common cases; `jq` is the escape hatch for everything else without re-fetching.
+
 ## When to reach for this
 
 - User asks about balance, remaining credits, or current spend.

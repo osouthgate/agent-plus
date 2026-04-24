@@ -9,7 +9,8 @@ Subcommands:
   trace-ping [--name N]      Send a smoke-test trace; prints the trace URL
   health [--all]             GET /api/public/health on the active (or all) instance(s)
   list-instances             Show configured instances
-  show-instance [NAME]       Show the resolved config for one instance
+  show-instance              Show the resolved config for the active instance
+                             (use top-level `--instance <name>` to pick)
   get-traces <id> ...        Fetch traces by ID (JSON to stdout)
   get-observations <id> ...  Fetch observations by ID
   get-sessions <id> ...      Fetch sessions by ID (includes inline traces[])
@@ -47,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import functools
 import json
 import os
 import ssl
@@ -56,6 +58,40 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+from typing import Any
+
+
+# ──────────────────────────── tool identity ────────────────────────────
+# Every structured JSON payload this tool emits carries a top-level
+# `tool: {name, version}` field so agents can self-diagnose version drift from
+# the output alone — no extra subprocess call needed. Version is read from the
+# plugin manifest at runtime so bumping plugin.json automatically flows through.
+
+TOOL_NAME = "langfuse"
+
+
+@functools.lru_cache(maxsize=1)
+def _plugin_version() -> str:
+    """Read the plugin version from `.claude-plugin/plugin.json` relative to
+    this file. Returns 'unknown' on any error — never raises."""
+    try:
+        manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return str(data.get("version", "unknown"))
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+
+
+def _tool_meta() -> dict[str, str]:
+    return {"name": TOOL_NAME, "version": _plugin_version()}
+
+
+def _with_tool_meta(payload: Any) -> Any:
+    """Inject `tool: {name, version}` at the top of a dict payload. Pass-through
+    for non-dict payloads so single-value responses keep their shape."""
+    if isinstance(payload, dict) and "tool" not in payload:
+        return {"tool": _tool_meta(), **payload}
+    return payload
 
 
 # ──────────────────────────── .env autoloading ────────────────────────────
@@ -427,7 +463,7 @@ def cmd_trace_ping(args: argparse.Namespace) -> int:
         print(f"ingestion failed ({code}): {resp}", file=sys.stderr)
         return 2
     if args.json:
-        print(json.dumps({"trace_id": trace_id, "url": url, "response": resp}, indent=2))
+        print(json.dumps(_with_tool_meta({"trace_id": trace_id, "url": url, "response": resp}), indent=2))
     else:
         print(f"trace sent to {inst['name']}")
         print(f"  id:  {trace_id}")
@@ -495,12 +531,12 @@ def cmd_list_instances(args: argparse.Namespace) -> int:
 
 def cmd_show_instance(args: argparse.Namespace) -> int:
     inst = resolve(args.instance)
-    print(json.dumps({
+    print(json.dumps(_with_tool_meta({
         "name": inst["name"],
         "base_url": inst["base_url"],
         "public_key": _redact(inst["public_key"]),
         "secret_key": _redact(inst["secret_key"]),
-    }, indent=2))
+    }), indent=2))
     return 0
 
 
@@ -525,7 +561,7 @@ def cmd_show_instance(args: argparse.Namespace) -> int:
 
 def _emit_json(args: argparse.Namespace, obj: dict) -> None:
     indent = 2 if getattr(args, "pretty", False) else None
-    print(json.dumps(obj, indent=indent, ensure_ascii=False))
+    print(json.dumps(_with_tool_meta(obj), indent=indent, ensure_ascii=False))
 
 
 def _fetch_by_id(inst: dict, label: str, path_template: str, ids: list[str]) -> list[dict]:
@@ -738,6 +774,8 @@ def die(msg: str, code: int = 1):
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="langfuse", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version",
+                   version=f"{TOOL_NAME} {_plugin_version()}")
     p.add_argument("--instance", "-i", help="Named instance (see `langfuse list-instances`). Default: config default or single configured.")
     p.add_argument("--env-file", action="append", default=[], help="Additional .env file to load before config resolution (repeatable). Auto-discovery still runs.")
     p.add_argument("--no-autoload", action="store_true", help="Disable .env auto-discovery from cwd upward.")

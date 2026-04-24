@@ -72,6 +72,10 @@ coolify-remote server list                    # Coolify-managed hosts
 
 All list/show commands support `--json` for piping to `jq`.
 
+## Post-processing: prefer `jq`
+
+When you need to extract or reshape fields from the JSON output, reach for `jq` rather than inline `python3 -c "..."`. It's faster to type, more legible, and avoids the shell-escaping / multi-line string pitfalls that plague ad-hoc Python one-liners. `jq` is a single static binary available on every platform, so it's the portable choice for agent-driven post-processing pipelines.
+
 ## Apps are resolved by name
 
 Every command takes `<app>` which is matched against `name`, then `uuid`, then `fqdn` substring. You don't need to copy UUIDs around.

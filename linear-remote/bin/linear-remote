@@ -8,7 +8,7 @@ doesn't burn context chaining `get_issue` + `list_comments` + `get_team`
 
 Commands (all emit JSON; --pretty for indented):
   issues get <id-or-query> [--include-comments] [--include-relations]
-  issues list [--project ...] [--state ...] [--assignee ...] [--team ...] [--label ...]
+  issues list [--project ...] [--state ...] [--assignee ...] [--team-filter ...] [--label ...]
               [--limit 25] [--cursor <c>]
   issues search <query> [--limit 25]
   issues create --title <t> --team <name> [--project <n>] [--body <text|@file>]
@@ -22,12 +22,12 @@ Commands (all emit JSON; --pretty for indented):
   comments add <issue-id> <body>                    # <body> accepts @path for file input
   comments list <issue-id>
 
-  projects list [--team <name>]
+  projects list [--team-filter <name>]
   projects overview <name> [--bucket-limit 25]
 
   teams list
   states <team-name>
-  labels [--team <name>]
+  labels [--team-filter <name>]
   cycles <team-name>
 
 Hard safety rules:
@@ -61,10 +61,45 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
+
+# ──────────────────────────── tool identity ────────────────────────────
+# Every JSON payload this tool emits carries a top-level `tool: {name, version}`
+# field so agents can self-diagnose version drift from the output alone — no
+# extra subprocess call needed. Version is read from the plugin manifest at
+# runtime so bumping plugin.json automatically flows through here.
+
+TOOL_NAME = "linear-remote"
+
+
+@functools.lru_cache(maxsize=1)
+def _plugin_version() -> str:
+    """Read the plugin version from `.claude-plugin/plugin.json` relative to
+    this file. Returns 'unknown' on any error — never raises."""
+    try:
+        manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return str(data.get("version", "unknown"))
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+
+
+def _tool_meta() -> dict[str, str]:
+    return {"name": TOOL_NAME, "version": _plugin_version()}
+
+
+def _with_tool_meta(payload: Any) -> Any:
+    """Inject `tool: {name, version}` at the top of a dict payload. Pass-through
+    for non-dict payloads (list, str, None) so single-value responses stay the
+    shape they were."""
+    if isinstance(payload, dict) and "tool" not in payload:
+        return {"tool": _tool_meta(), **payload}
+    return payload
+
+
 # ──────────────────────────── constants ────────────────────────────
 
 API_URL = "https://api.linear.app/graphql"
-USER_AGENT = "linear-remote/0.1.0 (+https://github.com/osouthgate/agent-plus)"
+USER_AGENT = "linear-remote/0.2.0 (+https://github.com/osouthgate/agent-plus)"
 
 DEFAULT_LIST_LIMIT = 25
 MAX_LIST_LIMIT = 100
@@ -1277,10 +1312,11 @@ def list_cycles_cmd(team: str, cfg: dict[str, str]) -> list[dict[str, Any]]:
 
 def emit_json(obj: Any, *, pretty: bool = False) -> None:
     scrubbed = _scrub(obj)
+    wrapped = _with_tool_meta(scrubbed)
     if pretty:
-        print(json.dumps(scrubbed, indent=2, sort_keys=False, default=str))
+        print(json.dumps(wrapped, indent=2, sort_keys=False, default=str))
     else:
-        print(json.dumps(scrubbed, default=str))
+        print(json.dumps(wrapped, default=str))
 
 
 # ──────────────────────────── CLI ────────────────────────────
@@ -1320,6 +1356,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    p.add_argument("--version", action="version",
+                   version=f"{TOOL_NAME} {_plugin_version()}")
     _add_common_args(p)
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -1346,7 +1384,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sil = si_sub.add_parser(
         "list",
-        description="Example:\n  linear-remote issues list --team LOA --state 'In Progress' --limit 50",
+        description="Example:\n  linear-remote issues list --team-filter LOA --state 'In Progress' --limit 50",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sil.add_argument("--project")
@@ -1447,7 +1485,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp_sub = sp.add_subparsers(dest="action", required=True)
     spl = sp_sub.add_parser(
         "list",
-        description="Example:\n  linear-remote projects list --team LOA",
+        description="Example:\n  linear-remote projects list --team-filter LOA",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     spl.add_argument("--team-filter", dest="team_filter", help="team key or name")
@@ -1484,7 +1522,7 @@ def build_parser() -> argparse.ArgumentParser:
     # labels
     slb = sub.add_parser(
         "labels", help="list labels (team-scoped or workspace)",
-        description="Example:\n  linear-remote labels --team LOA",
+        description="Example:\n  linear-remote labels --team-filter LOA",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     slb.add_argument("--team-filter", dest="team_filter", help="team key or name")

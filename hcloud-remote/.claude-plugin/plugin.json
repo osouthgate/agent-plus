@@ -1,7 +1,7 @@
 {
   "name": "hcloud-remote",
   "description": "Minimal CLI for Hetzner Cloud day-to-day ops — list/show servers, reboot, snapshot, ssh. Resolves servers by name so you never copy IDs around, and prints IPv4/IPv6 cleanly without the Python heredoc dance that breaks on Windows.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Oliver Southgate",
     "url": "https://github.com/osouthgate"

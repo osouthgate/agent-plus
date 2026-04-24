@@ -55,6 +55,23 @@ linear-remote cycles <team-name>
 
 All list/show commands emit JSON to stdout. Use `--pretty` for indentation.
 
+Every payload carries a top-level `tool: {name, version}` field so you can self-diagnose version drift directly from the output. Run `linear-remote --version` to print the version without a command.
+
+### jq recommendation
+
+Pipe through `jq` to slice out the bits you need instead of paging the full JSON into context. Examples:
+
+```bash
+# Just the open-issue identifiers from a project overview
+linear-remote projects overview 'Agent Plus' | jq -r '.issuesByState.inProgress[].identifier'
+
+# Title + state for one issue, no comments tree
+linear-remote issues get LOA-229 | jq '{id: .identifier, title, state: .state.name}'
+
+# Drop the tool meta when piping an issue payload to another tool
+linear-remote issues get LOA-229 | jq 'del(.tool)'
+```
+
 ## Design rules (agent-plus patterns)
 
 1. **Aggregate server-side.** `issues get --include-comments --include-relations` returns the whole context tree in one call. `projects overview` bundles project meta + milestones + state-bucketed issues + recent activity.

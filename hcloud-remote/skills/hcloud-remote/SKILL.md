@@ -54,7 +54,11 @@ hcloud-remote ssh <name>                     # resolves IPv4, shells out to ssh
 hcloud-remote ssh <name> --user admin -- -p 2222 'uptime'
 ```
 
-All list/show commands support `--json`.
+All list/show commands support `--json`. Every JSON payload carries a top-level `tool: {name, version}` field so you can verify which plugin version produced the output.
+
+## Post-processing with jq
+
+For filtering, reshaping, or extracting fields from `--json` output, pipe into [`jq`](https://jqlang.github.io/jq/). It ships on most package managers (`brew install jq`, `apt install jq`, `choco install jq`) and beats ad-hoc `grep`/`python -c` one-liners for working with structured responses. Example: `hcloud-remote server list --json | jq '.[] | {name, status, ipv4: .public_net.ipv4.ip}'`.
 
 ## Servers are resolved by name
 

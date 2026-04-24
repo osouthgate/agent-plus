@@ -344,6 +344,35 @@ class TestIsInt(unittest.TestCase):
 # Left intentionally absent.
 
 
+# ──────────────────────────── tool metadata ────────────────────────────
+
+
+class TestToolMeta(unittest.TestCase):
+    def test_injects_tool_field_on_dict(self) -> None:
+        wrapped = gr._with_tool_meta({"pr": 1})
+        self.assertIn("tool", wrapped)
+        self.assertEqual(wrapped["tool"]["name"], "github-remote")
+        self.assertIn("version", wrapped["tool"])
+        # Tool field is first (dict insertion order) so agents see it up-top.
+        self.assertEqual(list(wrapped.keys())[0], "tool")
+        self.assertEqual(wrapped["pr"], 1)
+
+    def test_non_dict_passes_through(self) -> None:
+        self.assertEqual(gr._with_tool_meta([1, 2, 3]), [1, 2, 3])
+        self.assertEqual(gr._with_tool_meta("str"), "str")
+        self.assertIsNone(gr._with_tool_meta(None))
+
+    def test_existing_tool_field_preserved(self) -> None:
+        payload = {"tool": {"name": "other", "version": "9.9"}, "data": 1}
+        wrapped = gr._with_tool_meta(payload)
+        self.assertEqual(wrapped["tool"]["name"], "other")
+
+    def test_plugin_version_reads_manifest(self) -> None:
+        v = gr._plugin_version()
+        self.assertIsInstance(v, str)
+        self.assertNotEqual(v, "")
+
+
 # ──────────────────────────── emit strips sentinel ────────────────────────────
 
 

@@ -7,18 +7,18 @@ doesn't burn context running `vercel list`, `vercel inspect`, `vercel env ls`,
 `vercel domains ls` per project.
 
 Commands (all emit JSON; --pretty for indented):
-  projects list [--json]
+  projects list
   projects resolve <name-or-id>
-  overview [--project <name-or-id>] [--limit 10] [--json]
-  deployments list [--project ...] [--state ready|error|building] [--limit 20]
+  overview [--project <name-or-id>] [--limit 10]
+  deployments list [--project ...] [--state ready|error|building|queued|canceled] [--limit 20]
   deployments show <deployment-or-url>
   deployments trigger --hook-url <url> [--wait] [--timeout 900]
   logs <deployment-or-url> [--since 1h] [--errors-only] [--limit 100]
-  domains list [--project ...]
-  domains verify <domain> [--project ...] [--wait] [--timeout 300]
-  env list [--project ...] [--env production|preview|development]
-  env set <KEY> <VALUE> [--project ...] [--env ...] [--wait]
-  env remove <KEY> [--project ...] [--env ...] [--wait]
+  domains list --project <name>
+  domains verify <domain> --project <name> [--wait] [--timeout 300]
+  env list --project <name> [--env production|preview|development]
+  env set <KEY> <VALUE> --project <name> [--env ...] [--wait]
+  env remove <KEY> --project <name> [--env ...] [--wait]
 
 Hard safety rules:
   1. Env var VALUES are NEVER written to stdout/stderr. Only names.
@@ -39,6 +39,7 @@ Requires: VERCEL_TOKEN. Optional: VERCEL_TEAM_ID, VERCEL_PROJECT.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import sys
@@ -48,6 +49,41 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+
+# ──────────────────────────── tool identity ────────────────────────────
+# Every JSON payload this tool emits carries a top-level `tool: {name, version}`
+# field so agents can self-diagnose version drift from the output alone — no
+# extra subprocess call needed. Version is read from the plugin manifest at
+# runtime so bumping plugin.json automatically flows through here.
+
+TOOL_NAME = "vercel-remote"
+
+
+@functools.lru_cache(maxsize=1)
+def _plugin_version() -> str:
+    """Read the plugin version from `.claude-plugin/plugin.json` relative to
+    this file. Returns 'unknown' on any error — never raises."""
+    try:
+        manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return str(data.get("version", "unknown"))
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+
+
+def _tool_meta() -> dict[str, str]:
+    return {"name": TOOL_NAME, "version": _plugin_version()}
+
+
+def _with_tool_meta(payload: Any) -> Any:
+    """Inject `tool: {name, version}` at the top of a dict payload. Pass-through
+    for non-dict payloads (list, str, None) so single-value responses stay the
+    shape they were."""
+    if isinstance(payload, dict) and "tool" not in payload:
+        return {"tool": _tool_meta(), **payload}
+    return payload
+
 
 # ──────────────────────────── constants ────────────────────────────
 
@@ -729,10 +765,11 @@ def env_remove(
 
 def emit_json(obj: Any, *, pretty: bool = False) -> None:
     scrubbed = _scrub(obj)
+    wrapped = _with_tool_meta(scrubbed)
     if pretty:
-        print(json.dumps(scrubbed, indent=2, sort_keys=False, default=str))
+        print(json.dumps(wrapped, indent=2, sort_keys=False, default=str))
     else:
-        print(json.dumps(scrubbed, default=str))
+        print(json.dumps(wrapped, default=str))
 
 
 # ──────────────────────────── CLI ────────────────────────────
@@ -771,6 +808,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    p.add_argument("--version", action="version",
+                   version=f"{TOOL_NAME} {_plugin_version()}")
     _add_common_args(p)
     sub = p.add_subparsers(dest="cmd", required=True)
 

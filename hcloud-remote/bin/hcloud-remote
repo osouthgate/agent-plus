@@ -21,6 +21,7 @@ Python 3.9+, stdlib only.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import subprocess
@@ -32,6 +33,39 @@ from pathlib import Path
 from typing import Any
 
 API_BASE = "https://api.hetzner.cloud/v1"
+
+# ─── tool identity ────────────────────────────────────────────────────────────
+# Every JSON payload this tool emits carries a top-level `tool: {name, version}`
+# field so agents can self-diagnose version drift from the output alone — no
+# extra subprocess call needed. Version is read from the plugin manifest at
+# runtime so bumping plugin.json automatically flows through here.
+
+TOOL_NAME = "hcloud-remote"
+
+
+@functools.lru_cache(maxsize=1)
+def _plugin_version() -> str:
+    """Read the plugin version from `.claude-plugin/plugin.json` relative to
+    this file. Returns 'unknown' on any error — never raises."""
+    try:
+        manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return str(data.get("version", "unknown"))
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+
+
+def _tool_meta() -> dict[str, str]:
+    return {"name": TOOL_NAME, "version": _plugin_version()}
+
+
+def _with_tool_meta(payload: Any) -> Any:
+    """Inject `tool: {name, version}` at the top of a dict payload. Pass-through
+    for non-dict payloads (list, str, None) so single-value responses stay the
+    shape they were."""
+    if isinstance(payload, dict) and "tool" not in payload:
+        return {"tool": _tool_meta(), **payload}
+    return payload
 
 # ─── .env autoloading ─────────────────────────────────────────────────────────
 
@@ -183,7 +217,10 @@ class HCloudClient:
 
 
 def _dump_json(obj: Any) -> None:
-    json.dump(obj, sys.stdout, indent=2, sort_keys=True, default=str)
+    wrapped = _with_tool_meta(obj)
+    # sort_keys=False so the injected `tool` field stays pinned to the top of
+    # dict payloads; non-dict payloads (lists, etc.) pass through unchanged.
+    json.dump(wrapped, sys.stdout, indent=2, sort_keys=False, default=str)
     sys.stdout.write("\n")
 
 
@@ -328,6 +365,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="hcloud-remote",
         description="Minimal CLI for Hetzner Cloud day-to-day ops",
     )
+    p.add_argument("--version", action="version",
+                   version=f"{TOOL_NAME} {_plugin_version()}")
     p.add_argument(
         "--env-file",
         action="append",

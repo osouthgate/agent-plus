@@ -46,18 +46,66 @@ Get a personal access token at <https://supabase.com/dashboard/account/tokens>. 
 ```bash
 supabase-remote projects list [--json]
 supabase-remote projects resolve <name-or-ref>
+supabase-remote projects current [--format text|json]
 
 supabase-remote sql <file> [--project NAME] [--verify-rows N] [--json]
 supabase-remote sql-inline "<query>" [--project NAME] [--write] [--json]
 
-supabase-remote rls-audit [--project NAME] [--json]
+supabase-remote rls-audit [--project NAME] [--format table|json]
 
-supabase-remote gen-types <target.ts> [--project NAME]
+supabase-remote gen-types <target.ts> [--project NAME] [--schema NAME]...
 ```
 
-Add `--debug` at the top level to print the underlying HTTP and shell calls (access token is scrubbed).
+Add `--debug` at the top level to print the underlying HTTP and shell calls (access token is scrubbed). Run `supabase-remote --version` to print the plugin version and exit — handy for self-diagnosis without needing auth.
 
-All list-shaped commands support `--json`.
+All list-shaped commands support `--json`. `rls-audit` prefers `--format json`; `--json` is kept as a deprecated alias.
+
+### Tool meta in every JSON payload
+
+Every JSON object this tool emits carries a top-level `tool: { name, version }`
+field, read at runtime from `plugin.json`. Agents can spot version drift from
+the output alone — no extra call needed. List-shaped outputs (e.g. `projects
+list --json`, `rls-audit --format json`, `sql` rows) stay as plain JSON arrays
+because injecting into a list would change the shape.
+
+### Piping to `jq`
+
+All JSON output is single-document, so `jq` works directly:
+
+```bash
+supabase-remote projects list --json | jq '.[] | {name, ref: .id}'
+supabase-remote rls-audit --format json | jq '[.[] | select(.rls == false)]'
+supabase-remote projects current --format json | jq -r .ref
+```
+
+### `projects current`
+
+Shows which project `supabase-remote` would use if you ran a command right now, and where that value came from:
+
+```bash
+$ supabase-remote projects current
+ref:    abcdefghijklmnopqrst
+name:   myproj
+source: SUPABASE_PROJECT_REF environment variable
+
+$ supabase-remote projects current --format json
+{
+  "tool": { "name": "supabase-remote", "version": "0.2.0" },
+  "resolved": true,
+  "ref": "abcdefghijklmnopqrst",
+  "name": "myproj",
+  "source": "env",
+  "raw_input": "abcdefghijklmnopqrst"
+}
+```
+
+`source` is one of:
+
+- `argument` — came from `--project` on the current invocation
+- `env` — came from `SUPABASE_PROJECT_REF`
+- `linked` — read from `./supabase/.temp/project-ref` (written by `supabase link`)
+
+Use this before running a destructive SQL apply when the active project isn't obvious.
 
 ## Projects are resolved by name
 
@@ -105,10 +153,19 @@ Queries `pg_tables` + `pg_policies` via `sql-inline` internally. Flags any table
 ### 3. Regenerate TypeScript types into your project
 
 ```bash
+# Default: public schema only (Supabase CLI default).
 supabase-remote gen-types packages/db/types.ts --project myproj
+
+# Include multiple schemas — repeat --schema.
+supabase-remote gen-types packages/db/types.ts \
+  --project myproj \
+  --schema public \
+  --schema auth
 ```
 
 Wraps `supabase gen types typescript --project-id <ref>` and writes atomically (via a `.tmp` sibling + `os.replace`). Parent directory must already exist — the CLI refuses to `mkdir` implicitly to avoid dumping a types file in the wrong place.
+
+`--schema` accepts any Postgres identifier (`[A-Za-z_][A-Za-z0-9_]*`). Suspicious values are rejected before `supabase` is invoked, so you can't accidentally inject extra CLI flags via the schema name.
 
 ## Inline SQL safety
 

@@ -48,6 +48,8 @@ github-remote overview <branch-or-pr-number>
 
 All list/show commands emit JSON to stdout. Use `--pretty` for indentation.
 
+**jq-friendly.** Default compact JSON pipes cleanly into `jq`. Every dict payload also carries a top-level `tool: {name, version}` field (injected by `_with_tool_meta`) so agents can self-diagnose version drift from the output alone — no extra `--version` subprocess call needed. Prefer `jq` against stable keys (`.pr.number`, `.checks.failing_jobs[]`, `.runs[].conclusion`) rather than parsing human output.
+
 ## Design rules (agent-plus patterns)
 
 1. **Aggregate server-side.** `overview` returns PR state + mergeable + check-runs rollup + review summary + latest runs in one call — replaces 4-6 `gh` invocations.

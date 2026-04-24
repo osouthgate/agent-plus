@@ -372,5 +372,44 @@ class TestBodyArg(unittest.TestCase):
             lr._load_body_arg("@/nonexistent/path/xyz.md")
 
 
+# ──────────────────────────── tool metadata ────────────────────────────
+
+
+class TestToolMeta(unittest.TestCase):
+    def test_injects_tool_field_on_dict(self) -> None:
+        wrapped = lr._with_tool_meta({"issue": "x"})
+        self.assertIn("tool", wrapped)
+        self.assertEqual(wrapped["tool"]["name"], "linear-remote")
+        self.assertIn("version", wrapped["tool"])
+        # Tool field is first (dict insertion order) so agents see it up-top.
+        self.assertEqual(list(wrapped.keys())[0], "tool")
+        self.assertEqual(wrapped["issue"], "x")
+
+    def test_non_dict_passes_through(self) -> None:
+        self.assertEqual(lr._with_tool_meta([1, 2, 3]), [1, 2, 3])
+        self.assertEqual(lr._with_tool_meta("str"), "str")
+        self.assertIsNone(lr._with_tool_meta(None))
+
+    def test_existing_tool_field_preserved(self) -> None:
+        payload = {"tool": {"name": "other", "version": "9.9"}, "data": 1}
+        wrapped = lr._with_tool_meta(payload)
+        # Don't overwrite — caller already set it.
+        self.assertEqual(wrapped["tool"]["name"], "other")
+
+    def test_plugin_version_reads_manifest(self) -> None:
+        v = lr._plugin_version()
+        self.assertIsInstance(v, str)
+        self.assertNotEqual(v, "")
+
+    def test_emit_json_includes_tool_field(self) -> None:
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            lr.emit_json({"id": "LOA-1"}, pretty=False)
+        parsed = json.loads(buf.getvalue())
+        self.assertIn("tool", parsed)
+        self.assertEqual(parsed["tool"]["name"], "linear-remote")
+        self.assertEqual(parsed["id"], "LOA-1")
+
+
 if __name__ == "__main__":
     unittest.main()

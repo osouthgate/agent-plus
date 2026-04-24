@@ -103,7 +103,7 @@ hermes-remote cron create \
     --deliver origin --model anthropic/claude-haiku-4-5
 ```
 
-Most subcommands take `--json` for piping to `jq`.
+Most subcommands take `--json` for machine-parseable output. **Recommended: pipe through `jq`** for field extraction and filtering — e.g. `hermes-remote cron list --json | jq '.[] | select(.state=="paused") | .id'`, `hermes-remote config get --json | jq -r .model`, `hermes-remote status --json | jq .gateway_state`. Every JSON payload is prefixed with a `tool: {name, version}` field so you can self-diagnose version drift (`hermes-remote --version` also works).
 
 ## Changing the LLM model (READ THIS)
 

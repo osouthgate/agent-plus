@@ -67,7 +67,7 @@ vercel-remote projects list --pretty
 # Resolve a name → full project object
 vercel-remote projects resolve my-app
 
-# Recent deployments, error state only
+# Recent deployments, error state only (--state: ready|error|building|queued|canceled)
 vercel-remote deployments list --project my-app --state error --limit 5
 
 # Inspect a specific deployment (ID or URL)

@@ -115,6 +115,16 @@ Debug-command conventions: unknown IDs come back as `{id, error: "not_found"}`
 so an agent can batch lookups without poisoning the whole call. Auth /
 connectivity failures still hard-fail with a snippet of the response body.
 
+Every structured JSON payload carries a top-level `tool: {name, version}` so
+you can detect version drift from output alone. `langfuse --version` prints
+the plugin version directly.
+
+**Pipe to `jq`** for any filtering / projection — e.g.
+`langfuse monitor-user <uid> | jq '.sessions[].errors'` to pull just the
+ERROR-level observations across recent sessions, or
+`langfuse get-traces <id> | jq '.traces[0].observations | length'` for a
+quick observation count. Compact output is `jq`-ready by default.
+
 API quirks worth knowing: `/api/public/users/{id}` doesn't exist on Langfuse 3.x
 (404 HTML) — `get-users` falls back to `/api/public/metrics/daily?userId=…`.
 The `/api/public/sessions` list returns minimal rows; `monitor-user` enriches

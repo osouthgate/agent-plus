@@ -158,5 +158,52 @@ class TestDeploymentRef(unittest.TestCase):
         self.assertEqual(out, "dpl_ABC123")
 
 
+# ──────────────────────────── tool metadata ────────────────────────────
+
+
+class TestToolMeta(unittest.TestCase):
+    def test_injects_tool_field_on_dict(self) -> None:
+        wrapped = vr._with_tool_meta({"project": "x"})
+        self.assertIn("tool", wrapped)
+        self.assertEqual(wrapped["tool"]["name"], "vercel-remote")
+        self.assertIn("version", wrapped["tool"])
+        # Tool field is first (dict insertion order) so agents see it up-top.
+        self.assertEqual(list(wrapped.keys())[0], "tool")
+        self.assertEqual(wrapped["project"], "x")
+
+    def test_non_dict_passes_through(self) -> None:
+        self.assertEqual(vr._with_tool_meta([1, 2, 3]), [1, 2, 3])
+        self.assertEqual(vr._with_tool_meta("str"), "str")
+        self.assertIsNone(vr._with_tool_meta(None))
+
+    def test_existing_tool_field_preserved(self) -> None:
+        payload = {"tool": {"name": "other", "version": "9.9"}, "data": 1}
+        wrapped = vr._with_tool_meta(payload)
+        # Don't overwrite — caller already set it.
+        self.assertEqual(wrapped["tool"]["name"], "other")
+
+    def test_plugin_version_reads_manifest(self) -> None:
+        v = vr._plugin_version()
+        self.assertIsInstance(v, str)
+        self.assertNotEqual(v, "")
+
+    def test_emit_json_injects_tool_on_dict(self) -> None:
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            vr.emit_json({"hello": "world"}, pretty=False)
+        parsed = json.loads(buf.getvalue())
+        self.assertIn("tool", parsed)
+        self.assertEqual(parsed["tool"]["name"], "vercel-remote")
+        self.assertEqual(parsed["hello"], "world")
+
+    def test_emit_json_passes_through_list(self) -> None:
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            vr.emit_json([{"a": 1}, {"b": 2}], pretty=False)
+        parsed = json.loads(buf.getvalue())
+        self.assertIsInstance(parsed, list)
+        self.assertEqual(len(parsed), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -35,7 +35,7 @@ vercel-remote projects resolve <name-or-id>
 
 vercel-remote overview --project <name> [--limit 10] [--pretty]
 
-vercel-remote deployments list [--project <name>] [--state ready|error|building] [--limit 20]
+vercel-remote deployments list [--project <name>] [--state ready|error|building|queued|canceled] [--limit 20]
 vercel-remote deployments show <deployment-or-url>
 vercel-remote deployments trigger --hook-url <url> [--wait] [--timeout 900]
 
@@ -50,6 +50,23 @@ vercel-remote env remove <KEY> --project <name> [--env ...] [--wait]
 ```
 
 All list/show commands emit JSON to stdout. Use `--pretty` for indentation.
+
+Every payload carries a top-level `tool: {name, version}` field so agents can self-diagnose version drift from the output alone. Run `vercel-remote --version` to check the installed version directly.
+
+## Piping to `jq`
+
+Output is JSON-first, so pipe freely to `jq` for focused extraction:
+
+```bash
+# Failing deployments only
+vercel-remote overview --project my-app | jq '.deployments[] | select(.state == "ERROR")'
+
+# Unverified domain names
+vercel-remote domains list --project my-app | jq '.[] | select(.verified == false) | .name'
+
+# Env var names (no values) as a flat list
+vercel-remote env list --project my-app --env production | jq -r '.names[]'
+```
 
 ## Design rules (agent-plus patterns)
 

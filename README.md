@@ -40,8 +40,8 @@ Every plugin reinforces at least one of these. If you're writing a new plugin, s
 | [`coolify-remote`](./coolify-remote) | [Coolify](https://coolify.io) PaaS | `app list`, `env set --verify --deploy --wait`, `tls enable`, `deploy --wait`, `app exec` |
 | [`hcloud-remote`](./hcloud-remote) | [Hetzner Cloud](https://hetzner.com/cloud) (day-to-day ops only) | `server list/show/reboot`, `snapshot create/list`, `ssh <name>` |
 | [`openrouter-remote`](./openrouter-remote) | [OpenRouter](https://openrouter.ai) | `balance --alert-below`, `usage`, `models list/cheap/endpoints`, `keys create/disable/set-limit` |
-| [`railway-ops`](./railway-ops) | [Railway](https://railway.app) (read-only triage) | `overview`, `errors <service>`, `envs <service>` (names only) |
-| [`supabase-remote`](./supabase-remote) | [Supabase](https://supabase.com) | `projects list`, `sql`, `sql-inline`, `rls-audit`, `gen-types` |
+| [`railway-ops`](./railway-ops) | [Railway](https://railway.app) (read-only triage) | `overview` (active+latest deploys, build-log tails on failed deploys), `errors --since-deploy`, `build-logs <service>`, `envs <service>` (names only) |
+| [`supabase-remote`](./supabase-remote) | [Supabase](https://supabase.com) | `projects list/current/resolve`, `sql`, `sql-inline`, `rls-audit --format json`, `gen-types --schema` |
 | [`vercel-remote`](./vercel-remote) | [Vercel](https://vercel.com) (read-first REST API) | `overview --project`, `deployments list/show/trigger`, `logs`, `domains list/verify`, `env list/set/remove` (names only on list) |
 | [`github-remote`](./github-remote) | [GitHub](https://github.com) (read-first REST API) | `overview`, `pr list/resolve/show/comment`, `issue list/resolve/show`, `run list/show/logs/wait` |
 | [`linear-remote`](./linear-remote) | [Linear](https://linear.app) (GraphQL) | `issues get/list/search/create --from-markdown/update/move/assign`, `comments add/list`, `projects list/overview`, `teams/states/labels/cycles` |
