@@ -507,16 +507,26 @@ def fetch_env_var_names(service: str, env: Optional[str]) -> list[str]:
     return strip_env_values(out)
 
 
-def fetch_deployment_logs(deployment_id: str, *, lines: int = 300) -> str:
+def fetch_deployment_logs(deployment_id: str, *,
+                          service: Optional[str] = None,
+                          env: Optional[str] = None,
+                          lines: int = 300) -> str:
     """Fetch logs for a specific deployment (both build and runtime streams).
 
     Used primarily to pull the build-log tail for FAILED deploys. The Railway
-    CLI targets a deployment with `--deployment <id>`; for build failures this
-    returns only the build log since runtime never started.
+    CLI requires BOTH `--deployment <id>` AND `-s <service>` (otherwise it
+    bails with "No service could be found" even though the deployment id
+    uniquely identifies the service). Pass `service` whenever you have it —
+    callers in this tool always do because the wrapper always knows the
+    service name that owns the deploy.
     """
     if not deployment_id:
         return ""
     args = ["logs", "--deployment", deployment_id, "--json", "--lines", str(lines)]
+    if service:
+        args.extend(["-s", service])
+    if env:
+        args.extend(["--environment", env])
     rc, out, err = railway(args, timeout=30)
     if rc != 0:
         sys.stderr.write(
@@ -582,7 +592,10 @@ def _bucket_build_log(entries: list[dict[str, Any]], *, tail_cap: int) -> tuple[
 
 
 def enrich_deploy_with_build_logs(deploy: Optional[dict[str, Any]],
-                                  *, tail: int = 30) -> Optional[dict[str, Any]]:
+                                  *,
+                                  service: Optional[str] = None,
+                                  env: Optional[str] = None,
+                                  tail: int = 30) -> Optional[dict[str, Any]]:
     """If `deploy` is in a failure state, mutate it in-place to add:
       - `buildLogTail`: last `tail` entries as slim dicts
       - `buildErrorKinds`: fingerprint→count across all build-log errors (pre-tail)
@@ -600,7 +613,7 @@ def enrich_deploy_with_build_logs(deploy: Optional[dict[str, Any]],
     deploy_id = deploy.get("id")
     if not deploy_id:
         return deploy
-    raw = fetch_deployment_logs(deploy_id, lines=300)
+    raw = fetch_deployment_logs(deploy_id, service=service, env=env, lines=300)
     if not raw:
         return deploy
     entries = parse_log_entries(raw)
@@ -811,7 +824,7 @@ def build_service_snapshot(
              or active_deploy.get("id") != latest_deploy.get("id"))
     )
     if latest_failed_and_newer:
-        enrich_deploy_with_build_logs(latest_deploy, tail=30)
+        enrich_deploy_with_build_logs(latest_deploy, service=name, env=env, tail=30)
 
     return {
         "name": name,
@@ -982,12 +995,18 @@ def build_overview(
                 })
 
     snapshots.sort(key=lambda s: (s.get("name") or "").lower())
+    # Report whether the GraphQL enrichment path was available — when false,
+    # activeDeploy is always null and commit metadata on latestDeploy is all
+    # null because the plain `railway` CLI can't see that data. Makes the
+    # "missing enrichment" case self-diagnosing instead of looking like a bug.
+    token_configured = _railway_api_token() is not None
     return {
         "project": project_name,
         "projectId": status.get("id"),
         "env": resolved_env or "<linked>",
         "since": since,
         "filter": {"service": service_filter} if service_filter else None,
+        "railwayApiTokenConfigured": token_configured,
         "summary": _summarize_snapshots(snapshots),
         "services": snapshots,
     }
@@ -1149,7 +1168,8 @@ def cmd_build_logs(args: argparse.Namespace) -> None:
         if not deployment_id:
             die("deploy history returned no deployment id")
 
-    raw = fetch_deployment_logs(deployment_id, lines=args.lines)
+    raw = fetch_deployment_logs(deployment_id, service=args.service,
+                                env=args.env, lines=args.lines)
     entries = parse_log_entries(raw)
     tail, stats = _bucket_build_log(entries, tail_cap=args.lines)
     emit({

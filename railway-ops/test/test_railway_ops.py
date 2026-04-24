@@ -724,7 +724,8 @@ class TestOverviewSchemaContract(unittest.TestCase):
         responses = _overview_stub_responses(services, env="production")
         data, _ = self._build(responses)
 
-        expected_keys = {"project", "projectId", "env", "since", "filter", "summary", "services"}
+        expected_keys = {"project", "projectId", "env", "since", "filter",
+                         "railwayApiTokenConfigured", "summary", "services"}
         self.assertEqual(set(data.keys()), expected_keys,
                          "overview top-level keys must remain stable")
 
