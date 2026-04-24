@@ -1,6 +1,6 @@
 # agent-plus
 
-A handful of [Claude Code](https://claude.com/claude-code) plugins that cut the tool-call and token cost of driving third-party APIs from an AI agent.
+A set of [Claude Code](https://claude.com/claude-code) plugins that make AI agents dramatically cheaper at running your infrastructure — they collapse slow, multi-step API dances into one fast call across deploys, databases, cloud, billing, and logs. Zero install pain: single-file Python, also runs standalone.
 
 Every plugin here exists because doing the same job by hand — `curl` + `jq` + raw CLI — made Claude burn round-trips, ingest giant payloads, or copy UUIDs across calls until someone got tired of watching the token meter climb and wrote a wrapper.
 

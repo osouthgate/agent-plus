@@ -5,7 +5,7 @@
     "url": "https://github.com/osouthgate"
   },
   "metadata": {
-    "description": "Stdlib-only Python CLIs that cut the tool-call and token cost of driving third-party infrastructure APIs from an AI agent. Every plugin is a single-file CLI with zero dependencies; all usable standalone outside Claude Code too."
+    "description": "Make AI agents dramatically cheaper at running your infrastructure. Drop-in Claude Code plugins that collapse slow, multi-step API dances into one fast call — deploys, databases, cloud, billing, logs. Zero install pain: single-file Python, also runs standalone."
   },
   "plugins": [
     {
