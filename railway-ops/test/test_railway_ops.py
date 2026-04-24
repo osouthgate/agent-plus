@@ -959,6 +959,27 @@ class TestWriteOutputFile(unittest.TestCase):
         # _write() put the file under `nested/` which didn't exist — mkdir -p.
         self.assertTrue(path.parent.is_dir())
 
+    def test_payload_shape_reports_types_and_sizes(self) -> None:
+        payload = {
+            "tool": {},
+            "service": "api",              # string
+            "lineCount": 42,                # number
+            "isError": True,                # boolean
+            "errorKinds": {"a": 1, "b": 2}, # dict with 2 keys
+            "lines": ["l1", "l2", "l3"],    # list with 3 items
+            "notes": None,                  # null
+        }
+        summary, _ = self._write(payload)
+        shape = summary["payloadShape"]
+        # `tool` is excluded (it's metadata, not payload).
+        self.assertNotIn("tool", shape)
+        self.assertEqual(shape["service"], {"type": "string", "length": 3})
+        self.assertEqual(shape["lineCount"], {"type": "number"})
+        self.assertEqual(shape["isError"], {"type": "boolean"})
+        self.assertEqual(shape["errorKinds"], {"type": "dict", "keys": 2})
+        self.assertEqual(shape["lines"], {"type": "list", "length": 3})
+        self.assertEqual(shape["notes"], {"type": "null"})
+
 
 if __name__ == "__main__":
     unittest.main()

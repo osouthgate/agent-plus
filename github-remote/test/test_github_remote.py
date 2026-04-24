@@ -433,6 +433,26 @@ class TestWriteOutputFile(unittest.TestCase):
                                   "overview", "main"])
         self.assertEqual(args.output, "/tmp/x.json")
 
+    def test_payload_shape_reports_types_and_sizes(self) -> None:
+        payload = {
+            "tool": {},
+            "branch": "main",
+            "runId": 42,
+            "mergeable": True,
+            "head": {"sha": "abc"},
+            "checks": [{"name": "ci"}, {"name": "lint"}, {"name": "test"}],
+            "draft": None,
+        }
+        summary, _ = self._write(payload)
+        shape = summary["payloadShape"]
+        self.assertNotIn("tool", shape)
+        self.assertEqual(shape["branch"], {"type": "string", "length": 4})
+        self.assertEqual(shape["runId"], {"type": "number"})
+        self.assertEqual(shape["mergeable"], {"type": "boolean"})
+        self.assertEqual(shape["head"], {"type": "dict", "keys": 1})
+        self.assertEqual(shape["checks"], {"type": "list", "length": 3})
+        self.assertEqual(shape["draft"], {"type": "null"})
+
 
 if __name__ == "__main__":
     unittest.main()

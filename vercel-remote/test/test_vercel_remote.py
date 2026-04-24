@@ -251,6 +251,26 @@ class TestWriteOutputFile(unittest.TestCase):
                                   "logs", "my-deployment"])
         self.assertEqual(args.output, "/tmp/x.json")
 
+    def test_payload_shape_reports_types_and_sizes(self) -> None:
+        payload = {
+            "tool": {},
+            "project": "my-app",
+            "count": 5,
+            "isProd": True,
+            "meta": {"a": 1},
+            "deployments": [{"id": "x"}, {"id": "y"}],
+            "errors": None,
+        }
+        summary, _ = self._write(payload)
+        shape = summary["payloadShape"]
+        self.assertNotIn("tool", shape)
+        self.assertEqual(shape["project"], {"type": "string", "length": 6})
+        self.assertEqual(shape["count"], {"type": "number"})
+        self.assertEqual(shape["isProd"], {"type": "boolean"})
+        self.assertEqual(shape["meta"], {"type": "dict", "keys": 1})
+        self.assertEqual(shape["deployments"], {"type": "list", "length": 2})
+        self.assertEqual(shape["errors"], {"type": "null"})
+
 
 if __name__ == "__main__":
     unittest.main()

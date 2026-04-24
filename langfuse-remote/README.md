@@ -39,7 +39,7 @@ langfuse-remote migrate-prompts --from cloud --to prod --file snapshot.json --ke
 
 All commands take `--pretty` for indented JSON; otherwise output is compact and `jq`-ready. Unknown IDs come back as `{id, error: "not_found"}` instead of hard-failing — a batch of lookups keeps going. Auth / connectivity errors still hard-fail.
 
-`--output <path>` (top-level flag, place it before the subcommand) writes the full JSON payload to disk and prints a compact envelope (`savedTo`, `bytes`, `payloadKeys`) instead. Use for large dumps (`get-traces` for many IDs, `monitor-user` for a chatty user, full session fetches) that are wasteful to route through the model's context window.
+`--output <path>` (top-level flag, place it before the subcommand) writes the full JSON payload to disk and prints a compact envelope (`savedTo`, `bytes`, `payloadKeys`, `payloadShape` with per-key type + size) instead. Use for large dumps (`get-traces` for many IDs, `monitor-user` for a chatty user, full session fetches) that are wasteful to route through the model's context window.
 
 Exit codes: `0` ok, `2` operational failure, `1` config error.
 

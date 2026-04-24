@@ -1046,6 +1046,7 @@ def _write_output_file(payload: dict, output_path: str) -> dict:
         "bytes": len(text.encode("utf-8")),
         "fileLineCount": text.count("\n") + 1,
         "payloadKeys": [k for k in payload.keys() if k != "tool"],
+        "payloadShape": _payload_shape(payload),
     }
     # Log-shaped payloads carry their line array under `lines`; preview head
     # and tail so the agent can decide whether to Read the file at all.
@@ -1058,6 +1059,32 @@ def _write_output_file(payload: dict, output_path: str) -> dict:
             "tail": lines[-preview_n:] if len(lines) > preview_n * 2 else [],
         }
     return summary
+
+
+def _payload_shape(payload: dict) -> dict[str, dict[str, Any]]:
+    """Shallow type + size map for each top-level key (except `tool`). Lets
+    the agent pick where to Read into the file without scanning the whole
+    thing — e.g. `{traces: {type: list, length: 1}}` signals "drill in".
+    One level deep only; going deeper reinvents jq."""
+    shape: dict[str, dict[str, Any]] = {}
+    for k, v in payload.items():
+        if k == "tool":
+            continue
+        if isinstance(v, str):
+            shape[k] = {"type": "string", "length": len(v)}
+        elif isinstance(v, bool):
+            shape[k] = {"type": "boolean"}
+        elif isinstance(v, (int, float)):
+            shape[k] = {"type": "number"}
+        elif isinstance(v, list):
+            shape[k] = {"type": "list", "length": len(v)}
+        elif isinstance(v, dict):
+            shape[k] = {"type": "dict", "keys": len(v)}
+        elif v is None:
+            shape[k] = {"type": "null"}
+        else:
+            shape[k] = {"type": type(v).__name__}
+    return shape
 
 
 def _resolve_cli_env(args: argparse.Namespace) -> None:

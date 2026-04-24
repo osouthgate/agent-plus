@@ -57,7 +57,7 @@ Only `VERCEL_*` prefixed vars are read.
 
 ## Usage
 
-`--output <path>` is available on every subcommand (pass it before the subcommand): writes the full JSON payload to disk and prints a compact envelope (`savedTo`, `bytes`, `payloadKeys`, plus head/tail previews for log-shaped payloads). Use for large responses (`logs`, `overview` across many deployments) that are wasteful to route through the model's context window.
+`--output <path>` is available on every subcommand (pass it before the subcommand): writes the full JSON payload to disk and prints a compact envelope (`savedTo`, `bytes`, `payloadKeys`, `payloadShape` with per-key type + size, plus head/tail previews for log-shaped payloads). Use for large responses (`logs`, `overview` across many deployments) that are wasteful to route through the model's context window.
 
 ```bash
 # One-call snapshot — project + recent deployments + domains + env NAMES + warnings

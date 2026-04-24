@@ -7,7 +7,8 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 ## Unreleased
 
 ### Added
-- `--output <path>` global flag — writes the full JSON payload to disk and prints a compact envelope (`savedTo`, `bytes`, `payloadKeys`, head/tail previews for log-shaped payloads). Use for large responses (`run logs`, long `pr list`, fat `run show`) that are wasteful to route through the model's context window. [2026-04-24]
+- `--output <path>` global flag — writes the full JSON payload to disk and prints a compact envelope (`savedTo`, `bytes`, `payloadKeys`, `payloadShape`, head/tail previews for log-shaped payloads). Use for large responses (`run logs`, long `pr list`, fat `run show`) that are wasteful to route through the model's context window. [2026-04-24]
+- `payloadShape` field on the `--output` envelope — shallow type + size map for each top-level key (e.g. `{"checks": {"type": "list", "length": 30}}`) so the agent can decide which key to drill into without scanning the file. [2026-04-24]
 
 ## 0.1.0 - 2026-04-24
 
