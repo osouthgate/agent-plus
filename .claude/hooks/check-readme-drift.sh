@@ -65,15 +65,20 @@ for manifest in $new_plugin_manifests; do
     plugin=${manifest%%/*}
     missing=()
 
+    # Use -F (fixed-string) so plugin names containing regex metacharacters
+    # (e.g. 'foo.bar', 'v1+api') don't misbehave as accidental regexes.
+    # Read from `git show HEAD:file` so the check reflects the COMMITTED
+    # state, not the working tree — stays correct under rebase / amend.
+
     # Root README must mention the new plugin somewhere (table row, link, etc.)
     printf '%s\n' "$changed" | grep -qE "^README\.md$" \
-        && grep -q "$plugin" README.md 2>/dev/null \
+        && git show HEAD:README.md 2>/dev/null | grep -qF "$plugin" \
         || missing+=("root README.md mention")
 
     # Marketplace must list the plugin
-    if [ -f .claude-plugin/marketplace.json ]; then
+    if git cat-file -e HEAD:.claude-plugin/marketplace.json 2>/dev/null; then
         printf '%s\n' "$changed" | grep -qE '^\.claude-plugin/marketplace\.json$' \
-            && grep -q "\"$plugin\"" .claude-plugin/marketplace.json 2>/dev/null \
+            && git show HEAD:.claude-plugin/marketplace.json 2>/dev/null | grep -qF "\"$plugin\"" \
             || missing+=(".claude-plugin/marketplace.json entry")
     fi
 
