@@ -9,7 +9,7 @@ allowed-tools: Bash(supabase-remote:*) Bash(python3 *supabase-remote*:*)
 
 Stdlib-only Python 3 CLI wrapping the Supabase Management API + the local `supabase` CLI. One file, no pip installs. Lives at `${CLAUDE_SKILL_DIR}/../../bin/supabase-remote`; the plugin auto-adds `bin/` to PATH.
 
-Generic Supabase ops only. Rainshift-specific Rayna helpers (members lookup, comms tail, stuck-onboarding) live in the rainshift repo under `ops/rayna` and shell out to `sql-inline` here.
+Generic Supabase ops only. Domain-specific helpers (member lookups, custom comms tails, app-specific onboarding queries) belong in the consuming project's own repo and should shell out to `sql-inline` here for the SQL execution.
 
 ## When to reach for this
 
@@ -26,10 +26,9 @@ Do NOT use for auth user management, storage buckets, or edge function deploys â
 Layered config, highest precedence first:
 
 1. `--env-file <path>`
-2. `$CWD/rayna-setup/.env.local` (rainshift convenience)
-3. `$CWD/.env.local` / `$CWD/.env` (walked up from cwd)
-4. `~/.agent-plus/.env`
-5. Shell environment (including Claude Code settings)
+2. `$CWD/.env.local` / `$CWD/.env` (walked up from cwd)
+3. `~/.agent-plus/.env`
+4. Shell environment (including Claude Code settings)
 
 **Project `.env` files override the shell.** Only `SUPABASE_*` keys are picked up.
 

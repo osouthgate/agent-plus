@@ -4,7 +4,7 @@ Remote CLI for day-to-day [Supabase](https://supabase.com) project ops. One file
 
 Part of [agent-plus](../README.md) — Claude Code plugins that cut the tool-call and token cost of driving APIs from an agent.
 
-> Rainshift-specific Rayna ops (members lookup, comms tail, stuck-onboarding) live in the rainshift repo under `ops/rayna` and shell out to `sql-inline` here for the heavy lifting. This plugin stays generic.
+> This plugin stays generic. Domain-specific helpers (member lookups, custom comms tails, app-specific onboarding queries) belong in the consuming project's own repo and should shell out to `sql-inline` here for the SQL execution.
 
 ## Why
 
@@ -54,10 +54,9 @@ Needs Python 3.9+ and either the `supabase` CLI or `psql` on `PATH` for any SQL 
 Layered config, highest precedence first:
 
 1. `--env-file <path>`
-2. `$CWD/rayna-setup/.env.local` (rainshift convenience)
-3. `$CWD/.env.local` / `$CWD/.env` (walked up from cwd)
-4. `~/.agent-plus/.env`
-5. Shell environment (including Claude Code settings)
+2. `$CWD/.env.local` / `$CWD/.env` (walked up from cwd)
+3. `~/.agent-plus/.env`
+4. Shell environment (including Claude Code settings)
 
 Project `.env` files override the shell. Only `SUPABASE_*` keys are picked up.
 
@@ -86,7 +85,7 @@ In scope: project listing, SQL file/inline execution, RLS audit, TypeScript gen-
 
 Out of scope for v1: auth user management, storage buckets, edge functions, migration authoring. Use the `supabase` CLI directly for those.
 
-Project-specific helpers (e.g. domain-specific member lookups) belong in that project's own repo, shelling out to `sql-inline` here. Rainshift's lives under `rainshift/ops/rayna`.
+Project-specific helpers (e.g. domain-specific member lookups) belong in the consuming project's own repo, shelling out to `sql-inline` here.
 
 ## License
 

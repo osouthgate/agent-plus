@@ -6,16 +6,16 @@ CLI (SQL execution, type generation) to give a consistent agent-friendly
 interface: resolve projects by name, strip the "untrusted data" envelope that
 `supabase db query` emits in agent mode, audit RLS, and regenerate types.
 
-Scope is intentionally generic — anything project-specific (e.g. Rainshift's
-Rayna member/comms helpers) lives in that project's own ops/ directory and
-shells out to `sql-inline` here for the heavy lifting.
+Scope is intentionally generic. Project-specific helpers (domain-specific
+member lookups, custom comms tails, app-specific onboarding queries) belong
+in the consuming project's own repo and should shell out to `sql-inline`
+here for the actual SQL execution.
 
 Configuration (highest precedence first):
   1. --env-file <path>
-  2. $CWD/rayna-setup/.env.local   (if it exists — rainshift convenience)
-  3. $CWD/.env.local, $CWD/.env    (walked up from cwd)
-  4. ~/.agent-plus/.env
-  5. Shell environment              (including Claude Code settings)
+  2. $CWD/.env.local, $CWD/.env    (walked up from cwd)
+  3. ~/.agent-plus/.env
+  4. Shell environment              (including Claude Code settings)
 
 Project .env files WIN over the shell.
 
@@ -108,11 +108,8 @@ def _autoload_env_files(extra: list | None = None) -> list:
     for f in extra or []:
         _push(Path(f))
 
-    # 2. $CWD/rayna-setup/.env.local (rainshift convenience)
+    # 2. Walk up from cwd for project .env/.env.local
     cwd = Path.cwd().resolve()
-    _push(cwd / "rayna-setup" / ".env.local")
-
-    # 3. Walk up from cwd for project .env/.env.local
     for parent in (cwd, *cwd.parents):
         before = len(candidates)
         for name in _ENV_FILENAMES:
@@ -120,7 +117,7 @@ def _autoload_env_files(extra: list | None = None) -> list:
         if len(candidates) > before:
             break
 
-    # 4. ~/.agent-plus/.env (lowest, but still beats shell)
+    # 3. ~/.agent-plus/.env (lowest, but still beats shell)
     _push(Path.home() / ".agent-plus" / ".env")
 
     loaded: list = []
