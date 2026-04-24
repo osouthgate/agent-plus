@@ -15,6 +15,7 @@ Every plugin here exists because doing the same job by hand — `curl` + `jq` + 
 | [`openrouter-remote`](./openrouter-remote) | Pull the 350+ model catalogue into context, let Claude filter in-prompt. | `models list --supports tools --min-context 200000 --max-price-input 1.0` — client-side filter, **only matching rows ever reach Claude**. |
 | [`hcloud-remote`](./hcloud-remote) | `curl api.hetzner.cloud \| python3 -c "..."` — mangled by Windows bash shim, multiline heredocs break. | `hcloud-remote ssh hermes-vps` — resolves name to IP, execs ssh, in-process JSON parsing. |
 | [`supabase-remote`](./supabase-remote) | `supabase db query` returns a JSON envelope with an "untrusted data" preamble when it detects an agent — parsing without that knowledge produces junk. | `sql-inline` / `sql` strips the envelope, returns plain JSON. Plus `rls-audit` — one call, every table, RLS status + policy count. |
+| [`vercel-remote`](./vercel-remote) | Four sequential `vercel` CLI calls for a single project's state (`list`, `inspect`, `env ls`, `domains ls`), human-parsed output, 22-char project IDs copy-pasted between invocations. | `overview --project my-app` — one API call, JSON blob with last 10 deployments + commit metadata + domain health + env NAMES, name-resolved, capped payload. |
 
 These aren't theoretical. Each row is a pain point that got codified after burning time.
 
@@ -39,6 +40,7 @@ Every plugin reinforces at least one of these. If you're writing a new plugin, s
 | [`openrouter-remote`](./openrouter-remote) | [OpenRouter](https://openrouter.ai) | `balance --alert-below`, `usage`, `models list/cheap/endpoints`, `keys create/disable/set-limit` |
 | [`railway-ops`](./railway-ops) | [Railway](https://railway.app) (read-only triage) | `overview`, `errors <service>`, `envs <service>` (names only) |
 | [`supabase-remote`](./supabase-remote) | [Supabase](https://supabase.com) | `projects list`, `sql`, `sql-inline`, `rls-audit`, `gen-types` |
+| [`vercel-remote`](./vercel-remote) | [Vercel](https://vercel.com) (read-first REST API) | `overview --project`, `deployments list/show/trigger`, `logs`, `domains list/verify`, `env list/set/remove` (names only on list) |
 
 Per-plugin READMEs have the full reference and the specific gotchas they collapse.
 
@@ -64,6 +66,7 @@ claude plugin install openrouter-remote@agent-plus
 claude plugin install langfuse@agent-plus
 claude plugin install railway-ops@agent-plus
 claude plugin install supabase-remote@agent-plus
+claude plugin install vercel-remote@agent-plus
 ```
 
 Update later:

@@ -42,6 +42,11 @@
       "name": "supabase-remote",
       "source": "./supabase-remote",
       "description": "Supabase CLI wrapper — strips the agent-envelope preamble from sql queries, single-call rls-audit across every table, gen-types into one command."
+    },
+    {
+      "name": "vercel-remote",
+      "source": "./vercel-remote",
+      "description": "Read-first Vercel REST API wrapper — single-call project overviews (deployments with commit metadata, domain verification, env var NAMES-only), name-resolved projects, Deploy Hook triggers with --wait, zero env-value leakage."
     }
   ]
 }
