@@ -999,7 +999,7 @@ def emit_json(obj: Any, *, pretty: bool = False,
         scrubbed = {k: v for k, v in scrubbed.items() if k != "_exit_nonzero"}
     # Inject tool meta at the top of dict payloads; non-dicts pass through unchanged.
     scrubbed = _with_tool_meta(scrubbed)
-    if output and isinstance(scrubbed, dict):
+    if output and isinstance(scrubbed, (dict, list)):
         scrubbed = _write_output_file(scrubbed, output)
     if pretty:
         print(json.dumps(scrubbed, indent=2, sort_keys=False, default=str))
@@ -1007,32 +1007,47 @@ def emit_json(obj: Any, *, pretty: bool = False,
         print(json.dumps(scrubbed, default=str))
 
 
-def _write_output_file(payload: dict, output_path: str) -> dict:
+def _write_output_file(payload: Any, output_path: str) -> dict:
     """Write the full payload as JSON to `output_path` and return a compact
     summary envelope. Lets the agent offload large responses (workflow logs,
     PR diffs, long issue lists) to disk instead of pulling them through the
-    model's context window."""
+    model's context window. Accepts dict or list payloads — list payloads
+    (e.g. `pr list`) keep their raw shape on disk and get a `payloadType`
+    marker in the envelope."""
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, indent=2, default=str)
     path.write_text(text, encoding="utf-8")
 
+    tool = payload.get("tool") if isinstance(payload, dict) else None
     summary: dict[str, Any] = {
-        "tool": payload.get("tool", _tool_meta()),
+        "tool": tool or _tool_meta(),
         "savedTo": str(path),
         "bytes": len(text.encode("utf-8")),
         "fileLineCount": text.count("\n") + 1,
-        "payloadKeys": [k for k in payload.keys() if k != "tool"],
-        "payloadShape": _payload_shape(payload),
     }
-    lines = payload.get("lines")
-    if isinstance(lines, list) and lines:
-        preview_n = 10
-        summary["preview"] = {
-            "totalLines": len(lines),
-            "head": lines[:preview_n],
-            "tail": lines[-preview_n:] if len(lines) > preview_n * 2 else [],
-        }
+
+    if isinstance(payload, dict):
+        summary["payloadKeys"] = [k for k in payload.keys() if k != "tool"]
+        summary["payloadShape"] = _payload_shape(payload)
+        lines = payload.get("lines")
+        if isinstance(lines, list) and lines:
+            preview_n = 10
+            summary["preview"] = {
+                "totalLines": len(lines),
+                "head": lines[:preview_n],
+                "tail": lines[-preview_n:] if len(lines) > preview_n * 2 else [],
+            }
+    elif isinstance(payload, list):
+        summary["payloadType"] = "list"
+        summary["payloadLength"] = len(payload)
+        if payload:
+            preview_n = 10
+            summary["preview"] = {
+                "totalItems": len(payload),
+                "head": payload[:preview_n],
+                "tail": payload[-preview_n:] if len(payload) > preview_n * 2 else [],
+            }
     return summary
 
 

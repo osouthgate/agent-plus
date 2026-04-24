@@ -959,6 +959,34 @@ class TestWriteOutputFile(unittest.TestCase):
         # _write() put the file under `nested/` which didn't exist — mkdir -p.
         self.assertTrue(path.parent.is_dir())
 
+    def test_list_payload_writes_raw_list_to_disk(self) -> None:
+        # `projects` emits a raw list; --output must not silently drop it.
+        payload = [{"name": "proj-a"}, {"name": "proj-b"}, {"name": "proj-c"}]
+        summary, path = self._write(payload)
+        self.assertTrue(path.exists())
+        # File contents round-trip as the original list (not wrapped).
+        self.assertEqual(json.loads(path.read_text("utf-8")), payload)
+        self.assertEqual(summary["payloadType"], "list")
+        self.assertEqual(summary["payloadLength"], 3)
+        # Lists don't get payloadKeys / payloadShape (those are dict-only).
+        self.assertNotIn("payloadKeys", summary)
+        self.assertNotIn("payloadShape", summary)
+        self.assertEqual(summary["preview"]["totalItems"], 3)
+        self.assertEqual(summary["preview"]["head"][0], {"name": "proj-a"})
+        self.assertEqual(summary["preview"]["tail"], [])  # short list
+
+    def test_long_list_payload_gets_head_and_tail(self) -> None:
+        payload = [{"i": i} for i in range(100)]
+        summary, _ = self._write(payload)
+        self.assertEqual(summary["preview"]["totalItems"], 100)
+        self.assertEqual(summary["preview"]["head"][0], {"i": 0})
+        self.assertEqual(summary["preview"]["tail"][-1], {"i": 99})
+
+    def test_empty_list_payload_has_no_preview(self) -> None:
+        summary, _ = self._write([])
+        self.assertEqual(summary["payloadLength"], 0)
+        self.assertNotIn("preview", summary)
+
     def test_payload_shape_reports_types_and_sizes(self) -> None:
         payload = {
             "tool": {},

@@ -6,6 +6,9 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+### Fixed
+- `--output` no longer silently drops list-shaped payloads (e.g. `projects list`). The raw list is written to disk unchanged; the envelope reports `payloadType: "list"` + `payloadLength` instead of `payloadKeys`/`payloadShape`, plus head/tail item previews. [2026-04-24]
+
 ### Added
 - `--output <path>` global flag — writes the full JSON payload to disk and prints a compact envelope (`savedTo`, `bytes`, `payloadKeys`, `payloadShape`, head/tail previews for log-shaped payloads). Use for large responses (`logs`, long `overview`) that are wasteful to route through the model's context window. [2026-04-24]
 - `payloadShape` field on the `--output` envelope — shallow type + size map for each top-level key (e.g. `{"deployments": {"type": "list", "length": 50}}`) so the agent can decide which key to drill into without scanning the file. [2026-04-24]

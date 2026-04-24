@@ -251,6 +251,23 @@ class TestWriteOutputFile(unittest.TestCase):
                                   "logs", "my-deployment"])
         self.assertEqual(args.output, "/tmp/x.json")
 
+    def test_list_payload_writes_raw_list_to_disk(self) -> None:
+        # `projects list` emits a raw list; --output must not silently drop it.
+        payload = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+        summary, path = self._write(payload)
+        self.assertTrue(path.exists())
+        self.assertEqual(json.loads(path.read_text("utf-8")), payload)
+        self.assertEqual(summary["payloadType"], "list")
+        self.assertEqual(summary["payloadLength"], 3)
+        self.assertNotIn("payloadKeys", summary)
+        self.assertNotIn("payloadShape", summary)
+        self.assertEqual(summary["preview"]["totalItems"], 3)
+
+    def test_empty_list_payload_has_no_preview(self) -> None:
+        summary, _ = self._write([])
+        self.assertEqual(summary["payloadLength"], 0)
+        self.assertNotIn("preview", summary)
+
     def test_payload_shape_reports_types_and_sizes(self) -> None:
         payload = {
             "tool": {},

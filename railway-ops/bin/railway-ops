@@ -1022,7 +1022,7 @@ def die(msg: str) -> None:
 
 def emit(data: Any, pretty: bool, output: Optional[str] = None) -> None:
     wrapped = _with_tool_meta(data)
-    if output and isinstance(wrapped, dict):
+    if output and isinstance(wrapped, (dict, list)):
         wrapped = _write_output_file(wrapped, output)
     if pretty:
         print(json.dumps(wrapped, indent=2, default=str))
@@ -1030,34 +1030,49 @@ def emit(data: Any, pretty: bool, output: Optional[str] = None) -> None:
         print(json.dumps(wrapped, default=str))
 
 
-def _write_output_file(payload: dict, output_path: str) -> dict:
+def _write_output_file(payload: Any, output_path: str) -> dict:
     """Write the full payload as JSON to `output_path` and return a compact
     summary envelope. Lets the agent offload large responses (build logs,
-    service snapshots) to disk instead of pulling them through the model's
-    context window."""
+    service snapshots, project lists) to disk instead of pulling them through
+    the model's context window. Accepts dict or list payloads — list payloads
+    (e.g. `projects`) keep their raw shape on disk and get a `payloadType`
+    marker in the envelope."""
     path = Path(output_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, indent=2, default=str)
     path.write_text(text, encoding="utf-8")
 
+    tool = payload.get("tool") if isinstance(payload, dict) else None
     summary: dict[str, Any] = {
-        "tool": payload.get("tool", _tool_meta()),
+        "tool": tool or _tool_meta(),
         "savedTo": str(path),
         "bytes": len(text.encode("utf-8")),
         "fileLineCount": text.count("\n") + 1,
-        "payloadKeys": [k for k in payload.keys() if k != "tool"],
-        "payloadShape": _payload_shape(payload),
     }
-    # Log-shaped payloads carry their line array under `lines`; preview head
-    # and tail so the agent can decide whether to Read the file at all.
-    lines = payload.get("lines")
-    if isinstance(lines, list) and lines:
-        preview_n = 10
-        summary["preview"] = {
-            "totalLines": len(lines),
-            "head": lines[:preview_n],
-            "tail": lines[-preview_n:] if len(lines) > preview_n * 2 else [],
-        }
+
+    if isinstance(payload, dict):
+        summary["payloadKeys"] = [k for k in payload.keys() if k != "tool"]
+        summary["payloadShape"] = _payload_shape(payload)
+        # Log-shaped payloads carry their line array under `lines`; preview
+        # head and tail so the agent can decide whether to Read the file.
+        lines = payload.get("lines")
+        if isinstance(lines, list) and lines:
+            preview_n = 10
+            summary["preview"] = {
+                "totalLines": len(lines),
+                "head": lines[:preview_n],
+                "tail": lines[-preview_n:] if len(lines) > preview_n * 2 else [],
+            }
+    elif isinstance(payload, list):
+        summary["payloadType"] = "list"
+        summary["payloadLength"] = len(payload)
+        if payload:
+            preview_n = 10
+            summary["preview"] = {
+                "totalItems": len(payload),
+                "head": payload[:preview_n],
+                "tail": payload[-preview_n:] if len(payload) > preview_n * 2 else [],
+            }
     return summary
 
 

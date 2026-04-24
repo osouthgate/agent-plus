@@ -6,6 +6,9 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+### Fixed
+- `--output` no longer silently drops list-shaped payloads. The raw list is written to disk unchanged; the envelope reports `payloadType: "list"` + `payloadLength` instead of `payloadKeys`/`payloadShape`, plus head/tail item previews. [2026-04-24]
+
 ### Added
 - `--output <path>` top-level flag (place before the subcommand) — writes the full JSON payload to disk and prints a compact envelope (`savedTo`, `bytes`, `payloadKeys`, `payloadShape`) instead. Use for large dumps (`get-traces` over many IDs, `monitor-user` for a chatty user, full session fetches) that are wasteful to route through the model's context window. [2026-04-24]
 - `payloadShape` field on the `--output` envelope — shallow type + size map for each top-level key (e.g. `{"traces": {"type": "list", "length": 1}}`) so the agent can decide which key to drill into without scanning the file. Addresses the observed workflow where agents wrote manual inspect scripts to figure out where nested arrays lived. [2026-04-24]
