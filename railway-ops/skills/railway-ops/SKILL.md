@@ -26,9 +26,21 @@ The skill bails with a clear message if any of these preconditions are missing.
 - User asks **"what env vars does <service> have"** — run `envs <service>` to get NAMES only. Values never touch stdout.
 - User says **"show me Railway"** / **"Railway status"** — run `status` to get the project/env/whoami context.
 
+## Triage recipes
+
+**DB incident on a known service** — skip `overview`, go straight to the focused command with a high limit:
+
+```bash
+.claude/skills/railway-ops/bin/railway-ops errors <service> --env production --since 24h --limit 50 --pretty
+```
+
+`overview` caps each service's errors[] at 20 and is noisy when you already know which service is on fire. `errors` pulls 10× the log lines, caps errors/warnings at 50 by default, and emits a bucketed `errorKinds` summary (fingerprint → count) so a flood of 800 identical FK violations can't hide behind the truncation. Read `errorTotal` and `errorKinds` first — they reveal scale before you read any individual line.
+
+**Scanning the whole env** — use `overview`, but always check `summary.errors` and each service's `errorTotal` / `errorKinds` before trusting the per-service `errors[]` list. `errors[]` is truncated; the kinds buckets are not.
+
 ## Commands
 
-All commands emit JSON to stdout. Use `--pretty` for indented output.
+All commands emit a single JSON document to stdout (the "JSON-first contract"). Use `--pretty` for indented output when a human is reading; default is compact JSON for piping into `jq` or agent tooling.
 
 ```bash
 # Single-call snapshot — the headline feature. Project, env, per-service
@@ -36,6 +48,12 @@ All commands emit JSON to stdout. Use `--pretty` for indented output.
 # NAMES per service. Runs per-service fetches in parallel.
 .claude/skills/railway-ops/bin/railway-ops overview --env production --pretty
 .claude/skills/railway-ops/bin/railway-ops overview --env staging --since 1h --pretty
+
+# Narrow to a single service (case-insensitive substring match against name)
+.claude/skills/railway-ops/bin/railway-ops overview --env production --service api --pretty
+
+# Override the per-service errors/warnings cap (default 20)
+.claude/skills/railway-ops/bin/railway-ops overview --env production --limit 50 --pretty
 
 # whoami + linked project + available environments
 .claude/skills/railway-ops/bin/railway-ops status --pretty
@@ -68,6 +86,13 @@ All commands emit JSON to stdout. Use `--pretty` for indented output.
   "projectId": "5199ef24-...",
   "env": "production",
   "since": "24h",
+  "filter": null,
+  "summary": {
+    "services": 3,
+    "failures": 0,
+    "errors": 2,
+    "warnings": 5
+  },
   "services": [
     {
       "name": "api",
@@ -79,6 +104,13 @@ All commands emit JSON to stdout. Use `--pretty` for indented output.
         { "timestamp": "...", "level": "error", "message": "...", "module": "..." }
       ],
       "warnings": [ ... ],
+      "errorTotal": 847,
+      "warningTotal": 12,
+      "errorKinds": {
+        "insert or update on relationship_evidence row <n> violates FK": 847
+      },
+      "warningKinds": { "slow query took <n>ms": 12 },
+      "truncated": true,
       "envVarNames": ["ALLOWED_ORIGINS", "DATABASE_URL", "OPENAI_API_KEY", ...]
     },
     { "name": "Redis", ... },
@@ -87,11 +119,19 @@ All commands emit JSON to stdout. Use `--pretty` for indented output.
 }
 ```
 
+- `filter` is `null` when no `--service` filter was applied, otherwise `{"service": "<name>"}`.
+- `summary` is a roll-up across the (possibly filtered) `services` array: `services` count, `failures` (services whose latest deploy is not `SUCCESS` and not stopped), plus **pre-cap** totals of `errors` and `warnings` (so a flood of identical errors is reflected here even though each service's `errors[]` is truncated).
+- `errorTotal` / `warningTotal` on each service snapshot are pre-cap counts. `errors[]` and `warnings[]` remain capped and deduped for readability; always compare the two to tell whether truncation is hiding something.
+- `errorKinds` / `warningKinds` are fingerprint-bucketed counts (top 10 by frequency). UUIDs, numbers, hex, and quoted strings are normalised away before bucketing, so "FK violation on row 12345" and "FK violation on row 67890" collapse into one bucket. Read these before trusting the individual lines — a truncated `errors[]` of 20 can misrepresent 800 identical failures.
+- `truncated` is `true` when the pre-cap total exceeds what's shown in `errors[]`/`warnings[]`.
+- Field names are stable across releases; changes are additive. Prefer `jq` against these keys rather than parsing human output.
+
 ### Log classification
 
 - Pulls last ~500 lines per service via `railway logs --json --since <dur>`.
 - Classifies by the `level` field (Pino/stdlib logger convention) first, falling back to regex on the `message` text (`/\b(error|fatal|panic|exception|traceback|unhandled)\b/i` for errors, `/\b(warn|warning)\b/i` for warnings).
-- Dedupes consecutive identical messages. Caps each bucket at 20 per service (the `errors` command uses `--limit` up to 50).
+- Dedupes consecutive identical messages. Caps each bucket at `--limit` (default 20) most-recent entries per service. The `errors` subcommand uses its own `--limit` (default 50) for deeper single-service triage.
+- **Truncation is visible:** `errors[]` / `warnings[]` are capped, but `errorTotal` / `warningTotal` / `errorKinds` / `warningKinds` are computed across every classified line, so you can always tell how much the cap is hiding.
 
 ## Architecture note
 
@@ -104,8 +144,10 @@ Parallelism: per-service log + variable fetches are fanned out across a thread p
 - `--pretty` — indent JSON output (accepted on every subcommand).
 - `--env <name>` — target a specific Railway environment (production, staging, …). Defaults to the linked env when omitted.
 - `--since <duration>` — `30s` / `5m` / `2h` / `1d` / `1w` / ISO 8601. Only affects log fetches.
-- `--log-lines N` (overview) — override per-service log line count (default 500).
-- `--limit N` (errors) — cap on errors/warnings buckets (default 50).
+- `--log-lines N` (overview) — override per-service log line count pulled from `railway logs` (default 500).
+- `--service <name>` (overview) — case-insensitive substring match; narrows `services` and re-scopes `summary` to just the matched services.
+- `--limit N` (overview) — per-service cap on the deduped errors/warnings buckets (default 20).
+- `--limit N` (errors) — cap on errors/warnings buckets for the single-service `errors` command (default 50).
 
 ## Testing
 

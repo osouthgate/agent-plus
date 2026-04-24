@@ -236,5 +236,334 @@ class TestParseLogEntries(unittest.TestCase):
         self.assertTrue(entries[1].get("_non_json"))
 
 
+# ──────────────────────────── fingerprint + kinds ────────────────────────────
+
+
+class TestFingerprint(unittest.TestCase):
+    def test_numbers_collapse(self) -> None:
+        a = ro.fingerprint_message("insert or update on table violates FK row 12345")
+        b = ro.fingerprint_message("insert or update on table violates FK row 67890")
+        self.assertEqual(a, b)
+
+    def test_uuids_collapse(self) -> None:
+        a = ro.fingerprint_message("job 550e8400-e29b-41d4-a716-446655440000 failed")
+        b = ro.fingerprint_message("job 6ba7b810-9dad-11d1-80b4-00c04fd430c8 failed")
+        self.assertEqual(a, b)
+        self.assertIn("<uuid>", a)
+
+    def test_quoted_strings_collapse(self) -> None:
+        a = ro.fingerprint_message('column "foo_bar" does not exist')
+        b = ro.fingerprint_message('column "baz_qux" does not exist')
+        self.assertEqual(a, b)
+
+    def test_truncates_very_long(self) -> None:
+        fp = ro.fingerprint_message("x" * 500)
+        self.assertLessEqual(len(fp), ro.FINGERPRINT_MAX_LEN + 1)  # +1 for ellipsis
+
+    def test_empty_is_empty(self) -> None:
+        self.assertEqual(ro.fingerprint_message(""), "")
+
+
+class TestKindsBucketing(unittest.TestCase):
+    def test_flood_of_identical_errors_counts_all(self) -> None:
+        # 847 FK violations with different row IDs — all should bucket together
+        # under a single fingerprint with count=847, even though errors[] is
+        # capped at 20.
+        entries = [
+            {"level": "error",
+             "message": f"insert or update on relationship_evidence row {i} violates FK",
+             "timestamp": f"t{i}"}
+            for i in range(847)
+        ]
+        errors, warnings, stats = ro._bucket_with_totals(entries, cap=20)
+        self.assertLessEqual(len(errors), 20)
+        self.assertEqual(stats["errorTotal"], 847)
+        # Exactly one fingerprint bucket — all 847 collapse into it.
+        self.assertEqual(len(stats["errorKinds"]), 1)
+        fp, count = next(iter(stats["errorKinds"].items()))
+        self.assertEqual(count, 847)
+        self.assertIn("<n>", fp)
+
+    def test_top_n_kinds_sorted_desc(self) -> None:
+        kinds = {"a": 5, "b": 100, "c": 1, "d": 100}
+        top = ro.top_n_kinds(kinds, n=3)
+        # Sort: count desc, fingerprint asc for ties.
+        self.assertEqual(list(top.keys()), ["b", "d", "a"])
+        self.assertEqual(top["b"], 100)
+
+    def test_top_n_kinds_respects_n(self) -> None:
+        kinds = {str(i): i for i in range(20)}
+        self.assertEqual(len(ro.top_n_kinds(kinds, n=5)), 5)
+
+
+# ──────────────────────────── summarize snapshots ────────────────────────────
+
+
+class TestSummarizeSnapshots(unittest.TestCase):
+    def test_empty(self) -> None:
+        self.assertEqual(
+            ro._summarize_snapshots([]),
+            {"services": 0, "failures": 0, "errors": 0, "warnings": 0},
+        )
+
+    def test_counts_errors_warnings_and_failures(self) -> None:
+        snapshots = [
+            {"name": "a", "status": "SUCCESS", "errors": [{"message": "e1"}],
+             "warnings": [{"message": "w1"}, {"message": "w2"}]},
+            {"name": "b", "status": "FAILED", "errors": [], "warnings": []},
+            {"name": "c", "status": "CRASHED", "errors": [{"message": "e2"}], "warnings": []},
+            {"name": "d", "error": "snapshot failed: boom"},  # collection error
+        ]
+        summary = ro._summarize_snapshots(snapshots)
+        self.assertEqual(summary["services"], 4)
+        # b (FAILED) + c (CRASHED) + d (collection error) → 3
+        self.assertEqual(summary["failures"], 3)
+        # a: 1, c: 1 → 2
+        self.assertEqual(summary["errors"], 2)
+        # a: 2 → 2
+        self.assertEqual(summary["warnings"], 2)
+
+    def test_status_case_insensitive(self) -> None:
+        snapshots = [{"name": "x", "status": "failed", "errors": [], "warnings": []}]
+        self.assertEqual(ro._summarize_snapshots(snapshots)["failures"], 1)
+
+    def test_missing_buckets_treated_as_empty(self) -> None:
+        snapshots = [{"name": "x", "status": "SUCCESS"}]
+        summary = ro._summarize_snapshots(snapshots)
+        self.assertEqual(summary, {"services": 1, "failures": 0, "errors": 0, "warnings": 0})
+
+
+# ──────────────────────────── overview schema contract ────────────────────────────
+
+
+def _overview_stub_responses(
+    services: list[dict],
+    *,
+    logs_by_service: dict[str, str] | None = None,
+    variables_by_service: dict[str, str] | None = None,
+    since: str = "24h",
+    log_lines: int = 500,
+    env: str | None = None,
+) -> dict[tuple[str, ...], tuple[int, str, str]]:
+    """Build a StubRunner response map for a complete overview call.
+
+    When ``env`` is set, the ``railway`` commands issued by ``build_overview``
+    append ``--environment <env>`` to ``service status``, ``logs``, and
+    ``variables``. Stub keys must match exactly (StubRunner uses prefix match
+    against argv), so we assemble them dynamically here.
+    """
+    logs_by_service = logs_by_service or {}
+    variables_by_service = variables_by_service or {}
+
+    env_suffix: tuple[str, ...] = ("--environment", env) if env else ()
+
+    service_status_key = ("service", "status", "--all", "--json") + env_suffix
+
+    responses: dict[tuple[str, ...], tuple[int, str, str]] = {
+        ("--version",): (0, "railway 4.0.0", ""),
+        ("whoami",): (0, "Logged in as test@example.com", ""),
+        ("status", "--json"): (
+            0,
+            json.dumps({"name": "test-project", "id": "proj-1"}),
+            "",
+        ),
+        service_status_key: (0, json.dumps(services), ""),
+    }
+    for svc in services:
+        name = svc["name"]
+        logs = logs_by_service.get(name, "")
+        variables = variables_by_service.get(name, "{}")
+        logs_key = (
+            "logs", "-s", name, "--json", "--lines", str(log_lines),
+            "--since", since,
+        ) + env_suffix
+        variables_key = ("variables", "-s", name, "--json") + env_suffix
+        responses[logs_key] = (0, logs, "")
+        responses[variables_key] = (0, variables, "")
+    return responses
+
+
+class TestOverviewSchemaContract(unittest.TestCase):
+    """Contract tests: overview JSON shape must remain stable."""
+
+    def _build(self, responses, **kwargs):
+        stub = StubRunner(responses)
+        with patch.object(ro, "run_cmd", stub):
+            return ro.build_overview("production", "24h", 500, **kwargs), stub
+
+    def test_top_level_keys_present(self) -> None:
+        services = [
+            {"id": "svc-1", "name": "api", "deploymentId": "dep-1",
+             "status": "SUCCESS", "stopped": False},
+        ]
+        responses = _overview_stub_responses(services, env="production")
+        data, _ = self._build(responses)
+
+        expected_keys = {"project", "projectId", "env", "since", "filter", "summary", "services"}
+        self.assertEqual(set(data.keys()), expected_keys,
+                         "overview top-level keys must remain stable")
+
+        self.assertEqual(data["project"], "test-project")
+        self.assertEqual(data["projectId"], "proj-1")
+        self.assertEqual(data["env"], "production")
+        self.assertEqual(data["since"], "24h")
+        self.assertIsNone(data["filter"])  # no --service supplied
+        self.assertIsInstance(data["services"], list)
+
+    def test_summary_shape(self) -> None:
+        services = [
+            {"id": "svc-1", "name": "api", "deploymentId": "dep-1",
+             "status": "SUCCESS", "stopped": False},
+            {"id": "svc-2", "name": "worker", "deploymentId": "dep-2",
+             "status": "FAILED", "stopped": False},
+        ]
+        logs = {
+            "api": json.dumps({"level": "error", "message": "boom", "timestamp": "t1"}),
+            "worker": "\n".join([
+                json.dumps({"level": "error", "message": "e1", "timestamp": "t1"}),
+                json.dumps({"level": "warn", "message": "w1", "timestamp": "t2"}),
+            ]),
+        }
+        responses = _overview_stub_responses(services, logs_by_service=logs, env="production")
+        data, _ = self._build(responses)
+
+        summary = data["summary"]
+        self.assertEqual(set(summary.keys()), {"services", "failures", "errors", "warnings"},
+                         "summary keys must remain stable")
+        self.assertEqual(summary["services"], 2)
+        self.assertEqual(summary["failures"], 1)  # worker is FAILED
+        self.assertEqual(summary["errors"], 2)    # api: 1, worker: 1
+        self.assertEqual(summary["warnings"], 1)  # worker: 1
+
+    def test_service_filter_narrows_result(self) -> None:
+        services = [
+            {"id": "svc-1", "name": "api", "deploymentId": "dep-1",
+             "status": "SUCCESS", "stopped": False},
+            {"id": "svc-2", "name": "worker", "deploymentId": "dep-2",
+             "status": "SUCCESS", "stopped": False},
+            {"id": "svc-3", "name": "postgres", "deploymentId": "dep-3",
+             "status": "SUCCESS", "stopped": False},
+        ]
+        responses = _overview_stub_responses(services, env="production")
+        data, stub = self._build(responses, service_filter="worker")
+
+        self.assertEqual(data["filter"], {"service": "worker"})
+        self.assertEqual(len(data["services"]), 1)
+        self.assertEqual(data["services"][0]["name"], "worker")
+        self.assertEqual(data["summary"]["services"], 1)
+
+        # Confirm we only hit the worker's logs/variables, not the others.
+        log_calls = [c for c in stub.calls if len(c) > 1 and c[1] == "logs"]
+        service_args_hit = {c[3] for c in log_calls if len(c) > 3}
+        self.assertEqual(service_args_hit, {"worker"})
+
+    def test_service_filter_case_insensitive(self) -> None:
+        services = [
+            {"id": "svc-1", "name": "API", "deploymentId": "dep-1",
+             "status": "SUCCESS", "stopped": False},
+        ]
+        # logs-call key uses the original casing 'API'
+        responses = _overview_stub_responses(services, env="production")
+        data, _ = self._build(responses, service_filter="api")
+        self.assertEqual(len(data["services"]), 1)
+        self.assertEqual(data["services"][0]["name"], "API")
+
+    def test_service_filter_no_match_returns_empty_services(self) -> None:
+        services = [
+            {"id": "svc-1", "name": "api", "deploymentId": "dep-1",
+             "status": "SUCCESS", "stopped": False},
+        ]
+        responses = _overview_stub_responses(services, env="production")
+        data, _ = self._build(responses, service_filter="nonexistent")
+        self.assertEqual(data["services"], [])
+        self.assertEqual(data["summary"]["services"], 0)
+        self.assertEqual(data["filter"], {"service": "nonexistent"})
+
+    def test_bucket_cap_respected(self) -> None:
+        services = [
+            {"id": "svc-1", "name": "api", "deploymentId": "dep-1",
+             "status": "SUCCESS", "stopped": False},
+        ]
+        # 10 distinct error lines; cap=3 should keep only 3.
+        logs = "\n".join(
+            json.dumps({"level": "error", "message": f"err-{i}", "timestamp": f"t{i}"})
+            for i in range(10)
+        )
+        responses = _overview_stub_responses(
+            services, logs_by_service={"api": logs}, env="production"
+        )
+        data, _ = self._build(responses, bucket_cap=3)
+        snap = data["services"][0]
+        # errors[] is capped at 3, but errorTotal and the summary now track
+        # the pre-cap count so a flood can't hide behind the truncation.
+        self.assertEqual(len(snap["errors"]), 3)
+        self.assertEqual(snap["errorTotal"], 10)
+        self.assertTrue(snap["truncated"])
+        self.assertEqual(data["summary"]["errors"], 10)
+
+    def test_service_snapshot_keys_stable(self) -> None:
+        services = [
+            {"id": "svc-1", "name": "api", "deploymentId": "dep-1",
+             "status": "SUCCESS", "stopped": False},
+        ]
+        variables = {"api": json.dumps({"KEY1": "v1"})}
+        responses = _overview_stub_responses(
+            services, variables_by_service=variables, env="production"
+        )
+        data, _ = self._build(responses)
+
+        snap = data["services"][0]
+        expected_service_keys = {
+            "name", "id", "status", "stopped", "latestDeploy",
+            "errors", "warnings", "errorTotal", "warningTotal",
+            "errorKinds", "warningKinds", "truncated", "envVarNames",
+        }
+        self.assertEqual(set(snap.keys()), expected_service_keys,
+                         "service snapshot keys must remain stable")
+        self.assertIsInstance(snap["latestDeploy"], dict)
+        self.assertEqual(set(snap["latestDeploy"].keys()), {"id", "status"})
+
+    def test_json_round_trips_cleanly(self) -> None:
+        """End-to-end: build_overview output must serialise to JSON without errors."""
+        services = [
+            {"id": "svc-1", "name": "api", "deploymentId": "dep-1",
+             "status": "SUCCESS", "stopped": False},
+        ]
+        responses = _overview_stub_responses(services, env="production")
+        data, _ = self._build(responses)
+        blob = json.dumps(data)
+        self.assertIsInstance(blob, str)
+        parsed = json.loads(blob)
+        self.assertEqual(parsed, json.loads(json.dumps(data)))
+
+
+# ──────────────────────────── argparse contract ────────────────────────────
+
+
+class TestArgparseContract(unittest.TestCase):
+    """Verify the CLI surface — flag names are part of the public contract."""
+
+    def test_overview_accepts_service_and_limit(self) -> None:
+        parser = ro.build_parser()
+        args = parser.parse_args([
+            "overview", "--env", "production", "--service", "api", "--limit", "5",
+        ])
+        self.assertEqual(args.cmd, "overview")
+        self.assertEqual(args.env, "production")
+        self.assertEqual(args.service, "api")
+        self.assertEqual(args.limit, 5)
+
+    def test_overview_defaults(self) -> None:
+        parser = ro.build_parser()
+        args = parser.parse_args(["overview"])
+        self.assertIsNone(args.service)
+        self.assertEqual(args.limit, ro.DEFAULT_OVERVIEW_BUCKET_CAP)
+        self.assertEqual(args.since, ro.DEFAULT_SINCE)
+        self.assertEqual(args.log_lines, ro.DEFAULT_OVERVIEW_LOG_LINES)
+
+    def test_back_compat_bucket_cap_alias(self) -> None:
+        self.assertEqual(ro.OVERVIEW_BUCKET_CAP, ro.DEFAULT_OVERVIEW_BUCKET_CAP)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -7,9 +7,12 @@ burn context running `railway list`, `railway service status`, `railway logs`,
 `railway variables` per service.
 
 Commands (all emit JSON to stdout; use --pretty for indented):
-  overview [--env <name>] [--since <dur>] [--limit N]
+  overview [--env <name>] [--service <name>] [--since <dur>] [--limit N]
       Single-shot snapshot: project, env, services[], deploy status, recent
-      errors/warnings per service, and env var NAMES (never values).
+      errors/warnings per service, env var NAMES (never values), and a
+      top-level `summary` object with counts (services/failures/errors/
+      warnings). `--service` filters to a single service for focused triage.
+      `--limit` overrides the per-service error/warning cap.
   status
       Current project/env/service context + whoami.
   errors <service> [--since <dur>] [--limit N]
@@ -20,6 +23,12 @@ Commands (all emit JSON to stdout; use --pretty for indented):
       Per-service deploy status shortlist.
   projects
       `railway list` re-shaped to JSON.
+
+JSON-first contract:
+  Every command emits a single JSON document on stdout. Fields are stable
+  across releases; additive changes may add new fields but will not rename
+  or remove existing ones without a major-version bump. Use `--pretty` for
+  human-readable output; machine consumers should parse stdout as JSON.
 
 Hard safety rules:
   1. Env var VALUES are NEVER written to stdout/stderr. Only names.
@@ -44,13 +53,55 @@ from typing import Any, Callable, Optional
 DEFAULT_SINCE = "24h"
 DEFAULT_OVERVIEW_LOG_LINES = 500
 DEFAULT_ERRORS_LIMIT = 50
-OVERVIEW_BUCKET_CAP = 20
+DEFAULT_OVERVIEW_BUCKET_CAP = 20
+# Back-compat alias; prefer DEFAULT_OVERVIEW_BUCKET_CAP.
+OVERVIEW_BUCKET_CAP = DEFAULT_OVERVIEW_BUCKET_CAP
 CMD_TIMEOUT_SEC = 30
 
 # Classification regexes — applied to text log lines (fallback path) and also
 # used to confirm JSON `level` field matches. Deliberately broad but not greedy.
 ERROR_RE = re.compile(r"\b(error|fatal|panic|exception|traceback|unhandled)\b", re.IGNORECASE)
 WARNING_RE = re.compile(r"\b(warn|warning)\b", re.IGNORECASE)
+
+# Top-N cap for the per-service errorKinds / warningKinds bucketed summaries.
+# The buckets exist specifically so a flood of identical errors can't hide behind
+# the truncated errors[] list — keep this generous enough that a real incident
+# shows up, small enough that the overview stays scannable.
+DEFAULT_KINDS_TOP_N = 10
+
+# Fingerprint normalisation: collapses variable parts (UUIDs, numbers, quoted
+# strings, hex) so "FK violation on row 12345" and "FK violation on row 67890"
+# bucket together. Applied in order.
+_UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE)
+_HEX_RE = re.compile(r"\b0x[0-9a-f]+\b|\b[0-9a-f]{16,}\b", re.IGNORECASE)
+_NUM_RE = re.compile(r"\b\d+\b")
+_DQSTR_RE = re.compile(r'"[^"\n]{0,200}"')
+_SQSTR_RE = re.compile(r"'[^'\n]{0,200}'")
+_WS_RE = re.compile(r"\s+")
+FINGERPRINT_MAX_LEN = 120
+
+
+def fingerprint_message(msg: str) -> str:
+    """Normalise a log message into a bucketable fingerprint.
+
+    Strips UUIDs/hex/numbers and quoted strings so messages that differ only
+    by a row ID, timestamp, or inlined value collapse into one bucket. This is
+    the key used by the `errorKinds` / `warningKinds` summaries so that a flood
+    of 800 identical FK violations shows up as one bucket with count=800,
+    instead of being hidden behind the 20-line errors[] truncation.
+    """
+    if not msg:
+        return ""
+    s = msg.strip()
+    s = _UUID_RE.sub("<uuid>", s)
+    s = _HEX_RE.sub("<hex>", s)
+    s = _DQSTR_RE.sub('"<str>"', s)
+    s = _SQSTR_RE.sub("'<str>'", s)
+    s = _NUM_RE.sub("<n>", s)
+    s = _WS_RE.sub(" ", s).strip()
+    if len(s) > FINGERPRINT_MAX_LEN:
+        s = s[:FINGERPRINT_MAX_LEN].rstrip() + "…"
+    return s
 
 # Commands that write — rejected outright. railway-ops is read-only.
 BLOCKED_SUBCOMMANDS = {
@@ -209,11 +260,35 @@ def parse_log_entries(raw: str) -> list[dict[str, Any]]:
 def bucket_log_entries(entries: list[dict[str, Any]], cap: int) -> tuple[
         list[dict[str, Any]], list[dict[str, Any]]]:
     """Classify entries into (errors, warnings). Dedupes consecutive identical
-    messages. Keeps the most-recent `cap` of each bucket."""
+    messages. Keeps the most-recent `cap` of each bucket.
+
+    Back-compat shape: returns (errors, warnings) only. For the flood-resistant
+    `errorKinds` / `warningKinds` summary + totals, use `summarize_log_buckets`.
+    """
+    errors, warnings, _ = _bucket_with_totals(entries, cap)
+    return errors, warnings
+
+
+def _bucket_with_totals(entries: list[dict[str, Any]], cap: int) -> tuple[
+        list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Internal: classify + dedupe + cap, AND compute totals / kind buckets.
+
+    Returns (errors[cap], warnings[cap], stats) where stats =
+      {errorTotal, warningTotal, errorKinds: Counter, warningKinds: Counter}
+
+    Dedupe here matches the original behaviour: consecutive identical messages
+    collapse into one bucket entry. Totals, however, count EVERY classified
+    entry — that's the whole point, so a flood of 800 identical FK violations
+    shows up as errorTotal=800 even though errors[] may hold only 20.
+    """
     errors: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     last_error_msg: Optional[str] = None
     last_warning_msg: Optional[str] = None
+    error_total = 0
+    warning_total = 0
+    error_kinds: dict[str, int] = {}
+    warning_kinds: dict[str, int] = {}
 
     for entry in entries:
         kind = (classify_log_line(entry)
@@ -222,6 +297,7 @@ def bucket_log_entries(entries: list[dict[str, Any]], cap: int) -> tuple[
         if not kind:
             continue
         msg = str(entry.get("message") or entry.get("msg") or "").strip()
+        fp = fingerprint_message(msg)
         slim = {
             "timestamp": entry.get("timestamp") or entry.get("time"),
             "level": entry.get("level"),
@@ -229,20 +305,39 @@ def bucket_log_entries(entries: list[dict[str, Any]], cap: int) -> tuple[
             "module": entry.get("module"),
         }
         if kind == "error":
+            error_total += 1
+            if fp:
+                error_kinds[fp] = error_kinds.get(fp, 0) + 1
             if msg == last_error_msg:
                 continue
             last_error_msg = msg
             errors.append(slim)
         else:
+            warning_total += 1
+            if fp:
+                warning_kinds[fp] = warning_kinds.get(fp, 0) + 1
             if msg == last_warning_msg:
                 continue
             last_warning_msg = msg
             warnings.append(slim)
 
+    stats = {
+        "errorTotal": error_total,
+        "warningTotal": warning_total,
+        "errorKinds": error_kinds,
+        "warningKinds": warning_kinds,
+    }
     # Keep most-recent `cap` entries. Logs are typically returned oldest-first,
     # so keep the tail. If entries are newest-first, this still gives us `cap`
     # contiguous items — downstream consumers should not rely on the order.
-    return errors[-cap:], warnings[-cap:]
+    return errors[-cap:], warnings[-cap:], stats
+
+
+def top_n_kinds(kinds: dict[str, int], n: int = DEFAULT_KINDS_TOP_N) -> dict[str, int]:
+    """Return the top-N entries of a fingerprint→count map, sorted by count
+    desc then fingerprint asc. Emits as dict (JSON preserves insertion order)."""
+    items = sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0]))[:n]
+    return {k: v for k, v in items}
 
 
 # ──────────────────────────── railway wrappers ────────────────────────────
@@ -329,7 +424,7 @@ def build_service_snapshot(
     name = service_row.get("name") or service_row.get("id") or "unknown"
     raw_logs = fetch_logs(name, env, lines=log_lines, since=since)
     entries = parse_log_entries(raw_logs)
-    errors, warnings = bucket_log_entries(entries, bucket_cap)
+    errors, warnings, stats = _bucket_with_totals(entries, bucket_cap)
     env_var_names = fetch_env_var_names(name, env)
     return {
         "name": name,
@@ -342,11 +437,56 @@ def build_service_snapshot(
         },
         "errors": errors,
         "warnings": warnings,
+        "errorTotal": stats["errorTotal"],
+        "warningTotal": stats["warningTotal"],
+        "errorKinds": top_n_kinds(stats["errorKinds"]),
+        "warningKinds": top_n_kinds(stats["warningKinds"]),
+        "truncated": stats["errorTotal"] > len(errors) or stats["warningTotal"] > len(warnings),
         "envVarNames": env_var_names,
     }
 
 
-def build_overview(env: Optional[str], since: str, log_lines: int) -> dict[str, Any]:
+_FAILURE_STATUSES = {"FAILED", "CRASHED", "ERRORED", "REMOVED"}
+
+
+def _summarize_snapshots(snapshots: list[dict[str, Any]]) -> dict[str, int]:
+    """Compute totals across service snapshots for the top-level `summary` field.
+
+    Counts:
+      services  — total snapshots included (post-filter)
+      failures  — snapshots whose `status` is a known failure state OR that
+                  errored out during collection (`error` field present)
+      errors    — sum of per-service error-bucket sizes
+      warnings  — sum of per-service warning-bucket sizes
+    """
+    failures = 0
+    errors = 0
+    warnings = 0
+    for snap in snapshots:
+        status = (snap.get("status") or "").upper()
+        if status in _FAILURE_STATUSES or snap.get("error"):
+            failures += 1
+        # Prefer the pre-cap totals (errorTotal/warningTotal) so a flood of
+        # identical errors is reflected here; fall back to bucket length for
+        # old callers / collection-failure snapshots.
+        errors += int(snap.get("errorTotal", len(snap.get("errors") or [])))
+        warnings += int(snap.get("warningTotal", len(snap.get("warnings") or [])))
+    return {
+        "services": len(snapshots),
+        "failures": failures,
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+def build_overview(
+    env: Optional[str],
+    since: str,
+    log_lines: int,
+    *,
+    service_filter: Optional[str] = None,
+    bucket_cap: int = DEFAULT_OVERVIEW_BUCKET_CAP,
+) -> dict[str, Any]:
     status = get_status()
     project_name = status.get("name", "unknown")
     # Resolve the env used for this snapshot — if not passed, use linked env.
@@ -359,6 +499,10 @@ def build_overview(env: Optional[str], since: str, log_lines: int) -> dict[str, 
 
     services = list_services(resolved_env)
 
+    if service_filter:
+        target = service_filter.lower()
+        services = [s for s in services if (s.get("name") or "").lower() == target]
+
     # Parallelise per-service fetches — each one is 2 CLI roundtrips (logs +
     # variables). Thread pool is fine since we're CPU-idle while subprocess
     # blocks on network I/O.
@@ -368,7 +512,7 @@ def build_overview(env: Optional[str], since: str, log_lines: int) -> dict[str, 
         futures = {
             pool.submit(
                 build_service_snapshot, svc, resolved_env,
-                since=since, log_lines=log_lines, bucket_cap=OVERVIEW_BUCKET_CAP,
+                since=since, log_lines=log_lines, bucket_cap=bucket_cap,
             ): svc.get("name", "?")
             for svc in services
         }
@@ -387,6 +531,8 @@ def build_overview(env: Optional[str], since: str, log_lines: int) -> dict[str, 
         "projectId": status.get("id"),
         "env": resolved_env or "<linked>",
         "since": since,
+        "filter": {"service": service_filter} if service_filter else None,
+        "summary": _summarize_snapshots(snapshots),
         "services": snapshots,
     }
 
@@ -408,7 +554,13 @@ def emit(data: Any, pretty: bool) -> None:
 
 def cmd_overview(args: argparse.Namespace) -> None:
     check_prereqs()
-    data = build_overview(args.env, args.since, args.log_lines)
+    data = build_overview(
+        args.env,
+        args.since,
+        args.log_lines,
+        service_filter=args.service,
+        bucket_cap=args.limit,
+    )
     emit(data, args.pretty)
 
 
@@ -434,13 +586,18 @@ def cmd_errors(args: argparse.Namespace) -> None:
     # Pull more lines than overview — this command is focused.
     raw = fetch_logs(args.service, args.env, lines=max(args.limit * 10, 500), since=args.since)
     entries = parse_log_entries(raw)
-    errors, warnings = bucket_log_entries(entries, args.limit)
+    errors, warnings, stats = _bucket_with_totals(entries, args.limit)
     emit({
         "service": args.service,
         "env": args.env or "<linked>",
         "since": args.since,
         "errors": errors,
         "warnings": warnings,
+        "errorTotal": stats["errorTotal"],
+        "warningTotal": stats["warningTotal"],
+        "errorKinds": top_n_kinds(stats["errorKinds"]),
+        "warningKinds": top_n_kinds(stats["warningKinds"]),
+        "truncated": stats["errorTotal"] > len(errors) or stats["warningTotal"] > len(warnings),
     }, args.pretty)
 
 
@@ -504,10 +661,15 @@ def build_parser() -> argparse.ArgumentParser:
     over = sub.add_parser("overview", help="full env/services/errors/envs snapshot")
     _add_globals(over)
     over.add_argument("--env", help="Railway environment name (e.g. production, staging)")
+    over.add_argument("--service",
+                      help="filter snapshot to a single service name (focused triage)")
     over.add_argument("--since", default=DEFAULT_SINCE,
                       help=f"pull logs since this duration (default: {DEFAULT_SINCE})")
     over.add_argument("--log-lines", type=int, default=DEFAULT_OVERVIEW_LOG_LINES,
                       help=f"log lines per service (default: {DEFAULT_OVERVIEW_LOG_LINES})")
+    over.add_argument("--limit", type=int, default=DEFAULT_OVERVIEW_BUCKET_CAP,
+                      help=(f"per-service cap on errors and warnings "
+                            f"(default: {DEFAULT_OVERVIEW_BUCKET_CAP})"))
 
     st = sub.add_parser("status", help="current project/env/whoami context")
     _add_globals(st)
@@ -516,8 +678,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_globals(er)
     er.add_argument("service", help="Railway service name")
     er.add_argument("--env", help="Railway environment name")
-    er.add_argument("--since", default=DEFAULT_SINCE)
-    er.add_argument("--limit", type=int, default=DEFAULT_ERRORS_LIMIT)
+    er.add_argument("--since", default=DEFAULT_SINCE,
+                    help=f"pull logs since this duration (default: {DEFAULT_SINCE})")
+    er.add_argument("--limit", type=int, default=DEFAULT_ERRORS_LIMIT,
+                    help=(f"cap on errors and warnings buckets "
+                          f"(default: {DEFAULT_ERRORS_LIMIT})"))
 
     ev = sub.add_parser("envs", help="env var NAMES only for one service (values stripped)")
     _add_globals(ev)
