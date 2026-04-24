@@ -27,6 +27,21 @@ The skill bails with a clear message if any of these preconditions are missing.
 - User asks **"what env vars does <service> have"** — run `envs <service>` to get NAMES only. Values never touch stdout.
 - User says **"show me Railway"** / **"Railway status"** — run `status` to get the project/env/whoami context.
 
+## When NOT to use this — fall back to `railway` directly
+
+**This wrapper is read-only by design.** Write actions are deliberately unwrapped and rejected (`up`, `deploy`, `redeploy`, `restart`, `down`, `delete`, `init`, `link`, `unlink`, `add`, `scale`). If the user wants to DO something (change state), you should skip `railway-ops` entirely and use the raw `railway` CLI — it's already authed on their machine.
+
+Specific cases where you should use `railway ...` (or `gh` / `git` / a deploy hook) directly, not `railway-ops`:
+
+- **Redeploying, restarting, or triggering a fresh build.** → `railway redeploy`, `railway up`, or push a commit.
+- **Changing env vars** (set/unset/import). → `railway variables --set KEY=VALUE` or the Railway dashboard. `railway-ops envs` only reads NAMES.
+- **Linking or switching environments.** → `railway link`, `railway environment`.
+- **Reading the raw build log of a SUCCESSFUL deploy.** `railway-ops overview` auto-attaches `buildLogTail` only when `latestDeploy` is FAILED and distinct from `activeDeploy`. For the build log of a successful deploy, either pass `--deployment <id>` to `railway-ops build-logs` (which works on any status), or run `railway logs --deployment <id>` directly.
+- **Tailing logs live.** `railway-ops` does one-shot JSON snapshots; it doesn't stream. Use `railway logs -s <svc>` for a live tail.
+- **Anything the wrapper doesn't expose yet** — volumes, plugins, teams, billing, domain config. The wrapper scope is deliberately narrow; everything else is `railway` territory.
+
+**Don't get stuck in a loop.** If a `railway-ops` command returns a "blocked write subcommand" error, or the user's request obviously needs a write the wrapper doesn't support, immediately switch to `railway` directly rather than re-trying `railway-ops` with different flags. The wrapper's purpose is to make *reading* faster and safer, not to replace the CLI.
+
 ## Triage recipes
 
 **DB incident on a known service** — skip `overview`, go straight to the focused command with a high limit:
