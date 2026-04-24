@@ -1,0 +1,1224 @@
+#!/usr/bin/env python3
+"""
+github-remote — read-first CLI wrapper around the GitHub REST API.
+
+One call returns the full PR/branch/CI picture so the agent doesn't burn
+context running `gh pr view`, `gh pr checks`, `gh run view`, `gh pr list
+--head <branch>` in sequence per investigation.
+
+Commands (all emit JSON; --pretty for indented):
+  pr list [--state open|closed|merged|all] [--base <branch>] [--author <user>] [--limit 50]
+  pr resolve <branch-or-partial-title>
+  pr show <N-or-branch>
+  pr comment <N-or-branch> --body <text>
+
+  issue list [--state open|closed|all] [--assignee <user>] [--label <label>] [--limit 50]
+  issue resolve <title-pattern>
+  issue show <N>
+
+  run list [--branch <branch>] [--status in_progress|completed|queued] [--limit 20]
+  run show <RUN_ID>
+  run logs <RUN_ID> [--job <job-name>] [--errors-only] [--tail 50]
+  run wait <RUN_ID-or-branch> [--timeout 1800] [--poll-interval 10]
+
+  overview <branch-or-pr-number>
+
+Hard safety rules:
+  1. Every API response passes through _scrub() before emission. Token,
+     password, authorization, client_secret, private_key,
+     webhook_url_with_secret keys are redacted.
+  2. Run-log output is regex-scrubbed for GitHub PAT patterns, AWS keys,
+     and generic Bearer tokens before emission.
+  3. Read-only by default. `pr comment` is the sole write.
+  4. Ambiguous resolve never auto-picks — exits non-zero with candidates.
+
+Auth precedence (highest first):
+  1. GITHUB_TOKEN env var
+  2. `gh auth token` subprocess (fallback)
+  3. Fail with a missing-config message.
+
+Repo resolution precedence (highest first):
+  1. --repo owner/name flag
+  2. GITHUB_REPO env var
+  3. `git config --get remote.origin.url` parsed in cwd
+
+Config precedence (highest first):
+  1. --token / --repo CLI flags
+  2. --env-file path
+  3. project .env.local / .env (walked up from cwd)
+  4. shell env
+
+Requires: GITHUB_TOKEN (or `gh` logged in). Optional: GITHUB_REPO.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any, Optional
+
+# ──────────────────────────── constants ────────────────────────────
+
+API_BASE_DEFAULT = "https://api.github.com"
+USER_AGENT = "github-remote/0.1.0 (+https://github.com/osouthgate/agent-plus)"
+
+DEFAULT_PR_LIST_LIMIT = 50
+DEFAULT_ISSUE_LIST_LIMIT = 50
+DEFAULT_RUN_LIST_LIMIT = 20
+DEFAULT_LOGS_TAIL = 50
+
+# overview caps
+OVERVIEW_REVIEWS_CAP = 10
+OVERVIEW_FAILING_JOBS_CAP = 20
+OVERVIEW_RUNS_CAP = 5
+
+# --wait polling contract.
+WAIT_DEFAULT_RUN_TIMEOUT = 1800   # 30 min — CI can run long.
+WAIT_DEFAULT_POLL_INTERVAL = 10   # 10s default.
+WAIT_MIN_POLL_INTERVAL = 5        # never poll tighter than 5s.
+
+HTTP_TIMEOUT = 30
+HTTP_MAX_RETRIES = 3
+HTTP_RETRY_ON = {429, 500, 502, 503, 504}
+
+# Keys whose VALUES we redact across every response and log blob before emit.
+# Match on lowercased exact key.
+SECRET_KEYS = frozenset({
+    "token",
+    "password",
+    "authorization",
+    "client_secret",
+    "private_key",
+    "webhook_url_with_secret",
+    "access_token",
+    "refresh_token",
+    "secret",
+    "api_key",
+})
+
+# Metadata fields we deliberately preserve. Empty for GitHub (no collisions
+# like Vercel's valueType/valueLength), but kept for future-proofing.
+SECRET_ALLOWLIST: frozenset[str] = frozenset()
+
+# Regex patterns we scrub from free-text (run logs, error bodies).
+TOKEN_PATTERNS = [
+    re.compile(r"ghp_[A-Za-z0-9]{36}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{82}"),
+    re.compile(r"gho_[A-Za-z0-9]{36}"),
+    re.compile(r"ghu_[A-Za-z0-9]{36}"),
+    re.compile(r"ghs_[A-Za-z0-9]{36}"),
+    re.compile(r"ghr_[A-Za-z0-9]{36}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"Bearer\s+[A-Za-z0-9._\-]{20,}"),
+]
+
+
+# ──────────────────────────── errors ────────────────────────────
+
+
+class GitHubError(Exception):
+    """Raised on API errors with a user-friendly message."""
+
+
+def die(msg: str, *, code: int = 1) -> None:
+    sys.stderr.write(f"github-remote: {msg}\n")
+    sys.exit(code)
+
+
+# ──────────────────────────── config loading ────────────────────────────
+
+
+def _find_env_files(start: Path) -> list[Path]:
+    """Walk up from `start` collecting .env.local and .env (closest first)."""
+    found: list[Path] = []
+    cur = start.resolve()
+    while True:
+        for name in (".env.local", ".env"):
+            p = cur / name
+            if p.is_file():
+                found.append(p)
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return found
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k and k.startswith("GITHUB_"):
+                out[k] = v
+    except OSError:
+        pass
+    return out
+
+
+def load_config(*, env_file: Optional[str] = None) -> dict[str, str]:
+    """Load GITHUB_* config with layered precedence."""
+    cfg: dict[str, str] = {}
+    for k, v in os.environ.items():
+        if k.startswith("GITHUB_"):
+            cfg[k] = v
+    env_files = _find_env_files(Path.cwd())
+    # outermost first, so closest overwrites.
+    for p in reversed(env_files):
+        cfg.update(_parse_env_file(p))
+    if env_file:
+        p = Path(env_file)
+        if not p.is_file():
+            die(f"--env-file not found: {env_file}")
+        cfg.update(_parse_env_file(p))
+    return cfg
+
+
+def _gh_auth_token() -> Optional[str]:
+    """Fallback: shell out to `gh auth token`."""
+    try:
+        proc = subprocess.run(
+            ["gh", "auth", "token"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    tok = (proc.stdout or "").strip()
+    return tok or None
+
+
+def require_token(cfg: dict[str, str]) -> str:
+    # 1. Env var wins.
+    token = cfg.get("GITHUB_TOKEN", "").strip()
+    if token:
+        return token
+    # 2. gh auth token fallback.
+    gh_tok = _gh_auth_token()
+    if gh_tok:
+        return gh_tok
+    # 3. Fail with the documented message.
+    die(
+        "GITHUB_TOKEN not set and 'gh auth token' returned nothing.\n"
+        "  Fix: set GITHUB_TOKEN in project .env / .env.local (keys prefixed GITHUB_),\n"
+        "  or in ~/.claude/settings.json (env block),\n"
+        "  or run 'gh auth login' so the fallback picks it up.\n"
+        "  Get a PAT: https://github.com/settings/tokens\n"
+        "  Classic: repo + workflow. Fine-grained: Contents, Pull requests, Issues, Actions (read), Metadata."
+    )
+    return ""  # unreachable
+
+
+def _api_base(cfg: dict[str, str]) -> str:
+    return cfg.get("GITHUB_API_URL", "").strip() or API_BASE_DEFAULT
+
+
+# ──────────────────────────── repo resolution ────────────────────────────
+
+
+_REPO_URL_RE = re.compile(
+    r"(?:github\.com[:/])([A-Za-z0-9_.\-]+)/([A-Za-z0-9_.\-]+?)(?:\.git)?/?$"
+)
+
+
+def _git_remote_repo(cwd: Optional[Path] = None) -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            cwd=str(cwd) if cwd else None,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    url = (proc.stdout or "").strip()
+    if not url:
+        return None
+    m = _REPO_URL_RE.search(url)
+    if not m:
+        return None
+    return f"{m.group(1)}/{m.group(2)}"
+
+
+def resolve_repo(flag: Optional[str], cfg: dict[str, str]) -> tuple[str, str]:
+    """Returns (owner, name). Precedence: --repo > GITHUB_REPO > git remote."""
+    candidate = (flag or "").strip() or cfg.get("GITHUB_REPO", "").strip() or (_git_remote_repo() or "")
+    if not candidate:
+        die(
+            "Repo not resolved.\n"
+            "  Fix: pass --repo owner/name,\n"
+            "  or set GITHUB_REPO in .env / ~/.claude/settings.json,\n"
+            "  or run from a git checkout whose origin points at github.com."
+        )
+    if "/" not in candidate:
+        die(f"invalid --repo: {candidate} (expected owner/name)")
+    owner, _, name = candidate.partition("/")
+    owner = owner.strip()
+    name = name.strip().rstrip("/")
+    if not owner or not name:
+        die(f"invalid --repo: {candidate} (expected owner/name)")
+    return owner, name
+
+
+# ──────────────────────────── scrub ────────────────────────────
+
+
+def _scrub(obj: Any) -> Any:
+    """Recursively strip secret-bearing keys from API responses.
+
+    INVARIANT: no value string from a stripped key ever appears in the output.
+    """
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for k, v in obj.items():
+            k_lower = str(k).lower()
+            if k in SECRET_ALLOWLIST:
+                out[k] = _scrub(v)
+                continue
+            if k_lower in SECRET_KEYS:
+                out[k] = "[REDACTED]"
+                continue
+            out[k] = _scrub(v)
+        return out
+    if isinstance(obj, list):
+        return [_scrub(x) for x in obj]
+    return obj
+
+
+def _scrub_text(text: str) -> str:
+    """Regex-scrub free-text blobs (logs, error bodies) for known token shapes."""
+    if not text:
+        return text
+    out = text
+    for pat in TOKEN_PATTERNS:
+        out = pat.sub("[REDACTED]", out)
+    return out
+
+
+# ──────────────────────────── API helper ────────────────────────────
+
+
+def _api(
+    path: str,
+    *,
+    method: str = "GET",
+    body: Optional[dict[str, Any]] = None,
+    query: Optional[dict[str, str]] = None,
+    cfg: dict[str, str],
+    timeout: int = HTTP_TIMEOUT,
+    raw_text: bool = False,
+    follow_redirects: bool = True,
+) -> Any:
+    """GitHub API call. Handles auth, rate-limit headers, retries, scrubbing.
+
+    Distinguishes primary rate-limit (429 or 403 with Retry-After — auto-retry
+    once) from secondary abuse-detection (403 with 'secondary rate limit' or
+    'abuse' in body — DO NOT auto-retry; surface a clear error).
+
+    Raises GitHubError on non-2xx after retries. Caller is responsible for
+    passing parsed JSON through _scrub() before emission. Free-text blobs
+    (logs) also pass through _scrub_text().
+    """
+    token = require_token(cfg)
+    base = _api_base(cfg)
+
+    url = base + path
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
+
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": USER_AGENT,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+
+    last_err: Optional[str] = None
+    for attempt in range(HTTP_MAX_RETRIES):
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                # Rate-limit warning to stderr.
+                remaining = resp.headers.get("X-RateLimit-Remaining") if resp.headers else None
+                if remaining is not None:
+                    try:
+                        if int(remaining) < 50:
+                            reset = resp.headers.get("X-RateLimit-Reset", "?")
+                            sys.stderr.write(
+                                f"github-remote: warning — rate limit low ({remaining} left, resets at {reset})\n"
+                            )
+                    except ValueError:
+                        pass
+                raw = resp.read()
+                if raw_text:
+                    return raw.decode("utf-8", errors="replace")
+                text = raw.decode("utf-8", errors="replace")
+                if not text:
+                    return {}
+                return json.loads(text)
+        except urllib.error.HTTPError as e:
+            status = e.code
+            err_body = ""
+            try:
+                err_body = e.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            # Secondary rate limit: never auto-retry.
+            if status == 403 and ("secondary rate limit" in err_body.lower() or "abuse" in err_body.lower()):
+                raise GitHubError(
+                    "Secondary rate limit (abuse detection) hit on "
+                    f"{method} {path}. Back off several minutes; reduce concurrent requests.\n"
+                    f"  body: {_scrub_text(err_body[:200])}"
+                )
+            # Primary rate-limit / transient errors: retry with Retry-After.
+            if status in HTTP_RETRY_ON and attempt < HTTP_MAX_RETRIES - 1:
+                retry_after = None
+                if e.headers:
+                    retry_after = e.headers.get("Retry-After") or e.headers.get("X-RateLimit-Reset")
+                delay = min(30, 2 ** attempt)
+                if retry_after:
+                    try:
+                        ra_val = int(retry_after)
+                        # X-RateLimit-Reset is an epoch; Retry-After is seconds.
+                        # If it looks like an epoch (> now), convert.
+                        now = int(time.time())
+                        if ra_val > now:
+                            delay = min(60, max(1, ra_val - now))
+                        else:
+                            delay = min(60, ra_val)
+                    except ValueError:
+                        pass
+                time.sleep(delay)
+                continue
+            # Build a helpful error.
+            msg = f"HTTP {status} on {method} {path}"
+            if err_body:
+                try:
+                    parsed = json.loads(err_body)
+                    err_msg = parsed.get("message") or err_body
+                    msg = f"{msg}: {err_msg}"
+                except json.JSONDecodeError:
+                    msg = f"{msg}: {_scrub_text(err_body[:200])}"
+            if status == 401:
+                msg += "\n  Token rejected. Regenerate or run 'gh auth refresh'."
+            elif status == 403:
+                msg += (
+                    "\n  Token lacks required scope. Classic PATs need 'repo'+'workflow';\n"
+                    "  fine-grained PATs need Contents+Pull requests+Actions(read)+Issues+Metadata."
+                )
+            elif status == 404:
+                msg += (
+                    "\n  Repo not found or token lacks access.\n"
+                    "  Private repos require 'repo' scope on classic PATs."
+                )
+            elif status == 422:
+                msg += "\n  GitHub rejected the request. Common cause: field validation (e.g. empty body on pr comment)."
+            elif status == 429:
+                msg += "\n  Primary rate limit hit. See X-RateLimit-Reset for when it resets."
+            raise GitHubError(msg)
+        except urllib.error.URLError as e:
+            last_err = str(e)
+            if attempt < HTTP_MAX_RETRIES - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise GitHubError(f"network error on {method} {path}: {last_err}")
+    raise GitHubError(f"exhausted retries on {method} {path}")
+
+
+# ──────────────────────────── PR ops ────────────────────────────
+
+
+def _is_int(s: str) -> bool:
+    try:
+        int(s)
+        return True
+    except ValueError:
+        return False
+
+
+def pr_list(
+    owner: str, repo: str,
+    *, state: str, base: Optional[str], author: Optional[str], limit: int,
+    cfg: dict[str, str],
+) -> list[dict[str, Any]]:
+    """GET /repos/{o}/{r}/pulls. `state=merged` is synthesised from closed+mergedAt."""
+    api_state = "all" if state == "merged" else state
+    query = {"state": api_state, "per_page": str(min(limit, 100))}
+    if base:
+        query["base"] = base
+    resp = _api(f"/repos/{owner}/{repo}/pulls", query=query, cfg=cfg)
+    items = resp if isinstance(resp, list) else []
+    results: list[dict[str, Any]] = []
+    for p in items:
+        if author and (p.get("user") or {}).get("login") != author:
+            continue
+        if state == "merged" and not p.get("merged_at"):
+            continue
+        results.append(_slim_pr(p))
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _slim_pr(p: dict[str, Any]) -> dict[str, Any]:
+    user = p.get("user") or {}
+    head = p.get("head") or {}
+    base = p.get("base") or {}
+    return {
+        "number": p.get("number"),
+        "title": p.get("title"),
+        "state": p.get("state"),
+        "draft": p.get("draft"),
+        "merged": bool(p.get("merged_at")),
+        "mergeable": p.get("mergeable"),
+        "mergeable_state": p.get("mergeable_state"),
+        "author": user.get("login"),
+        "head": {"ref": head.get("ref"), "sha": head.get("sha")},
+        "base": {"ref": base.get("ref")},
+        "url": p.get("html_url"),
+        "createdAt": p.get("created_at"),
+        "updatedAt": p.get("updated_at"),
+        "mergedAt": p.get("merged_at"),
+    }
+
+
+def pr_resolve(owner: str, repo: str, query: str, cfg: dict[str, str]) -> dict[str, Any]:
+    """Resolve by:
+       1. exact branch (head ref) match
+       2. unique case-insensitive substring match on title or branch
+       Ambiguous (2+) → exit non-zero with candidates. None → non-zero not_found.
+    """
+    if not query:
+        die("pr resolve requires a branch name or title substring")
+    resp = _api(
+        f"/repos/{owner}/{repo}/pulls",
+        query={"state": "all", "per_page": "100"},
+        cfg=cfg,
+    )
+    items = resp if isinstance(resp, list) else []
+    q = query.strip()
+    q_lc = q.lower()
+
+    # 1. exact branch match.
+    exact = [p for p in items if ((p.get("head") or {}).get("ref") == q)]
+    if len(exact) == 1:
+        return _slim_pr(exact[0])
+    if len(exact) > 1:
+        candidates = [_slim_pr(p) for p in exact[:10]]
+        emit_json({"error": "ambiguous", "query": q, "match_kind": "exact_branch", "matches": candidates})
+        sys.exit(2)
+
+    # 2. substring match against title or branch.
+    sub = [
+        p for p in items
+        if q_lc in (p.get("title") or "").lower()
+        or q_lc in ((p.get("head") or {}).get("ref") or "").lower()
+    ]
+    if len(sub) == 1:
+        return _slim_pr(sub[0])
+    if len(sub) > 1:
+        candidates = [_slim_pr(p) for p in sub[:10]]
+        emit_json({"error": "ambiguous", "query": q, "match_kind": "substring", "matches": candidates})
+        sys.exit(2)
+
+    emit_json({"error": "not_found", "query": q})
+    sys.exit(2)
+
+
+def pr_show(owner: str, repo: str, ref: str, cfg: dict[str, str]) -> dict[str, Any]:
+    if _is_int(ref):
+        n = int(ref)
+    else:
+        resolved = pr_resolve(owner, repo, ref, cfg)
+        n = resolved["number"]
+    full = _api(f"/repos/{owner}/{repo}/pulls/{n}", cfg=cfg)
+    return _slim_pr(full) | {
+        "body": full.get("body"),
+        "labels": [l.get("name") for l in (full.get("labels") or [])],
+        "requestedReviewers": [u.get("login") for u in (full.get("requested_reviewers") or [])],
+        "comments": full.get("comments"),
+        "reviewComments": full.get("review_comments"),
+        "commits": full.get("commits"),
+        "additions": full.get("additions"),
+        "deletions": full.get("deletions"),
+        "changedFiles": full.get("changed_files"),
+    }
+
+
+def pr_comment(owner: str, repo: str, ref: str, body: str, cfg: dict[str, str]) -> dict[str, Any]:
+    if not body or not body.strip():
+        die("pr comment requires non-empty --body")
+    if _is_int(ref):
+        n = int(ref)
+    else:
+        resolved = pr_resolve(owner, repo, ref, cfg)
+        n = resolved["number"]
+    # PR comments (issue-style) live under /issues/{n}/comments.
+    resp = _api(
+        f"/repos/{owner}/{repo}/issues/{n}/comments",
+        method="POST",
+        body={"body": body},
+        cfg=cfg,
+    )
+    return {
+        "status": "posted",
+        "pr": n,
+        "id": resp.get("id") if isinstance(resp, dict) else None,
+        "url": resp.get("html_url") if isinstance(resp, dict) else None,
+        "createdAt": resp.get("created_at") if isinstance(resp, dict) else None,
+    }
+
+
+# ──────────────────────────── issue ops ────────────────────────────
+
+
+def _slim_issue(i: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "number": i.get("number"),
+        "title": i.get("title"),
+        "state": i.get("state"),
+        "author": (i.get("user") or {}).get("login"),
+        "assignees": [u.get("login") for u in (i.get("assignees") or [])],
+        "labels": [l.get("name") for l in (i.get("labels") or [])],
+        "url": i.get("html_url"),
+        "createdAt": i.get("created_at"),
+        "updatedAt": i.get("updated_at"),
+        "closedAt": i.get("closed_at"),
+        "comments": i.get("comments"),
+    }
+
+
+def issue_list(
+    owner: str, repo: str,
+    *, state: str, assignee: Optional[str], label: Optional[str], limit: int,
+    cfg: dict[str, str],
+) -> list[dict[str, Any]]:
+    query = {"state": state, "per_page": str(min(limit, 100))}
+    if assignee:
+        query["assignee"] = assignee
+    if label:
+        query["labels"] = label
+    resp = _api(f"/repos/{owner}/{repo}/issues", query=query, cfg=cfg)
+    items = resp if isinstance(resp, list) else []
+    # Filter out PRs (GH returns PRs in /issues endpoint too).
+    results = [_slim_issue(i) for i in items if "pull_request" not in i]
+    return results[:limit]
+
+
+def issue_resolve(owner: str, repo: str, query: str, cfg: dict[str, str]) -> dict[str, Any]:
+    if not query:
+        die("issue resolve requires a title pattern")
+    resp = _api(
+        f"/repos/{owner}/{repo}/issues",
+        query={"state": "all", "per_page": "100"},
+        cfg=cfg,
+    )
+    items = [i for i in (resp if isinstance(resp, list) else []) if "pull_request" not in i]
+    q = query.strip()
+    q_lc = q.lower()
+    exact = [i for i in items if (i.get("title") or "") == q]
+    if len(exact) == 1:
+        return _slim_issue(exact[0])
+    if len(exact) > 1:
+        emit_json({"error": "ambiguous", "query": q, "match_kind": "exact_title",
+                   "matches": [_slim_issue(i) for i in exact[:10]]})
+        sys.exit(2)
+    sub = [i for i in items if q_lc in (i.get("title") or "").lower()]
+    if len(sub) == 1:
+        return _slim_issue(sub[0])
+    if len(sub) > 1:
+        emit_json({"error": "ambiguous", "query": q, "match_kind": "substring",
+                   "matches": [_slim_issue(i) for i in sub[:10]]})
+        sys.exit(2)
+    emit_json({"error": "not_found", "query": q})
+    sys.exit(2)
+
+
+def issue_show(owner: str, repo: str, n: int, cfg: dict[str, str]) -> dict[str, Any]:
+    full = _api(f"/repos/{owner}/{repo}/issues/{n}", cfg=cfg)
+    return _slim_issue(full) | {"body": full.get("body")}
+
+
+# ──────────────────────────── runs ────────────────────────────
+
+
+def _slim_run(r: dict[str, Any]) -> dict[str, Any]:
+    head = r.get("head_commit") or {}
+    return {
+        "id": r.get("id"),
+        "name": r.get("name"),
+        "display_title": r.get("display_title"),
+        "status": r.get("status"),
+        "conclusion": r.get("conclusion"),
+        "event": r.get("event"),
+        "branch": r.get("head_branch"),
+        "headSha": r.get("head_sha"),
+        "headCommitMessage": head.get("message") if isinstance(head, dict) else None,
+        "url": r.get("html_url"),
+        "createdAt": r.get("created_at"),
+        "updatedAt": r.get("updated_at"),
+        "runStartedAt": r.get("run_started_at"),
+    }
+
+
+def run_list(
+    owner: str, repo: str,
+    *, branch: Optional[str], status: Optional[str], limit: int,
+    cfg: dict[str, str],
+) -> list[dict[str, Any]]:
+    query = {"per_page": str(min(limit, 100))}
+    if branch:
+        query["branch"] = branch
+    if status:
+        query["status"] = status
+    resp = _api(f"/repos/{owner}/{repo}/actions/runs", query=query, cfg=cfg)
+    runs = resp.get("workflow_runs", []) if isinstance(resp, dict) else []
+    return [_slim_run(r) for r in runs[:limit]]
+
+
+def run_show(owner: str, repo: str, run_id: int, cfg: dict[str, str]) -> dict[str, Any]:
+    r = _api(f"/repos/{owner}/{repo}/actions/runs/{run_id}", cfg=cfg)
+    jobs_resp = _api(f"/repos/{owner}/{repo}/actions/runs/{run_id}/jobs", cfg=cfg)
+    jobs_raw = jobs_resp.get("jobs", []) if isinstance(jobs_resp, dict) else []
+    jobs = [
+        {
+            "id": j.get("id"),
+            "name": j.get("name"),
+            "status": j.get("status"),
+            "conclusion": j.get("conclusion"),
+            "startedAt": j.get("started_at"),
+            "completedAt": j.get("completed_at"),
+            "url": j.get("html_url"),
+        }
+        for j in jobs_raw
+    ]
+    return _slim_run(r) | {"jobs": jobs}
+
+
+def _fetch_job_logs(owner: str, repo: str, job_id: int, cfg: dict[str, str]) -> str:
+    """GET /repos/{o}/{r}/actions/jobs/{job_id}/logs — returns 302 to signed URL.
+
+    urllib follows redirects by default; if the signed URL requires no auth
+    (GitHub strips the auth header on the redirect), we read plaintext.
+    """
+    path = f"/repos/{owner}/{repo}/actions/jobs/{job_id}/logs"
+    try:
+        return _api(path, cfg=cfg, raw_text=True, timeout=60)
+    except GitHubError as e:
+        # Some signed-URL redirects reject the Authorization header. If the
+        # urllib redirect chain fails, fall back to a manual two-step.
+        msg = str(e)
+        if "HTTP 401" not in msg and "HTTP 403" not in msg:
+            raise
+        # Manual: disable redirect and read Location.
+        token = require_token(cfg)
+        base = _api_base(cfg)
+        req = urllib.request.Request(
+            base + path,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": USER_AGENT,
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **kw):
+                return None
+        opener = urllib.request.build_opener(_NoRedirect())
+        try:
+            opener.open(req, timeout=HTTP_TIMEOUT)
+        except urllib.error.HTTPError as redir:
+            if redir.code in (301, 302, 303, 307, 308):
+                loc = redir.headers.get("Location")
+                if loc:
+                    with urllib.request.urlopen(loc, timeout=60) as resp:
+                        return resp.read().decode("utf-8", errors="replace")
+            raise GitHubError(f"log fetch failed: HTTP {redir.code}")
+        return ""
+
+
+def run_logs(
+    owner: str, repo: str, run_id: int,
+    *, job_filter: Optional[str], errors_only: bool, tail: int,
+    cfg: dict[str, str],
+) -> dict[str, Any]:
+    jobs_resp = _api(f"/repos/{owner}/{repo}/actions/runs/{run_id}/jobs", cfg=cfg)
+    jobs = jobs_resp.get("jobs", []) if isinstance(jobs_resp, dict) else []
+    if job_filter:
+        jobs = [j for j in jobs if job_filter.lower() in (j.get("name") or "").lower()]
+    out_jobs: list[dict[str, Any]] = []
+    for j in jobs:
+        jid = j.get("id")
+        if not jid:
+            continue
+        try:
+            raw = _fetch_job_logs(owner, repo, jid, cfg)
+        except GitHubError as e:
+            out_jobs.append({"id": jid, "name": j.get("name"), "error": str(e)[:200]})
+            continue
+        raw = _scrub_text(raw or "")
+        lines = raw.splitlines()
+        if errors_only:
+            lines = [
+                ln for ln in lines
+                if re.search(r"\b(error|failed|fatal|traceback|exception)\b", ln, re.IGNORECASE)
+            ]
+        if tail and len(lines) > tail:
+            lines = lines[-tail:]
+        out_jobs.append({
+            "id": jid,
+            "name": j.get("name"),
+            "conclusion": j.get("conclusion"),
+            "lines": lines,
+        })
+    return {"run": run_id, "jobs": out_jobs}
+
+
+def _latest_run_for_branch(owner: str, repo: str, branch: str, cfg: dict[str, str]) -> Optional[dict[str, Any]]:
+    resp = _api(
+        f"/repos/{owner}/{repo}/actions/runs",
+        query={"branch": branch, "per_page": "1"},
+        cfg=cfg,
+    )
+    runs = resp.get("workflow_runs", []) if isinstance(resp, dict) else []
+    return runs[0] if runs else None
+
+
+def run_wait(
+    owner: str, repo: str, ref: str,
+    *, timeout: int, poll_interval: int,
+    cfg: dict[str, str],
+) -> dict[str, Any]:
+    """Wait for a run to complete. `ref` is either a numeric run ID or a branch name.
+
+    Branch → resolves to latest run on HEAD SHA before polling.
+    On timeout: exit non-zero, emit {status: 'timeout', last_state, elapsed_s}.
+    On completion: exit 0 if conclusion == 'success', else non-zero.
+    """
+    poll = max(WAIT_MIN_POLL_INTERVAL, poll_interval)
+    if _is_int(ref):
+        run_id = int(ref)
+    else:
+        latest = _latest_run_for_branch(owner, repo, ref, cfg)
+        if not latest:
+            die(f"no workflow runs found for branch: {ref}")
+            return {}
+        run_id = latest.get("id")  # type: ignore[assignment]
+    start = time.monotonic()
+    last: dict[str, Any] = {}
+    while True:
+        elapsed = time.monotonic() - start
+        if elapsed >= timeout:
+            return {"status": "timeout", "last_state": _slim_run(last) if last else None,
+                    "elapsed_s": int(elapsed), "run_id": run_id, "_exit_nonzero": True}
+        try:
+            last = _api(f"/repos/{owner}/{repo}/actions/runs/{run_id}", cfg=cfg)
+        except GitHubError as e:
+            return {"status": "poll_error", "error": str(e), "run_id": run_id, "_exit_nonzero": True}
+        status = last.get("status")
+        if status == "completed":
+            concl = last.get("conclusion")
+            result = {
+                "status": "completed",
+                "conclusion": concl,
+                "run": _slim_run(last),
+                "elapsed_s": int(time.monotonic() - start),
+            }
+            if concl != "success":
+                result["_exit_nonzero"] = True
+            return result
+        time.sleep(poll)
+
+
+# ──────────────────────────── overview ────────────────────────────
+
+
+def build_overview(owner: str, repo: str, ref: str, cfg: dict[str, str]) -> dict[str, Any]:
+    """Aggregate: PR state + latest commit status + check-runs + reviews + runs + mergeable."""
+    if _is_int(ref):
+        n = int(ref)
+    else:
+        resolved = pr_resolve(owner, repo, ref, cfg)
+        n = resolved["number"]
+
+    pr = _api(f"/repos/{owner}/{repo}/pulls/{n}", cfg=cfg)
+    head_sha = (pr.get("head") or {}).get("sha") or ""
+
+    # Check-runs for head SHA.
+    checks_resp = _api(
+        f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
+        query={"per_page": "100"},
+        cfg=cfg,
+    ) if head_sha else {}
+    check_runs = checks_resp.get("check_runs", []) if isinstance(checks_resp, dict) else []
+    passing = sum(1 for c in check_runs if c.get("conclusion") == "success")
+    failing = [c for c in check_runs if c.get("conclusion") in ("failure", "timed_out", "cancelled", "action_required")]
+    pending = sum(1 for c in check_runs if c.get("status") != "completed")
+    failing_jobs = [
+        {"name": c.get("name"), "conclusion": c.get("conclusion"), "url": c.get("html_url")}
+        for c in failing[:OVERVIEW_FAILING_JOBS_CAP]
+    ]
+
+    # Combined status (legacy statuses API).
+    try:
+        status_resp = _api(f"/repos/{owner}/{repo}/commits/{head_sha}/status", cfg=cfg) if head_sha else {}
+    except GitHubError:
+        status_resp = {}
+    combined_state = status_resp.get("state") if isinstance(status_resp, dict) else None
+
+    # Reviews — cap at OVERVIEW_REVIEWS_CAP latest.
+    reviews_resp = _api(f"/repos/{owner}/{repo}/pulls/{n}/reviews", query={"per_page": "100"}, cfg=cfg)
+    reviews_raw = reviews_resp if isinstance(reviews_resp, list) else []
+    approvals = sum(1 for r in reviews_raw if r.get("state") == "APPROVED")
+    changes_requested = sum(1 for r in reviews_raw if r.get("state") == "CHANGES_REQUESTED")
+    pending_reviews = sum(1 for r in reviews_raw if r.get("state") == "PENDING")
+    latest_reviews = [
+        {
+            "user": (r.get("user") or {}).get("login"),
+            "state": r.get("state"),
+            "submittedAt": r.get("submitted_at"),
+        }
+        for r in reviews_raw[-OVERVIEW_REVIEWS_CAP:]
+    ]
+
+    # Workflow runs tied to head SHA — cap at OVERVIEW_RUNS_CAP.
+    runs_resp = _api(
+        f"/repos/{owner}/{repo}/actions/runs",
+        query={"head_sha": head_sha, "per_page": str(OVERVIEW_RUNS_CAP)} if head_sha
+        else {"per_page": str(OVERVIEW_RUNS_CAP)},
+        cfg=cfg,
+    )
+    runs = runs_resp.get("workflow_runs", []) if isinstance(runs_resp, dict) else []
+    latest_runs = [_slim_run(r) for r in runs[:OVERVIEW_RUNS_CAP]]
+
+    return {
+        "pr": _slim_pr(pr) | {
+            "body_present": bool(pr.get("body")),
+        },
+        "headCommit": {
+            "sha": head_sha,
+            "message": (pr.get("head") or {}).get("label"),
+        },
+        "checks": {
+            "passing": passing,
+            "failing": len(failing),
+            "pending": pending,
+            "combined_state": combined_state,
+            "failing_jobs": failing_jobs,
+        },
+        "reviews": {
+            "approvals": approvals,
+            "changes_requested": changes_requested,
+            "pending": pending_reviews,
+            "latest": latest_reviews,
+        },
+        "runs": latest_runs,
+        "reviewCommentCount": pr.get("review_comments"),
+        "caps": {
+            "reviews": f"{len(latest_reviews)}/{OVERVIEW_REVIEWS_CAP}",
+            "failing_jobs": f"{len(failing_jobs)}/{OVERVIEW_FAILING_JOBS_CAP}",
+            "runs": f"{len(latest_runs)}/{OVERVIEW_RUNS_CAP}",
+        },
+    }
+
+
+# ──────────────────────────── emit ────────────────────────────
+
+
+def emit_json(obj: Any, *, pretty: bool = False) -> None:
+    scrubbed = _scrub(obj)
+    # Strip internal _exit_nonzero sentinel before printing — caller handles exit.
+    if isinstance(scrubbed, dict):
+        scrubbed = {k: v for k, v in scrubbed.items() if k != "_exit_nonzero"}
+    if pretty:
+        print(json.dumps(scrubbed, indent=2, sort_keys=False, default=str))
+    else:
+        print(json.dumps(scrubbed, default=str))
+
+
+# ──────────────────────────── CLI ────────────────────────────
+
+
+def _add_common_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--token", help="GITHUB_TOKEN (override env)")
+    p.add_argument("--repo", help="owner/name (override GITHUB_REPO / git remote)")
+    p.add_argument("--env-file", help="explicit .env file path")
+    p.add_argument("--pretty", action="store_true", help="indent JSON output")
+
+
+def _cfg_from_args(args: argparse.Namespace) -> dict[str, str]:
+    cfg = load_config(env_file=getattr(args, "env_file", None))
+    if getattr(args, "token", None):
+        cfg["GITHUB_TOKEN"] = args.token
+    return cfg
+
+
+RESOLVE_HELP = (
+    "\n\nAmbiguity contract: if two or more items match, exits non-zero with a JSON payload\n"
+    "{error:'ambiguous', query, match_kind, matches:[...up to 10]}. Never auto-picks.\n"
+    "No match: non-zero with {error:'not_found', query}."
+)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="github-remote",
+        description=(
+            "Read-first GitHub API wrapper. One call returns PR state + checks + "
+            "reviews + runs. Resolve PRs and issues by name. `run wait` on a branch "
+            "or run ID. Zero token leakage."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  github-remote overview feat/my-branch --pretty\n"
+            "  github-remote pr list --state open --limit 10\n"
+            "  github-remote pr resolve feat/google-drive-connector\n"
+            "  github-remote pr comment 498 --body 'CI is green, ready to merge'\n"
+            "  github-remote run wait main --timeout 1800\n"
+            "  github-remote run logs 24187042542 --errors-only --tail 50\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    _add_common_args(p)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    # pr
+    spr = sub.add_parser("pr", help="PR list / resolve / show / comment")
+    spr_sub = spr.add_subparsers(dest="action", required=True)
+
+    spl = spr_sub.add_parser(
+        "list",
+        description="List PRs.\n\nExample:\n  github-remote pr list --state open --author alice --limit 20",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    spl.add_argument("--state", choices=["open", "closed", "merged", "all"], default="open")
+    spl.add_argument("--base", help="base branch filter")
+    spl.add_argument("--author", help="filter by author login")
+    spl.add_argument("--limit", type=int, default=DEFAULT_PR_LIST_LIMIT)
+
+    spres = spr_sub.add_parser(
+        "resolve",
+        description=(
+            "Resolve a PR by branch name or partial title.\n\n"
+            "Example:\n  github-remote pr resolve feat/google-drive-connector"
+            + RESOLVE_HELP
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    spres.add_argument("query", help="branch name or partial title")
+
+    spshow = spr_sub.add_parser(
+        "show",
+        description="Show a PR by number or branch.\n\nExample:\n  github-remote pr show 498 --pretty",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    spshow.add_argument("ref", help="PR number or branch name")
+
+    spcom = spr_sub.add_parser(
+        "comment",
+        description=(
+            "Post an issue-style comment on a PR (REST /issues/{n}/comments).\n\n"
+            "Example:\n  github-remote pr comment 498 --body 'CI green on main'"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    spcom.add_argument("ref", help="PR number or branch name")
+    spcom.add_argument("--body", required=True, help="comment body (non-empty)")
+
+    # issue
+    sis = sub.add_parser("issue", help="issue list / resolve / show")
+    sis_sub = sis.add_subparsers(dest="action", required=True)
+    sisl = sis_sub.add_parser(
+        "list",
+        description="List issues.\n\nExample:\n  github-remote issue list --state open --label bug --limit 20",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sisl.add_argument("--state", choices=["open", "closed", "all"], default="open")
+    sisl.add_argument("--assignee", help="filter by assignee login")
+    sisl.add_argument("--label", help="filter by label")
+    sisl.add_argument("--limit", type=int, default=DEFAULT_ISSUE_LIST_LIMIT)
+
+    sisres = sis_sub.add_parser(
+        "resolve",
+        description=(
+            "Resolve an issue by title pattern.\n\n"
+            "Example:\n  github-remote issue resolve 'flaky test'"
+            + RESOLVE_HELP
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sisres.add_argument("query", help="title pattern (exact then substring)")
+
+    sisshow = sis_sub.add_parser(
+        "show",
+        description="Show an issue by number.\n\nExample:\n  github-remote issue show 42",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sisshow.add_argument("ref", help="issue number")
+
+    # run
+    srn = sub.add_parser("run", help="workflow run list / show / logs / wait")
+    srn_sub = srn.add_subparsers(dest="action", required=True)
+    srnl = srn_sub.add_parser(
+        "list",
+        description="List workflow runs.\n\nExample:\n  github-remote run list --branch main --status in_progress",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    srnl.add_argument("--branch")
+    srnl.add_argument("--status", choices=["in_progress", "completed", "queued"])
+    srnl.add_argument("--limit", type=int, default=DEFAULT_RUN_LIST_LIMIT)
+
+    srns = srn_sub.add_parser(
+        "show",
+        description="Show a workflow run with jobs.\n\nExample:\n  github-remote run show 24187042542",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    srns.add_argument("run_id", type=int)
+
+    srnlog = srn_sub.add_parser(
+        "logs",
+        description=(
+            "Fetch job logs for a run. Tokens and known secret patterns are regex-redacted.\n\n"
+            "Example:\n  github-remote run logs 24187042542 --errors-only --tail 100"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    srnlog.add_argument("run_id", type=int)
+    srnlog.add_argument("--job", help="substring filter on job name")
+    srnlog.add_argument("--errors-only", action="store_true")
+    srnlog.add_argument("--tail", type=int, default=DEFAULT_LOGS_TAIL)
+
+    srnw = srn_sub.add_parser(
+        "wait",
+        description=(
+            f"Wait for a workflow run to complete. Accepts a run ID or a branch name\n"
+            f"(branch resolves to latest run on HEAD SHA). Default timeout {WAIT_DEFAULT_RUN_TIMEOUT}s (30 min).\n"
+            f"On timeout: non-zero exit with partial JSON including last-known state.\n\n"
+            f"Example:\n  github-remote run wait main --timeout 1800 --poll-interval 10"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    srnw.add_argument("ref", help="run ID or branch name")
+    srnw.add_argument("--timeout", type=int, default=WAIT_DEFAULT_RUN_TIMEOUT)
+    srnw.add_argument("--poll-interval", type=int, default=WAIT_DEFAULT_POLL_INTERVAL,
+                      help=f"poll every N seconds (min {WAIT_MIN_POLL_INTERVAL})")
+
+    # overview
+    sov = sub.add_parser(
+        "overview",
+        help="one-call PR/branch snapshot",
+        description=(
+            "Single-call snapshot for a PR or branch: PR state + mergeable + latest commit +\n"
+            f"check-runs rollup (failing jobs capped at {OVERVIEW_FAILING_JOBS_CAP}) + reviews\n"
+            f"(capped at {OVERVIEW_REVIEWS_CAP} latest) + workflow runs (capped at {OVERVIEW_RUNS_CAP}).\n\n"
+            "Example:\n  github-remote overview feat/my-branch --pretty"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sov.add_argument("ref", help="branch name or PR number")
+
+    return p
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    cfg = _cfg_from_args(args)
+
+    try:
+        owner, repo = resolve_repo(getattr(args, "repo", None), cfg)
+
+        if args.cmd == "pr":
+            if args.action == "list":
+                emit_json(
+                    pr_list(owner, repo, state=args.state, base=args.base,
+                            author=args.author, limit=args.limit, cfg=cfg),
+                    pretty=args.pretty,
+                )
+            elif args.action == "resolve":
+                emit_json(pr_resolve(owner, repo, args.query, cfg), pretty=args.pretty)
+            elif args.action == "show":
+                emit_json(pr_show(owner, repo, args.ref, cfg), pretty=args.pretty)
+            elif args.action == "comment":
+                emit_json(pr_comment(owner, repo, args.ref, args.body, cfg), pretty=args.pretty)
+
+        elif args.cmd == "issue":
+            if args.action == "list":
+                emit_json(
+                    issue_list(owner, repo, state=args.state, assignee=args.assignee,
+                               label=args.label, limit=args.limit, cfg=cfg),
+                    pretty=args.pretty,
+                )
+            elif args.action == "resolve":
+                emit_json(issue_resolve(owner, repo, args.query, cfg), pretty=args.pretty)
+            elif args.action == "show":
+                if not _is_int(args.ref):
+                    die("issue show expects a numeric issue number")
+                emit_json(issue_show(owner, repo, int(args.ref), cfg), pretty=args.pretty)
+
+        elif args.cmd == "run":
+            if args.action == "list":
+                emit_json(
+                    run_list(owner, repo, branch=args.branch, status=args.status,
+                             limit=args.limit, cfg=cfg),
+                    pretty=args.pretty,
+                )
+            elif args.action == "show":
+                emit_json(run_show(owner, repo, args.run_id, cfg), pretty=args.pretty)
+            elif args.action == "logs":
+                emit_json(
+                    run_logs(owner, repo, args.run_id, job_filter=args.job,
+                             errors_only=args.errors_only, tail=args.tail, cfg=cfg),
+                    pretty=args.pretty,
+                )
+            elif args.action == "wait":
+                result = run_wait(owner, repo, args.ref,
+                                  timeout=args.timeout, poll_interval=args.poll_interval, cfg=cfg)
+                exit_nonzero = isinstance(result, dict) and result.get("_exit_nonzero")
+                emit_json(result, pretty=args.pretty)
+                if exit_nonzero:
+                    return 1
+
+        elif args.cmd == "overview":
+            emit_json(build_overview(owner, repo, args.ref, cfg), pretty=args.pretty)
+
+        return 0
+    except GitHubError as e:
+        die(str(e))
+    except KeyboardInterrupt:
+        die("interrupted", code=130)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

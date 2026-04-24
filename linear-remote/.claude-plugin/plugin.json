@@ -1,0 +1,13 @@
+{
+  "name": "linear-remote",
+  "description": "Read-first wrapper around the Linear GraphQL API. One-call issue context (comments + relations + state), name-resolved teams/projects/states/labels, --from-markdown turns design docs into issues, --wait on webhook-driven state transitions. Zero API-key leakage.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Oliver Southgate",
+    "url": "https://github.com/osouthgate"
+  },
+  "homepage": "https://github.com/osouthgate/agent-plus",
+  "repository": "https://github.com/osouthgate/agent-plus",
+  "license": "MIT",
+  "keywords": ["linear", "issues", "project-management", "graphql", "agent-tools", "triage"]
+}

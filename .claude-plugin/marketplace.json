@@ -47,6 +47,16 @@
       "name": "vercel-remote",
       "source": "./vercel-remote",
       "description": "Read-first Vercel REST API wrapper — single-call project overviews (deployments with commit metadata, domain verification, env var NAMES-only), name-resolved projects, Deploy Hook triggers with --wait, zero env-value leakage."
+    },
+    {
+      "name": "github-remote",
+      "source": "./github-remote",
+      "description": "Read-first GitHub REST API wrapper — single-call PR/branch overviews (state + checks + reviews + workflow runs + mergeable), name-resolved PRs/issues/runs by branch or title, run wait with branch-resolution, log fetch with redirect fallback. One write surface (pr comment)."
+    },
+    {
+      "name": "linear-remote",
+      "source": "./linear-remote",
+      "description": "Read-first Linear GraphQL API wrapper — issues get/list/search/create/update/move/assign, project overviews with state-bucketed issues, name-resolved teams/states/labels/assignees, --from-markdown YAML frontmatter issue creation, zero API-key leakage."
     }
   ]
 }

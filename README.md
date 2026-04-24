@@ -16,6 +16,8 @@ Every plugin here exists because doing the same job by hand — `curl` + `jq` + 
 | [`hcloud-remote`](./hcloud-remote) | `curl api.hetzner.cloud \| python3 -c "..."` — mangled by Windows bash shim, multiline heredocs break. | `hcloud-remote ssh hermes-vps` — resolves name to IP, execs ssh, in-process JSON parsing. |
 | [`supabase-remote`](./supabase-remote) | `supabase db query` returns a JSON envelope with an "untrusted data" preamble when it detects an agent — parsing without that knowledge produces junk. | `sql-inline` / `sql` strips the envelope, returns plain JSON. Plus `rls-audit` — one call, every table, RLS status + policy count. |
 | [`vercel-remote`](./vercel-remote) | Four sequential `vercel` CLI calls for a single project's state (`list`, `inspect`, `env ls`, `domains ls`), human-parsed output, 22-char project IDs copy-pasted between invocations. | `overview --project my-app` — one API call, JSON blob with last 10 deployments + commit metadata + domain health + env NAMES, name-resolved, capped payload. |
+| [`github-remote`](./github-remote) | Three-plus `gh` calls per PR triage (`pr view`, `pr checks`, `run view`, plus branch→PR-number shuttles). Mined from real transcripts: one session had **137 `gh` invocations**, ~60% collapsible. | `overview <branch-or-pr>` — one call for PR state + CI checks + failing jobs + reviews + mergeable. `pr resolve <branch>` kills the shuttle. `run wait` with 30-min default + branch-resolution. |
+| [`linear-remote`](./linear-remote) | Turning an 8KB design doc into a Linear issue today means hitting the MCP OAuth wall, then falling back to writing a local `.issues/` markdown file. Real pattern from session transcripts. | `issues create --from-markdown design.md` — YAML frontmatter (team/project/labels/assignee/priority), H1-as-title, rest as body. One call, no auth dance, personal API key. |
 
 These aren't theoretical. Each row is a pain point that got codified after burning time.
 
@@ -41,6 +43,8 @@ Every plugin reinforces at least one of these. If you're writing a new plugin, s
 | [`railway-ops`](./railway-ops) | [Railway](https://railway.app) (read-only triage) | `overview`, `errors <service>`, `envs <service>` (names only) |
 | [`supabase-remote`](./supabase-remote) | [Supabase](https://supabase.com) | `projects list`, `sql`, `sql-inline`, `rls-audit`, `gen-types` |
 | [`vercel-remote`](./vercel-remote) | [Vercel](https://vercel.com) (read-first REST API) | `overview --project`, `deployments list/show/trigger`, `logs`, `domains list/verify`, `env list/set/remove` (names only on list) |
+| [`github-remote`](./github-remote) | [GitHub](https://github.com) (read-first REST API) | `overview`, `pr list/resolve/show/comment`, `issue list/resolve/show`, `run list/show/logs/wait` |
+| [`linear-remote`](./linear-remote) | [Linear](https://linear.app) (GraphQL) | `issues get/list/search/create --from-markdown/update/move/assign`, `comments add/list`, `projects list/overview`, `teams/states/labels/cycles` |
 
 Per-plugin READMEs have the full reference and the specific gotchas they collapse.
 
@@ -67,6 +71,8 @@ claude plugin install langfuse@agent-plus
 claude plugin install railway-ops@agent-plus
 claude plugin install supabase-remote@agent-plus
 claude plugin install vercel-remote@agent-plus
+claude plugin install github-remote@agent-plus
+claude plugin install linear-remote@agent-plus
 ```
 
 Update later:

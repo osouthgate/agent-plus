@@ -1,0 +1,13 @@
+{
+  "name": "github-remote",
+  "description": "Read-first wrapper around the GitHub REST API — one-call PR/branch overviews (state + checks + reviews + runs), name-resolved PRs and issues, --wait on async flows, --json on lists. Zero token leakage. One write: pr comment.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Oliver Southgate",
+    "url": "https://github.com/osouthgate"
+  },
+  "homepage": "https://github.com/osouthgate/agent-plus",
+  "repository": "https://github.com/osouthgate/agent-plus",
+  "license": "MIT",
+  "keywords": ["github", "devops", "pull-requests", "ci", "actions", "incident-triage", "code-review"]
+}
