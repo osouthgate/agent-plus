@@ -30,6 +30,8 @@ The root README sells these patterns. Each plugin README should show at least on
 
 This is the single biggest source of drift in this repo. If you skipped these steps in a previous turn, fix it now.
 
+**Enforcement.** A `Stop` hook at `.claude/hooks/check-readme-drift.sh` runs before every session ends. It diffs the branch against `origin/main` and exits non-zero (with a message back to Claude) if any plugin's `bin/` or `SKILL.md` changed without a matching `README.md` and `CHANGELOG.md` update. If you see that message, update the docs and try again — don't bypass.
+
 **When you change a SKILL.md**, re-read the README: the SKILL teaches Claude, the README teaches the human. They should agree on the headline commands even if the SKILL has more detail.
 
 ## Per-plugin conventions
