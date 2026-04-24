@@ -83,11 +83,31 @@ Env wins on conflict. `langfuse list-instances` shows what's resolved.
 
 ## Install
 
+### Recommended — marketplace install
+
 ```bash
-claude --plugin-dir /path/to/agent-plus/langfuse
+claude plugin marketplace add osouthgate/agent-plus
+claude plugin install langfuse@agent-plus
 ```
 
-Or install the whole `agent-plus` repo as a marketplace and enable `langfuse` from there.
+Adds `langfuse` to PATH and loads the skill so Claude reaches for it automatically.
+
+### Session-only (dev / try-before-install)
+
+```bash
+git clone https://github.com/osouthgate/agent-plus
+claude --plugin-dir ./agent-plus/langfuse
+```
+
+`--plugin-dir` loads for the current shell only; nothing persisted.
+
+### Standalone — no Claude Code
+
+```bash
+curl -O https://raw.githubusercontent.com/osouthgate/agent-plus/main/langfuse/bin/langfuse
+chmod +x langfuse
+./langfuse health
+```
 
 ## API quirks codified here
 

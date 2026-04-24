@@ -17,11 +17,31 @@ Not a replacement for the Railway dashboard or CLI. This exists so an AI agent (
 
 ## Install
 
+### Recommended — marketplace install
+
 ```bash
-claude --plugin-dir /path/to/agent-plus/railway-ops
+claude plugin marketplace add osouthgate/agent-plus
+claude plugin install railway-ops@agent-plus
 ```
 
-Or install the whole `agent-plus` repo as a marketplace and enable `railway-ops` from there.
+Adds `railway-ops` to PATH and loads the skill so Claude reaches for it automatically.
+
+### Session-only (dev / try-before-install)
+
+```bash
+git clone https://github.com/osouthgate/agent-plus
+claude --plugin-dir ./agent-plus/railway-ops
+```
+
+`--plugin-dir` loads for the current shell only; nothing persisted.
+
+### Standalone — no Claude Code
+
+```bash
+curl -O https://raw.githubusercontent.com/osouthgate/agent-plus/main/railway-ops/bin/railway-ops
+chmod +x railway-ops
+./railway-ops overview
+```
 
 ## Prerequisites
 

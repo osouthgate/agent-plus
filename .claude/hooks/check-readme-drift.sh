@@ -54,15 +54,47 @@ for dir in */; do
     fi
 done
 
+# New plugin detection: a <plugin>/.claude-plugin/plugin.json ADDED on this
+# branch means a whole new plugin landed. Root-level docs and manifest must
+# move too, or the plugin ships orphaned (not in the root table, not in the
+# marketplace, not discoverable).
+new_plugin_manifests=$(git diff --name-only --diff-filter=A "$base" HEAD 2>/dev/null \
+    | grep -E '^[^/]+/\.claude-plugin/plugin\.json$' || true)
+
+for manifest in $new_plugin_manifests; do
+    plugin=${manifest%%/*}
+    missing=()
+
+    # Root README must mention the new plugin somewhere (table row, link, etc.)
+    printf '%s\n' "$changed" | grep -qE "^README\.md$" \
+        && grep -q "$plugin" README.md 2>/dev/null \
+        || missing+=("root README.md mention")
+
+    # Marketplace must list the plugin
+    if [ -f .claude-plugin/marketplace.json ]; then
+        printf '%s\n' "$changed" | grep -qE '^\.claude-plugin/marketplace\.json$' \
+            && grep -q "\"$plugin\"" .claude-plugin/marketplace.json 2>/dev/null \
+            || missing+=(".claude-plugin/marketplace.json entry")
+    fi
+
+    if [ ${#missing[@]} -gt 0 ]; then
+        drift+=("$plugin: new plugin added but missing $(IFS=, ; echo "${missing[*]}")")
+    fi
+done
+
 if [ ${#drift[@]} -gt 0 ]; then
     {
         echo "agent-plus: doc drift detected on this branch."
         echo ""
         printf '  - %s\n' "${drift[@]}"
         echo ""
-        echo "Per AGENTS.md, when you modify a plugin's bin/ or SKILL.md you MUST"
-        echo "update that plugin's README.md and append a CHANGELOG.md entry before"
-        echo "stopping. Update them now, commit, and try again."
+        echo "Per AGENTS.md:"
+        echo "  - When you modify a plugin's bin/ or SKILL.md you MUST update its"
+        echo "    README.md and append a CHANGELOG.md entry before stopping."
+        echo "  - When you ADD a whole new plugin, you MUST also add it to the"
+        echo "    root README.md plugin table and .claude-plugin/marketplace.json,"
+        echo "    AND remind the user to run: gh repo edit --add-topic <name>."
+        echo "Update them now, commit, and try again."
     } >&2
     exit 2
 fi

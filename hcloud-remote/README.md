@@ -23,13 +23,25 @@ If you have one or two VPSes on Hetzner and no Terraform, you don't need the ful
 
 ## Install
 
-### As a Claude Code plugin
+### Recommended — marketplace install
 
 ```bash
-claude --plugin-dir /path/to/agent-plus/hcloud-remote
+claude plugin marketplace add osouthgate/agent-plus
+claude plugin install hcloud-remote@agent-plus
 ```
 
-### Standalone
+Adds `hcloud-remote` to PATH and loads the skill so Claude reaches for it automatically.
+
+### Session-only (dev / try-before-install)
+
+```bash
+git clone https://github.com/osouthgate/agent-plus
+claude --plugin-dir ./agent-plus/hcloud-remote
+```
+
+`--plugin-dir` loads for the current shell only; nothing persisted.
+
+### Standalone — no Claude Code
 
 ```bash
 curl -O https://raw.githubusercontent.com/osouthgate/agent-plus/main/hcloud-remote/bin/hcloud-remote

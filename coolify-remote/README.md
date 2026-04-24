@@ -18,15 +18,25 @@ Coolify's web UI is fine for humans; its REST API is fine for shell scripts — 
 
 ## Install
 
-### As a Claude Code plugin (recommended)
+### Recommended — marketplace install
 
 ```bash
-claude --plugin-dir /path/to/agent-plus/coolify-remote
+claude plugin marketplace add osouthgate/agent-plus
+claude plugin install coolify-remote@agent-plus
 ```
 
-Enabling the plugin adds `coolify-remote` to PATH and loads the skill that teaches Claude when and how to use it.
+Adds `coolify-remote` to PATH and loads the skill so Claude reaches for it automatically.
 
-### Standalone
+### Session-only (dev / try-before-install)
+
+```bash
+git clone https://github.com/osouthgate/agent-plus
+claude --plugin-dir ./agent-plus/coolify-remote
+```
+
+`--plugin-dir` loads for the current shell only; nothing persisted.
+
+### Standalone — no Claude Code
 
 ```bash
 curl -O https://raw.githubusercontent.com/osouthgate/agent-plus/main/coolify-remote/bin/coolify-remote

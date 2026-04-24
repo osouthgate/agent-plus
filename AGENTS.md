@@ -34,6 +34,18 @@ This is the single biggest source of drift in this repo. If you skipped these st
 
 **When you change a SKILL.md**, re-read the README: the SKILL teaches Claude, the README teaches the human. They should agree on the headline commands even if the SKILL has more detail.
 
+## Adding a new plugin (checklist)
+
+When scaffolding a whole new plugin, do these in the same PR — the `Stop` hook enforces the first two, but none catches #4 automatically:
+
+1. **Copy the shape of an existing plugin.** Write `bin/<name>` (stdlib Python 3 only), `skills/<name>/SKILL.md`, `README.md`, `CHANGELOG.md`, `.claude-plugin/plugin.json`.
+2. **Add the entry to `.claude-plugin/marketplace.json`** so `claude plugin install <name>@agent-plus` works.
+3. **Add a row to the root `README.md`** — both the time-savings table and the Plugins table. Orphaned plugins are invisible.
+4. **Remind the user to run** `gh repo edit osouthgate/agent-plus --add-topic <name>` so the plugin shows up in GitHub's topic search. You cannot do this yourself without auth; flag it explicitly in your completion summary.
+5. **Validate** with `claude plugin validate <plugin>` and `claude plugin validate .claude-plugin/marketplace.json` before committing.
+
+The `Stop` hook catches missing root README / marketplace entries on a new-plugin commit. It cannot catch missing GitHub topics — that's on you.
+
 ## Per-plugin conventions
 
 Every plugin directory has the same shape — preserve it:

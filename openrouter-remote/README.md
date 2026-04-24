@@ -16,13 +16,25 @@ Plus: `usage` aggregates `usage_daily/weekly/monthly/all-time` across every key 
 
 ## Install
 
-### As a Claude Code plugin
+### Recommended — marketplace install
 
 ```bash
-claude --plugin-dir /path/to/agent-plus/openrouter-remote
+claude plugin marketplace add osouthgate/agent-plus
+claude plugin install openrouter-remote@agent-plus
 ```
 
-### Standalone
+Adds `openrouter-remote` to PATH and loads the skill so Claude reaches for it automatically.
+
+### Session-only (dev / try-before-install)
+
+```bash
+git clone https://github.com/osouthgate/agent-plus
+claude --plugin-dir ./agent-plus/openrouter-remote
+```
+
+`--plugin-dir` loads for the current shell only; nothing persisted.
+
+### Standalone — no Claude Code
 
 ```bash
 curl -O https://raw.githubusercontent.com/osouthgate/agent-plus/main/openrouter-remote/bin/openrouter-remote

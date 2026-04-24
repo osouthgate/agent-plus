@@ -12,25 +12,30 @@ The upstream `hermes` CLI runs its own local gateway; there's no remote mode. Ex
 
 ## Install
 
-### As a Claude Code plugin (recommended)
+### Recommended — marketplace install
 
 ```bash
-claude --plugin-dir /path/to/agent-plus/hermes-remote
+claude plugin marketplace add osouthgate/agent-plus
+claude plugin install hermes-remote@agent-plus
 ```
 
-Or once published to a marketplace:
+Adds `hermes-remote` to PATH and loads the skill so Claude reaches for it automatically.
+
+### Session-only (dev / try-before-install)
 
 ```bash
-/plugin install hermes-remote
+git clone https://github.com/osouthgate/agent-plus
+claude --plugin-dir ./agent-plus/hermes-remote
 ```
 
-Enabling the plugin adds `hermes-remote` to PATH and loads the skill that teaches Claude when and how to use it.
+`--plugin-dir` loads for the current shell only; nothing persisted.
 
-### Standalone
+### Standalone — no Claude Code
 
 ```bash
 curl -O https://raw.githubusercontent.com/osouthgate/agent-plus/main/hermes-remote/bin/hermes-remote
 chmod +x hermes-remote
+./hermes-remote status
 ```
 
 ## Configure

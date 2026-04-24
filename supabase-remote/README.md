@@ -21,15 +21,25 @@ The `supabase` CLI is fine, but it optimises for humans at a REPL. Agents hit th
 
 ## Install
 
-### As a Claude Code plugin (recommended)
+### Recommended — marketplace install
 
 ```bash
-claude --plugin-dir /path/to/agent-plus/supabase-remote
+claude plugin marketplace add osouthgate/agent-plus
+claude plugin install supabase-remote@agent-plus
 ```
 
-Enabling the plugin adds `supabase-remote` to PATH and loads the skill so Claude reaches for it automatically.
+Adds `supabase-remote` to PATH and loads the skill so Claude reaches for it automatically.
 
-### Standalone
+### Session-only (dev / try-before-install)
+
+```bash
+git clone https://github.com/osouthgate/agent-plus
+claude --plugin-dir ./agent-plus/supabase-remote
+```
+
+`--plugin-dir` loads for the current shell only; nothing persisted.
+
+### Standalone — no Claude Code
 
 ```bash
 curl -O https://raw.githubusercontent.com/osouthgate/agent-plus/main/supabase-remote/bin/supabase-remote
