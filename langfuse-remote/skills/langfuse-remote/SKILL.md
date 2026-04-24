@@ -127,6 +127,53 @@ ERROR-level observations across recent sessions, or
 `langfuse-remote get-traces <id> | jq '.traces[0].observations | length'` for a
 quick observation count. Compact output is `jq`-ready by default.
 
+## Offloading large responses with `--output`
+
+Langfuse trace dumps are among the biggest payloads any plugin returns — a single `get-traces` for a chatty trace can be 100KB+ of JSON with 30–50 observations, each carrying input/output blobs and metadata. Pulling all of that through the model's context is wasteful when you only need a slice.
+
+**Pass `--output <path>` as a top-level flag** (before the subcommand):
+
+```bash
+langfuse-remote --output /tmp/trace.json get-traces f9c1450a6c8fc748529bdb8fea7f4da8
+langfuse-remote --output /tmp/user.json monitor-user abc123 --limit 10
+```
+
+Stdout returns a compact envelope instead of the full trace:
+
+```json
+{
+  "tool": {"name": "langfuse-remote", "version": "..."},
+  "savedTo": "/tmp/trace.json",
+  "bytes": 102490,
+  "fileLineCount": 3108,
+  "payloadKeys": ["traces"],
+  "payloadShape": {
+    "traces": {"type": "list", "length": 1,
+      "sample": {"type": "dict", "keys": 10,
+        "shape": {
+          "id": {"type": "string", "length": 32},
+          "observations": {"type": "list", "length": 39},
+          "totalCost": {"type": "number"},
+          "userId": {"type": "string", "length": 8}
+        }}}
+  }
+}
+```
+
+**This is the key win:** without `--output`, an agent that wanted to count observations by name or find the `knowledge.search` span would have to write a Python inspect script to the temp dir, first guessing that the shape is `data.observations` (wrong — it's `data.traces[0].observations`), correcting the path after `head`-ing the file, then iterating. With `--output`, the envelope's `payloadShape` surfaces `traces[0].observations.length: 39` directly. Agent knows where to look on the first call.
+
+**How to act on the envelope:**
+
+1. Read `payloadShape` first. For `get-traces`, you'll see `traces: list[N]` with `sample` showing a trace's keys — including `observations: list[M]`. You now know where the data lives and how much there is.
+2. Use `Read` with offset/limit to pull only the slice you need (e.g. just the `observations` array, or just the first few observations to inspect shape).
+3. For aggregations (count observations by `name`, find all `ERROR` level spans), pipe the file through `jq` — don't write a Python script. `jq '.traces[0].observations | group_by(.name) | map({(.[0].name): length}) | add' /tmp/trace.json` replaces the three inspect scripts the old flow would have written.
+
+**`--shape-depth <1|2|3>`** controls recursion depth. Default is `3` (two layers of nesting — crucial for `get-traces` where useful signal lives at `traces[0].observations`). `1` is top-level only; `2` shows one level down (sufficient for flatter payloads).
+
+**When NOT to use `--output`:** `health`, `list-instances`, `show-instance`, `trace-ping`, `get-users` for a single ID. These return small payloads and the envelope overhead isn't worth it.
+
+**Don't write inspect scripts to `/tmp/`.** If `--output` gave you the file, reach for `Read` + `jq`, not a new Python script. The envelope already tells you where to look.
+
 API quirks worth knowing: `/api/public/users/{id}` doesn't exist on Langfuse 3.x
 (404 HTML) — `get-users` falls back to `/api/public/metrics/daily?userId=…`.
 The `/api/public/sessions` list returns minimal rows; `monitor-user` enriches

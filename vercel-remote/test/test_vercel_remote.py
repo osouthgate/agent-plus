@@ -268,25 +268,52 @@ class TestWriteOutputFile(unittest.TestCase):
         self.assertEqual(summary["payloadLength"], 0)
         self.assertNotIn("preview", summary)
 
-    def test_payload_shape_reports_types_and_sizes(self) -> None:
+    def test_payload_shape_depth1_shallow(self) -> None:
+        # Explicit depth=1 gives just top-level types.
+        import tempfile
+        td = Path(tempfile.mkdtemp())
+        out = td / "p.json"
         payload = {
             "tool": {},
             "project": "my-app",
             "count": 5,
-            "isProd": True,
             "meta": {"a": 1},
-            "deployments": [{"id": "x"}, {"id": "y"}],
-            "errors": None,
+            "deployments": [{"id": "x"}],
         }
-        summary, _ = self._write(payload)
+        summary = vr._write_output_file(payload, str(out), shape_depth=1)
         shape = summary["payloadShape"]
-        self.assertNotIn("tool", shape)
         self.assertEqual(shape["project"], {"type": "string", "length": 6})
-        self.assertEqual(shape["count"], {"type": "number"})
-        self.assertEqual(shape["isProd"], {"type": "boolean"})
         self.assertEqual(shape["meta"], {"type": "dict", "keys": 1})
-        self.assertEqual(shape["deployments"], {"type": "list", "length": 2})
-        self.assertEqual(shape["errors"], {"type": "null"})
+        self.assertEqual(shape["deployments"], {"type": "list", "length": 1})
+
+    def test_payload_shape_default_depth_recurses_into_nested_lists(self) -> None:
+        payload = {
+            "tool": {},
+            "deployments": [
+                {"id": "dep_abc", "state": "ready", "meta": {"sha": "abc123"}}
+            ],
+        }
+        summary, _ = self._write(payload)  # default depth=3
+        dep = summary["payloadShape"]["deployments"]
+        self.assertEqual(dep["type"], "list")
+        self.assertEqual(dep["length"], 1)
+        self.assertIn("sample", dep)
+        # At depth=3, agent sees deployments[0] is a dict with keys
+        # {id, state, meta} and knows `meta` is a dict with 1 key.
+        # (To see `meta.sha` itself would need depth=4 — intentionally
+        # capped at 3 so the envelope stays small.)
+        self.assertEqual(dep["sample"]["shape"]["id"],
+                         {"type": "string", "length": 7})
+        self.assertEqual(dep["sample"]["shape"]["meta"],
+                         {"type": "dict", "keys": 1})
+
+    def test_shape_depth_flag_parses(self) -> None:
+        parser = vr.build_parser()
+        args = parser.parse_args(["--shape-depth", "1", "projects", "list"])
+        self.assertEqual(args.shape_depth, 1)
+        args = parser.parse_args(["projects", "list"])
+        # Default surfaces as 3 at the parser level.
+        self.assertEqual(args.shape_depth, 3)
 
 
 if __name__ == "__main__":

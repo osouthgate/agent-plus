@@ -764,18 +764,20 @@ def env_remove(
 
 
 def emit_json(obj: Any, *, pretty: bool = False,
-              output: Optional[str] = None) -> None:
+              output: Optional[str] = None,
+              shape_depth: int = 3) -> None:
     scrubbed = _scrub(obj)
     wrapped = _with_tool_meta(scrubbed)
     if output and isinstance(wrapped, (dict, list)):
-        wrapped = _write_output_file(wrapped, output)
+        wrapped = _write_output_file(wrapped, output, shape_depth=shape_depth)
     if pretty:
         print(json.dumps(wrapped, indent=2, sort_keys=False, default=str))
     else:
         print(json.dumps(wrapped, default=str))
 
 
-def _write_output_file(payload: Any, output_path: str) -> dict:
+def _write_output_file(payload: Any, output_path: str,
+                       shape_depth: int = 3) -> dict:
     """Write the full payload as JSON to `output_path` and return a compact
     summary envelope. Lets the agent offload large responses (deployment
     logs, overview snapshots, project lists) to disk instead of pulling them
@@ -797,7 +799,7 @@ def _write_output_file(payload: Any, output_path: str) -> dict:
 
     if isinstance(payload, dict):
         summary["payloadKeys"] = [k for k in payload.keys() if k != "tool"]
-        summary["payloadShape"] = _payload_shape(payload)
+        summary["payloadShape"] = _payload_shape(payload, depth=shape_depth)
         lines = payload.get("lines")
         if isinstance(lines, list) and lines:
             preview_n = 10
@@ -809,6 +811,8 @@ def _write_output_file(payload: Any, output_path: str) -> dict:
     elif isinstance(payload, list):
         summary["payloadType"] = "list"
         summary["payloadLength"] = len(payload)
+        if payload and shape_depth > 1:
+            summary["sampleShape"] = _shape_value(payload[0], shape_depth - 1)
         if payload:
             preview_n = 10
             summary["preview"] = {
@@ -819,30 +823,38 @@ def _write_output_file(payload: Any, output_path: str) -> dict:
     return summary
 
 
-def _payload_shape(payload: dict) -> dict[str, dict[str, Any]]:
-    """Shallow type + size map for each top-level key (except `tool`). Lets
-    the agent pick where to Read into the file without scanning the whole
-    thing — e.g. `{deployments: {type: list, length: 50}}` signals "drill in".
-    One level deep only; going deeper reinvents jq."""
-    shape: dict[str, dict[str, Any]] = {}
-    for k, v in payload.items():
-        if k == "tool":
-            continue
-        if isinstance(v, str):
-            shape[k] = {"type": "string", "length": len(v)}
-        elif isinstance(v, bool):
-            shape[k] = {"type": "boolean"}
-        elif isinstance(v, (int, float)):
-            shape[k] = {"type": "number"}
-        elif isinstance(v, list):
-            shape[k] = {"type": "list", "length": len(v)}
-        elif isinstance(v, dict):
-            shape[k] = {"type": "dict", "keys": len(v)}
-        elif v is None:
-            shape[k] = {"type": "null"}
-        else:
-            shape[k] = {"type": type(v).__name__}
-    return shape
+def _payload_shape(payload: dict, depth: int = 3) -> dict[str, dict[str, Any]]:
+    """Type + size map for each top-level key (except `tool`), recursive to
+    `depth` levels. At depth=1 is shallow. At depth=3 (the default) exposes
+    two layers of nesting — enough to surface `deployments[0].meta` fields
+    in the envelope without the agent having to Read the file."""
+    if depth < 1 or not isinstance(payload, dict):
+        return {}
+    return {k: _shape_value(v, depth) for k, v in payload.items() if k != "tool"}
+
+
+def _shape_value(v: Any, depth: int) -> dict[str, Any]:
+    """Single-value shape descriptor. Recurses into lists (sampling `[0]`)
+    and dicts (mapping their keys) while depth > 1."""
+    if isinstance(v, str):
+        return {"type": "string", "length": len(v)}
+    if isinstance(v, bool):
+        return {"type": "boolean"}
+    if isinstance(v, (int, float)):
+        return {"type": "number"}
+    if isinstance(v, list):
+        out: dict[str, Any] = {"type": "list", "length": len(v)}
+        if depth > 1 and v:
+            out["sample"] = _shape_value(v[0], depth - 1)
+        return out
+    if isinstance(v, dict):
+        out = {"type": "dict", "keys": len(v)}
+        if depth > 1:
+            out["shape"] = {k: _shape_value(val, depth - 1) for k, val in v.items()}
+        return out
+    if v is None:
+        return {"type": "null"}
+    return {"type": type(v).__name__}
 
 
 # ──────────────────────────── CLI ────────────────────────────
@@ -855,11 +867,18 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--pretty", action="store_true", help="indent JSON output")
     p.add_argument("--output", metavar="PATH",
                    help=("write the full JSON payload to PATH and print a compact "
-                         "summary (savedTo, bytes, payloadKeys, and — for log "
-                         "payloads — head/tail previews). Use this when the "
-                         "response is large enough that routing it through the "
-                         "model's context is wasteful (e.g. deployment logs, "
+                         "summary (savedTo, bytes, payloadKeys, payloadShape, and "
+                         "— for log payloads — head/tail previews). Use this when "
+                         "the response is large enough that routing it through "
+                         "the model's context is wasteful (e.g. deployment logs, "
                          "overview for many deployments)."))
+    p.add_argument("--shape-depth", type=int, default=3, choices=[1, 2, 3],
+                   dest="shape_depth",
+                   help=("how deep payloadShape recurses (1=top-level types "
+                         "only, 2=one layer down, 3=default [two layers — "
+                         "enough to surface nested-list-of-dicts like "
+                         "`deployments[0].meta.githubCommitSha`]). Only "
+                         "affects the --output envelope."))
 
 
 def _cfg_from_args(args: argparse.Namespace) -> dict[str, str]:
@@ -991,43 +1010,43 @@ def main(argv: Optional[list[str]] = None) -> int:
                     {"id": p.get("id"), "name": p.get("name"), "framework": p.get("framework")}
                     for p in projects
                 ]
-                emit_json(slim, pretty=args.pretty, output=getattr(args, "output", None))
+                emit_json(slim, pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
             elif args.action == "resolve":
                 if not args.ref:
                     die("projects resolve requires a name-or-id argument")
-                emit_json(resolve_project(args.ref, cfg), pretty=args.pretty, output=getattr(args, "output", None))
+                emit_json(resolve_project(args.ref, cfg), pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
 
         elif args.cmd == "overview":
-            emit_json(build_overview(args.project or "", args.limit, cfg), pretty=args.pretty, output=getattr(args, "output", None))
+            emit_json(build_overview(args.project or "", args.limit, cfg), pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
 
         elif args.cmd == "deployments":
             if args.action == "list":
                 deps = list_deployments(args.project, args.state, args.limit, cfg)
-                emit_json(deps, pretty=args.pretty, output=getattr(args, "output", None))
+                emit_json(deps, pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
             elif args.action == "show":
-                emit_json(show_deployment(args.ref, cfg), pretty=args.pretty, output=getattr(args, "output", None))
+                emit_json(show_deployment(args.ref, cfg), pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
             elif args.action == "trigger":
                 emit_json(
                     trigger_deploy_hook(args.hook_url, wait=args.wait, timeout=args.timeout, cfg=cfg),
-                    pretty=args.pretty, output=getattr(args, "output", None),
+                    pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3),
                 )
 
         elif args.cmd == "logs":
             emit_json(
                 fetch_logs(args.ref, args.since, args.errors_only, args.limit, cfg),
-                pretty=args.pretty, output=getattr(args, "output", None),
+                pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3),
             )
 
         elif args.cmd == "domains":
             if args.action == "list":
-                emit_json(list_domains(args.project, cfg), pretty=args.pretty, output=getattr(args, "output", None))
+                emit_json(list_domains(args.project, cfg), pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
             elif args.action == "verify":
                 emit_json(
                     verify_domain(
                         args.domain, args.project,
                         wait=args.wait, timeout=args.timeout, cfg=cfg,
                     ),
-                    pretty=args.pretty, output=getattr(args, "output", None),
+                    pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3),
                 )
 
         elif args.cmd == "env":
@@ -1036,13 +1055,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 pid = project.get("id") or project.get("name") or args.project
                 names = fetch_env_names(pid, args.env, cfg)
                 emit_json({"project": project.get("name"), "env": args.env, "names": names},
-                          pretty=args.pretty, output=getattr(args, "output", None))
+                          pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
             elif args.action == "set":
                 emit_json(env_set(args.key, args.value, args.project, args.env, cfg=cfg),
-                          pretty=args.pretty, output=getattr(args, "output", None))
+                          pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
             elif args.action == "remove":
                 emit_json(env_remove(args.key, args.project, args.env, cfg=cfg),
-                          pretty=args.pretty, output=getattr(args, "output", None))
+                          pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
 
         return 0
     except VercelError as e:

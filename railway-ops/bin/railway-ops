@@ -1020,17 +1020,19 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-def emit(data: Any, pretty: bool, output: Optional[str] = None) -> None:
+def emit(data: Any, pretty: bool, output: Optional[str] = None,
+         shape_depth: int = 3) -> None:
     wrapped = _with_tool_meta(data)
     if output and isinstance(wrapped, (dict, list)):
-        wrapped = _write_output_file(wrapped, output)
+        wrapped = _write_output_file(wrapped, output, shape_depth=shape_depth)
     if pretty:
         print(json.dumps(wrapped, indent=2, default=str))
     else:
         print(json.dumps(wrapped, default=str))
 
 
-def _write_output_file(payload: Any, output_path: str) -> dict:
+def _write_output_file(payload: Any, output_path: str,
+                       shape_depth: int = 3) -> dict:
     """Write the full payload as JSON to `output_path` and return a compact
     summary envelope. Lets the agent offload large responses (build logs,
     service snapshots, project lists) to disk instead of pulling them through
@@ -1052,7 +1054,7 @@ def _write_output_file(payload: Any, output_path: str) -> dict:
 
     if isinstance(payload, dict):
         summary["payloadKeys"] = [k for k in payload.keys() if k != "tool"]
-        summary["payloadShape"] = _payload_shape(payload)
+        summary["payloadShape"] = _payload_shape(payload, depth=shape_depth)
         # Log-shaped payloads carry their line array under `lines`; preview
         # head and tail so the agent can decide whether to Read the file.
         lines = payload.get("lines")
@@ -1066,6 +1068,8 @@ def _write_output_file(payload: Any, output_path: str) -> dict:
     elif isinstance(payload, list):
         summary["payloadType"] = "list"
         summary["payloadLength"] = len(payload)
+        if payload and shape_depth > 1:
+            summary["sampleShape"] = _shape_value(payload[0], shape_depth - 1)
         if payload:
             preview_n = 10
             summary["preview"] = {
@@ -1076,30 +1080,44 @@ def _write_output_file(payload: Any, output_path: str) -> dict:
     return summary
 
 
-def _payload_shape(payload: dict) -> dict[str, dict[str, Any]]:
-    """Shallow type + size map for each top-level key (except `tool`). Lets
-    the agent pick where to Read into the file without scanning the whole
-    thing — e.g. `{traces: {type: list, length: 1}}` signals "drill in".
-    One level deep only; going deeper reinvents jq."""
-    shape: dict[str, dict[str, Any]] = {}
-    for k, v in payload.items():
-        if k == "tool":
-            continue
-        if isinstance(v, str):
-            shape[k] = {"type": "string", "length": len(v)}
-        elif isinstance(v, bool):
-            shape[k] = {"type": "boolean"}
-        elif isinstance(v, (int, float)):
-            shape[k] = {"type": "number"}
-        elif isinstance(v, list):
-            shape[k] = {"type": "list", "length": len(v)}
-        elif isinstance(v, dict):
-            shape[k] = {"type": "dict", "keys": len(v)}
-        elif v is None:
-            shape[k] = {"type": "null"}
-        else:
-            shape[k] = {"type": type(v).__name__}
-    return shape
+def _payload_shape(payload: dict, depth: int = 3) -> dict[str, dict[str, Any]]:
+    """Type + size map for each top-level key (except `tool`), recursive to
+    `depth` levels. At depth=1 reports just `{type, length|keys}` per key.
+    At depth=2 exposes children one layer down. At depth=3 (the default)
+    exposes two layers — enough to see a nested `list[dict[list]]` pattern
+    like `{traces: [{observations: [...]}]}`. Lets the agent pick where to
+    Read into the file without a second tool call — e.g. at depth=3 the
+    agent sees `traces[0].observations: {type: list, length: 39}` directly
+    in the envelope and jumps straight to the right slice. Depth capped at
+    3 via the arg parser — more than that reinvents jq."""
+    if depth < 1 or not isinstance(payload, dict):
+        return {}
+    return {k: _shape_value(v, depth) for k, v in payload.items() if k != "tool"}
+
+
+def _shape_value(v: Any, depth: int) -> dict[str, Any]:
+    """Single-value shape descriptor. Recurses into lists (sampling `[0]`)
+    and dicts (mapping their keys) while depth > 1. Terminates when depth
+    hits 1 so nesting is bounded even for cyclic-looking data."""
+    if isinstance(v, str):
+        return {"type": "string", "length": len(v)}
+    if isinstance(v, bool):
+        return {"type": "boolean"}
+    if isinstance(v, (int, float)):
+        return {"type": "number"}
+    if isinstance(v, list):
+        out: dict[str, Any] = {"type": "list", "length": len(v)}
+        if depth > 1 and v:
+            out["sample"] = _shape_value(v[0], depth - 1)
+        return out
+    if isinstance(v, dict):
+        out = {"type": "dict", "keys": len(v)}
+        if depth > 1:
+            out["shape"] = {k: _shape_value(val, depth - 1) for k, val in v.items()}
+        return out
+    if v is None:
+        return {"type": "null"}
+    return {"type": type(v).__name__}
 
 
 def _resolve_cli_env(args: argparse.Namespace) -> None:
@@ -1128,7 +1146,7 @@ def cmd_overview(args: argparse.Namespace) -> None:
         service_filter=args.service,
         bucket_cap=args.limit,
     )
-    emit(data, args.pretty, getattr(args, "output", None))
+    emit(data, args.pretty, getattr(args, "output", None), getattr(args, "shape_depth", 3))
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -1145,7 +1163,7 @@ def cmd_status(args: argparse.Namespace) -> None:
             for e in (status.get("environments", {}) or {}).get("edges", [])
             if isinstance(e, dict) and isinstance(e.get("node"), dict)
         ],
-    }, args.pretty, getattr(args, "output", None))
+    }, args.pretty, getattr(args, "output", None), getattr(args, "shape_depth", 3))
 
 
 def cmd_errors(args: argparse.Namespace) -> None:
@@ -1194,7 +1212,7 @@ def cmd_errors(args: argparse.Namespace) -> None:
         "errorKinds": top_n_kinds(stats["errorKinds"]),
         "warningKinds": top_n_kinds(stats["warningKinds"]),
         "truncated": stats["errorTotal"] > len(errors) or stats["warningTotal"] > len(warnings),
-    }, args.pretty, getattr(args, "output", None))
+    }, args.pretty, getattr(args, "output", None), getattr(args, "shape_depth", 3))
 
 
 def cmd_build_logs(args: argparse.Namespace) -> None:
@@ -1255,7 +1273,7 @@ def cmd_build_logs(args: argparse.Namespace) -> None:
         "lines": tail,
         "errorKinds": top_n_kinds(stats["errorKinds"]),
         "lineCount": stats["lineCount"],
-    }, args.pretty, getattr(args, "output", None))
+    }, args.pretty, getattr(args, "output", None), getattr(args, "shape_depth", 3))
 
 
 def cmd_envs(args: argparse.Namespace) -> None:
@@ -1267,7 +1285,7 @@ def cmd_envs(args: argparse.Namespace) -> None:
         "env": args.env or "<linked>",
         "envVarNames": names,
         "count": len(names),
-    }, args.pretty, getattr(args, "output", None))
+    }, args.pretty, getattr(args, "output", None), getattr(args, "shape_depth", 3))
 
 
 def cmd_services(args: argparse.Namespace) -> None:
@@ -1286,7 +1304,7 @@ def cmd_services(args: argparse.Namespace) -> None:
             }
             for s in services
         ],
-    }, args.pretty, getattr(args, "output", None))
+    }, args.pretty, getattr(args, "output", None), getattr(args, "shape_depth", 3))
 
 
 def cmd_projects(args: argparse.Namespace) -> None:
@@ -1299,20 +1317,37 @@ def cmd_projects(args: argparse.Namespace) -> None:
     except json.JSONDecodeError as e:
         die(f"could not parse `railway list --json`: {e}")
         return
-    emit(data, args.pretty, getattr(args, "output", None))
+    emit(data, args.pretty, getattr(args, "output", None), getattr(args, "shape_depth", 3))
 
 
 # ──────────────────────────── argparse ────────────────────────────
 
 
 def _add_globals(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--pretty", action="store_true", help="indent JSON output")
+    # SUPPRESS on subparser-reattached flags is important: _add_globals is
+    # called on the main parser AND on every subparser so `--output` works
+    # in both positions (`railway-ops --output f.json status` and
+    # `railway-ops status --output f.json`). Without SUPPRESS, the subparser's
+    # default=None/False would clobber the top-level value after parsing.
+    p.add_argument("--pretty", action="store_true",
+                   default=argparse.SUPPRESS,
+                   help="indent JSON output")
     p.add_argument("--output", metavar="PATH",
+                   default=argparse.SUPPRESS,
                    help=("write the full JSON payload to PATH and print a compact "
-                         "summary (savedTo, bytes, payloadKeys, and — for log "
-                         "payloads — head/tail line previews). Use this when the "
-                         "response is large enough that routing it through the "
-                         "model's context is wasteful (e.g. build-logs, overview)."))
+                         "summary (savedTo, bytes, payloadKeys, payloadShape, and "
+                         "— for log payloads — head/tail line previews). Use this "
+                         "when the response is large enough that routing it "
+                         "through the model's context is wasteful (e.g. build-logs, "
+                         "overview)."))
+    p.add_argument("--shape-depth", type=int, choices=[1, 2, 3],
+                   default=argparse.SUPPRESS,
+                   dest="shape_depth",
+                   help=("how deep payloadShape recurses (1=top-level types "
+                         "only, 2=one layer down, 3=two layers down [default — "
+                         "enough to surface nested-list-of-dicts-of-lists like "
+                         "`traces[0].observations.length`]). Only affects the "
+                         "--output envelope; ignored without --output."))
 
 
 def build_parser() -> argparse.ArgumentParser:

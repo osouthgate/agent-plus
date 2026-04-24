@@ -6,7 +6,14 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+### Added
+- `--shape-depth <1|2|3>` flag — controls how deep `payloadShape` recurses in the `--output` envelope. Default is `3` (two layers of nesting — surfaces `deployments[0].meta` without a second Read). Drop to `1` for a minimal envelope. Only affects `--output`. [2026-04-24]
+
+### Changed
+- Default `payloadShape` depth is now **3** (was effectively 1). Agents using `--output` get nested-structure visibility by default — e.g. `deployments: {type: list, length: 50, sample: {type: dict, keys: 12, shape: {...}}}` instead of just `deployments: {type: list, length: 50}`. SKILL.md updated with a dedicated "Offloading large responses" section explaining when to reach for `--output`. [2026-04-24]
+
 ### Fixed
+- Top-level `--output` and `--pretty` are now immune to subparser re-declaration (`default=argparse.SUPPRESS`). Previously a value passed before the subcommand could be silently overwritten by the subparser's default. Not user-visible in normal use but matters for `railway-ops`-style plugins that add globals per-subparser. [2026-04-24]
 - `--output` no longer silently drops list-shaped payloads (e.g. `projects list`). The raw list is written to disk unchanged; the envelope reports `payloadType: "list"` + `payloadLength` instead of `payloadKeys`/`payloadShape`, plus head/tail item previews. [2026-04-24]
 
 ### Added

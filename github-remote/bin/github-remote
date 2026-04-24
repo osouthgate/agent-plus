@@ -992,7 +992,8 @@ def build_overview(owner: str, repo: str, ref: str, cfg: dict[str, str]) -> dict
 
 
 def emit_json(obj: Any, *, pretty: bool = False,
-              output: Optional[str] = None) -> None:
+              output: Optional[str] = None,
+              shape_depth: int = 3) -> None:
     scrubbed = _scrub(obj)
     # Strip internal _exit_nonzero sentinel before printing — caller handles exit.
     if isinstance(scrubbed, dict):
@@ -1000,14 +1001,15 @@ def emit_json(obj: Any, *, pretty: bool = False,
     # Inject tool meta at the top of dict payloads; non-dicts pass through unchanged.
     scrubbed = _with_tool_meta(scrubbed)
     if output and isinstance(scrubbed, (dict, list)):
-        scrubbed = _write_output_file(scrubbed, output)
+        scrubbed = _write_output_file(scrubbed, output, shape_depth=shape_depth)
     if pretty:
         print(json.dumps(scrubbed, indent=2, sort_keys=False, default=str))
     else:
         print(json.dumps(scrubbed, default=str))
 
 
-def _write_output_file(payload: Any, output_path: str) -> dict:
+def _write_output_file(payload: Any, output_path: str,
+                       shape_depth: int = 3) -> dict:
     """Write the full payload as JSON to `output_path` and return a compact
     summary envelope. Lets the agent offload large responses (workflow logs,
     PR diffs, long issue lists) to disk instead of pulling them through the
@@ -1029,7 +1031,7 @@ def _write_output_file(payload: Any, output_path: str) -> dict:
 
     if isinstance(payload, dict):
         summary["payloadKeys"] = [k for k in payload.keys() if k != "tool"]
-        summary["payloadShape"] = _payload_shape(payload)
+        summary["payloadShape"] = _payload_shape(payload, depth=shape_depth)
         lines = payload.get("lines")
         if isinstance(lines, list) and lines:
             preview_n = 10
@@ -1041,6 +1043,8 @@ def _write_output_file(payload: Any, output_path: str) -> dict:
     elif isinstance(payload, list):
         summary["payloadType"] = "list"
         summary["payloadLength"] = len(payload)
+        if payload and shape_depth > 1:
+            summary["sampleShape"] = _shape_value(payload[0], shape_depth - 1)
         if payload:
             preview_n = 10
             summary["preview"] = {
@@ -1051,30 +1055,38 @@ def _write_output_file(payload: Any, output_path: str) -> dict:
     return summary
 
 
-def _payload_shape(payload: dict) -> dict[str, dict[str, Any]]:
-    """Shallow type + size map for each top-level key (except `tool`). Lets
-    the agent pick where to Read into the file without scanning the whole
-    thing — e.g. `{pulls: {type: list, length: 30}}` signals "drill in".
-    One level deep only; going deeper reinvents jq."""
-    shape: dict[str, dict[str, Any]] = {}
-    for k, v in payload.items():
-        if k == "tool":
-            continue
-        if isinstance(v, str):
-            shape[k] = {"type": "string", "length": len(v)}
-        elif isinstance(v, bool):
-            shape[k] = {"type": "boolean"}
-        elif isinstance(v, (int, float)):
-            shape[k] = {"type": "number"}
-        elif isinstance(v, list):
-            shape[k] = {"type": "list", "length": len(v)}
-        elif isinstance(v, dict):
-            shape[k] = {"type": "dict", "keys": len(v)}
-        elif v is None:
-            shape[k] = {"type": "null"}
-        else:
-            shape[k] = {"type": type(v).__name__}
-    return shape
+def _payload_shape(payload: dict, depth: int = 3) -> dict[str, dict[str, Any]]:
+    """Type + size map for each top-level key (except `tool`), recursive to
+    `depth` levels. At depth=1 is shallow. At depth=3 (the default) exposes
+    two layers of nesting — enough to see e.g. `checks[0].annotations.length`
+    so the agent knows which workflow slice to drill into."""
+    if depth < 1 or not isinstance(payload, dict):
+        return {}
+    return {k: _shape_value(v, depth) for k, v in payload.items() if k != "tool"}
+
+
+def _shape_value(v: Any, depth: int) -> dict[str, Any]:
+    """Single-value shape descriptor. Recurses into lists (sampling `[0]`)
+    and dicts (mapping their keys) while depth > 1."""
+    if isinstance(v, str):
+        return {"type": "string", "length": len(v)}
+    if isinstance(v, bool):
+        return {"type": "boolean"}
+    if isinstance(v, (int, float)):
+        return {"type": "number"}
+    if isinstance(v, list):
+        out: dict[str, Any] = {"type": "list", "length": len(v)}
+        if depth > 1 and v:
+            out["sample"] = _shape_value(v[0], depth - 1)
+        return out
+    if isinstance(v, dict):
+        out = {"type": "dict", "keys": len(v)}
+        if depth > 1:
+            out["shape"] = {k: _shape_value(val, depth - 1) for k, val in v.items()}
+        return out
+    if v is None:
+        return {"type": "null"}
+    return {"type": type(v).__name__}
 
 
 # ──────────────────────────── CLI ────────────────────────────
@@ -1087,10 +1099,18 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--pretty", action="store_true", help="indent JSON output")
     p.add_argument("--output", metavar="PATH",
                    help=("write the full JSON payload to PATH and print a compact "
-                         "summary (savedTo, bytes, payloadKeys, and — for log "
-                         "payloads — head/tail previews). Use this for large "
-                         "responses (workflow logs, PR diffs, long issue lists) "
-                         "that are wasteful to route through the model's context."))
+                         "summary (savedTo, bytes, payloadKeys, payloadShape, and "
+                         "— for log payloads — head/tail previews). Use this for "
+                         "large responses (workflow logs, PR diffs, long issue "
+                         "lists) that are wasteful to route through the model's "
+                         "context."))
+    p.add_argument("--shape-depth", type=int, default=3, choices=[1, 2, 3],
+                   dest="shape_depth",
+                   help=("how deep payloadShape recurses (1=top-level types "
+                         "only, 2=one layer down, 3=default [two layers — "
+                         "enough to surface `checks[0].annotations.length` "
+                         "or `prs[0].head.sha`]). Only affects the --output "
+                         "envelope."))
 
 
 def _cfg_from_args(args: argparse.Namespace) -> dict[str, str]:
@@ -1282,54 +1302,54 @@ def main(argv: Optional[list[str]] = None) -> int:
                 emit_json(
                     pr_list(owner, repo, state=args.state, base=args.base,
                             author=args.author, limit=args.limit, cfg=cfg),
-                    pretty=args.pretty, output=getattr(args, "output", None),
+                    pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3),
                 )
             elif args.action == "resolve":
-                emit_json(pr_resolve(owner, repo, args.query, cfg), pretty=args.pretty, output=getattr(args, "output", None))
+                emit_json(pr_resolve(owner, repo, args.query, cfg), pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
             elif args.action == "show":
-                emit_json(pr_show(owner, repo, args.ref, cfg), pretty=args.pretty, output=getattr(args, "output", None))
+                emit_json(pr_show(owner, repo, args.ref, cfg), pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
             elif args.action == "comment":
-                emit_json(pr_comment(owner, repo, args.ref, args.body, cfg), pretty=args.pretty, output=getattr(args, "output", None))
+                emit_json(pr_comment(owner, repo, args.ref, args.body, cfg), pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
 
         elif args.cmd == "issue":
             if args.action == "list":
                 emit_json(
                     issue_list(owner, repo, state=args.state, assignee=args.assignee,
                                label=args.label, limit=args.limit, cfg=cfg),
-                    pretty=args.pretty, output=getattr(args, "output", None),
+                    pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3),
                 )
             elif args.action == "resolve":
-                emit_json(issue_resolve(owner, repo, args.query, cfg), pretty=args.pretty, output=getattr(args, "output", None))
+                emit_json(issue_resolve(owner, repo, args.query, cfg), pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
             elif args.action == "show":
                 if not _is_int(args.ref):
                     die("issue show expects a numeric issue number")
-                emit_json(issue_show(owner, repo, int(args.ref), cfg), pretty=args.pretty, output=getattr(args, "output", None))
+                emit_json(issue_show(owner, repo, int(args.ref), cfg), pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
 
         elif args.cmd == "run":
             if args.action == "list":
                 emit_json(
                     run_list(owner, repo, branch=args.branch, status=args.status,
                              limit=args.limit, cfg=cfg),
-                    pretty=args.pretty, output=getattr(args, "output", None),
+                    pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3),
                 )
             elif args.action == "show":
-                emit_json(run_show(owner, repo, args.run_id, cfg), pretty=args.pretty, output=getattr(args, "output", None))
+                emit_json(run_show(owner, repo, args.run_id, cfg), pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
             elif args.action == "logs":
                 emit_json(
                     run_logs(owner, repo, args.run_id, job_filter=args.job,
                              errors_only=args.errors_only, tail=args.tail, cfg=cfg),
-                    pretty=args.pretty, output=getattr(args, "output", None),
+                    pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3),
                 )
             elif args.action == "wait":
                 result = run_wait(owner, repo, args.ref,
                                   timeout=args.timeout, poll_interval=args.poll_interval, cfg=cfg)
                 exit_nonzero = isinstance(result, dict) and result.get("_exit_nonzero")
-                emit_json(result, pretty=args.pretty, output=getattr(args, "output", None))
+                emit_json(result, pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
                 if exit_nonzero:
                     return 1
 
         elif args.cmd == "overview":
-            emit_json(build_overview(owner, repo, args.ref, cfg), pretty=args.pretty, output=getattr(args, "output", None))
+            emit_json(build_overview(owner, repo, args.ref, cfg), pretty=args.pretty, output=getattr(args, "output", None), shape_depth=getattr(args, "shape_depth", 3))
 
         return 0
     except GitHubError as e:

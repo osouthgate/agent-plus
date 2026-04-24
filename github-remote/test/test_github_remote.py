@@ -450,25 +450,45 @@ class TestWriteOutputFile(unittest.TestCase):
         self.assertEqual(summary["payloadLength"], 0)
         self.assertNotIn("preview", summary)
 
-    def test_payload_shape_reports_types_and_sizes(self) -> None:
+    def test_payload_shape_depth1_shallow(self) -> None:
+        import tempfile
+        td = Path(tempfile.mkdtemp())
+        out = td / "p.json"
         payload = {
             "tool": {},
             "branch": "main",
-            "runId": 42,
             "mergeable": True,
             "head": {"sha": "abc"},
-            "checks": [{"name": "ci"}, {"name": "lint"}, {"name": "test"}],
-            "draft": None,
+            "checks": [{"name": "ci"}],
         }
-        summary, _ = self._write(payload)
+        summary = gr._write_output_file(payload, str(out), shape_depth=1)
         shape = summary["payloadShape"]
-        self.assertNotIn("tool", shape)
         self.assertEqual(shape["branch"], {"type": "string", "length": 4})
-        self.assertEqual(shape["runId"], {"type": "number"})
-        self.assertEqual(shape["mergeable"], {"type": "boolean"})
         self.assertEqual(shape["head"], {"type": "dict", "keys": 1})
-        self.assertEqual(shape["checks"], {"type": "list", "length": 3})
-        self.assertEqual(shape["draft"], {"type": "null"})
+        self.assertEqual(shape["checks"], {"type": "list", "length": 1})
+
+    def test_payload_shape_default_depth_recurses(self) -> None:
+        payload = {
+            "tool": {},
+            "checks": [
+                {"name": "ci", "conclusion": "failure",
+                 "annotations": [{"path": "x.ts", "line": 42}]}
+            ],
+        }
+        summary, _ = self._write(payload)  # default depth=3
+        checks = summary["payloadShape"]["checks"]
+        self.assertEqual(checks["type"], "list")
+        self.assertIn("sample", checks)
+        # Agent sees checks[0].annotations.length without a second read.
+        self.assertEqual(checks["sample"]["shape"]["annotations"],
+                         {"type": "list", "length": 1})
+
+    def test_shape_depth_flag_parses(self) -> None:
+        parser = gr.build_parser()
+        args = parser.parse_args(["--shape-depth", "1", "overview", "main"])
+        self.assertEqual(args.shape_depth, 1)
+        args = parser.parse_args(["overview", "main"])
+        self.assertEqual(args.shape_depth, 3)
 
 
 if __name__ == "__main__":

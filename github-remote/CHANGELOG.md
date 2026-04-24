@@ -6,6 +6,12 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+### Added
+- `--shape-depth <1|2|3>` flag — controls how deep `payloadShape` recurses in the `--output` envelope. Default is `3` (two layers — enough to surface `checks[0].annotations.length`). Drop to `1` for a minimal envelope. Only affects `--output`. [2026-04-24]
+
+### Changed
+- Default `payloadShape` depth is now **3** (was 1). Agents using `--output` see nested-structure detail by default — the envelope reveals where to Read without a second tool call. SKILL.md updated with a dedicated "Offloading large responses" section. [2026-04-24]
+
 ### Fixed
 - `--output` no longer silently drops list-shaped payloads (e.g. `pr list`). The raw list is written to disk unchanged; the envelope reports `payloadType: "list"` + `payloadLength` instead of `payloadKeys`/`payloadShape`, plus head/tail item previews. [2026-04-24]
 

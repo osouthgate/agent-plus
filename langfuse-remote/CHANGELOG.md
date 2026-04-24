@@ -6,6 +6,12 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+### Added
+- `--shape-depth <1|2|3>` top-level flag — controls how deep `payloadShape` recurses in the `--output` envelope. Default is `3` (two layers — crucial for `get-traces`, reveals `traces[0].observations.length` so the agent knows the observation count without Reading). Only affects `--output`. [2026-04-24]
+
+### Changed
+- Default `payloadShape` depth is now **3** (was 1). Directly motivated by the observed `get-traces` workflow where agents wrote three inspect scripts to `/tmp/` just to count observations by name — first script guessed the wrong path (`data.observations` vs `data.traces[0].observations`), wasting a round trip. At depth=3 the shape is visible in the envelope; one `Read` + `jq` does the rest. SKILL.md rewritten with a detailed "Offloading large responses" section explaining the anti-pattern to avoid. [2026-04-24]
+
 ### Fixed
 - `--output` no longer silently drops list-shaped payloads. The raw list is written to disk unchanged; the envelope reports `payloadType: "list"` + `payloadLength` instead of `payloadKeys`/`payloadShape`, plus head/tail item previews. [2026-04-24]
 

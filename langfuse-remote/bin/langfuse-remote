@@ -563,12 +563,14 @@ def _emit_json(args: argparse.Namespace, obj: Any) -> None:
     indent = 2 if getattr(args, "pretty", False) else None
     wrapped = _with_tool_meta(obj)
     output = getattr(args, "output", None)
+    shape_depth = getattr(args, "shape_depth", 3)
     if output and isinstance(wrapped, (dict, list)):
-        wrapped = _write_output_file(wrapped, output)
+        wrapped = _write_output_file(wrapped, output, shape_depth=shape_depth)
     print(json.dumps(wrapped, indent=indent, ensure_ascii=False))
 
 
-def _write_output_file(payload: Any, output_path: str) -> dict:
+def _write_output_file(payload: Any, output_path: str,
+                       shape_depth: int = 3) -> dict:
     """Write the full payload as JSON to `output_path` and return a compact
     summary envelope. Lets the agent offload large responses (full trace
     dumps, session exports, user lists) to disk instead of pulling them
@@ -590,7 +592,7 @@ def _write_output_file(payload: Any, output_path: str) -> dict:
 
     if isinstance(payload, dict):
         summary["payloadKeys"] = [k for k in payload.keys() if k != "tool"]
-        summary["payloadShape"] = _payload_shape(payload)
+        summary["payloadShape"] = _payload_shape(payload, depth=shape_depth)
         lines = payload.get("lines")
         if isinstance(lines, list) and lines:
             preview_n = 10
@@ -602,6 +604,8 @@ def _write_output_file(payload: Any, output_path: str) -> dict:
     elif isinstance(payload, list):
         summary["payloadType"] = "list"
         summary["payloadLength"] = len(payload)
+        if payload and shape_depth > 1:
+            summary["sampleShape"] = _shape_value(payload[0], shape_depth - 1)
         if payload:
             preview_n = 10
             summary["preview"] = {
@@ -612,30 +616,39 @@ def _write_output_file(payload: Any, output_path: str) -> dict:
     return summary
 
 
-def _payload_shape(payload: dict) -> dict[str, dict[str, Any]]:
-    """Shallow type + size map for each top-level key (except `tool`). Lets
-    the agent pick where to Read into the file without scanning the whole
-    thing — e.g. `{traces: {type: list, length: 1}}` signals "drill in".
-    One level deep only; going deeper reinvents jq."""
-    shape: dict[str, dict[str, Any]] = {}
-    for k, v in payload.items():
-        if k == "tool":
-            continue
-        if isinstance(v, str):
-            shape[k] = {"type": "string", "length": len(v)}
-        elif isinstance(v, bool):
-            shape[k] = {"type": "boolean"}
-        elif isinstance(v, (int, float)):
-            shape[k] = {"type": "number"}
-        elif isinstance(v, list):
-            shape[k] = {"type": "list", "length": len(v)}
-        elif isinstance(v, dict):
-            shape[k] = {"type": "dict", "keys": len(v)}
-        elif v is None:
-            shape[k] = {"type": "null"}
-        else:
-            shape[k] = {"type": type(v).__name__}
-    return shape
+def _payload_shape(payload: dict, depth: int = 3) -> dict:
+    """Type + size map for each top-level key (except `tool`), recursive to
+    `depth` levels. At depth=1 is shallow. At depth=3 (the default) exposes
+    two layers of nesting — crucial for `get-traces`, where the useful
+    signal (`observations` count) lives at `traces[0].observations.length`
+    and only surfaces in the envelope at depth 3+."""
+    if depth < 1 or not isinstance(payload, dict):
+        return {}
+    return {k: _shape_value(v, depth) for k, v in payload.items() if k != "tool"}
+
+
+def _shape_value(v: Any, depth: int) -> dict:
+    """Single-value shape descriptor. Recurses into lists (sampling `[0]`)
+    and dicts (mapping their keys) while depth > 1."""
+    if isinstance(v, str):
+        return {"type": "string", "length": len(v)}
+    if isinstance(v, bool):
+        return {"type": "boolean"}
+    if isinstance(v, (int, float)):
+        return {"type": "number"}
+    if isinstance(v, list):
+        out: dict = {"type": "list", "length": len(v)}
+        if depth > 1 and v:
+            out["sample"] = _shape_value(v[0], depth - 1)
+        return out
+    if isinstance(v, dict):
+        out = {"type": "dict", "keys": len(v)}
+        if depth > 1:
+            out["shape"] = {k: _shape_value(val, depth - 1) for k, val in v.items()}
+        return out
+    if v is None:
+        return {"type": "null"}
+    return {"type": type(v).__name__}
 
 
 def _fetch_by_id(inst: dict, label: str, path_template: str, ids: list[str]) -> list[dict]:
@@ -855,9 +868,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-autoload", action="store_true", help="Disable .env auto-discovery from cwd upward.")
     p.add_argument("--output", metavar="PATH",
                    help=("Write the full JSON payload to PATH and print a compact "
-                         "summary (savedTo, bytes, payloadKeys) instead. Use for "
-                         "large dumps (traces, sessions, exports) that are "
-                         "wasteful to route through the model's context."))
+                         "summary (savedTo, bytes, payloadKeys, payloadShape) "
+                         "instead. Use for large dumps (traces, sessions, "
+                         "exports) that are wasteful to route through the "
+                         "model's context."))
+    p.add_argument("--shape-depth", type=int, default=3, choices=[1, 2, 3],
+                   dest="shape_depth",
+                   help=("How deep payloadShape recurses (1=top-level types "
+                         "only, 2=one layer down, 3=default [two layers — "
+                         "reveals `traces[0].observations.length` so the "
+                         "agent knows the observation count without Reading "
+                         "the file]). Only affects --output envelope."))
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("export-prompts", help="Dump all prompts + versions to JSON")

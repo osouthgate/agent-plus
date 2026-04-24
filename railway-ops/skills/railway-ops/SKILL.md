@@ -194,9 +194,56 @@ Env var **values never touch stdout**. The only code path that reads them is `st
 
 Parallelism: per-service log + variable fetches are fanned out across a thread pool (max 8 workers). Total wall time for the user's prod environment (5 services) is typically <15s.
 
+## Offloading large responses with `--output`
+
+`railway-ops` responses can be huge — `build-logs` and `overview` of a multi-service env routinely run 10–50KB of JSON. Pulling that through the model's context is wasteful when you only need to look at a slice.
+
+**Use `--output <path>` when:**
+
+- Running `build-logs` with a large `--lines` value (200+).
+- Running `overview` of an env with many services, especially when `latestDeploy` is FAILED (the auto-attached `buildLogTail` adds another ~30 lines per failed service).
+- Running `errors <service>` with high `--limit` during a log flood.
+
+**What happens:** the full JSON payload is written to the file you specified. Stdout returns only a compact envelope:
+
+```json
+{
+  "tool": {"name": "railway-ops", "version": "..."},
+  "savedTo": "/abs/path/to/file.json",
+  "bytes": 12453,
+  "fileLineCount": 418,
+  "payloadKeys": ["project", "env", "summary", "services"],
+  "payloadShape": {
+    "project": {"type": "string", "length": 12},
+    "services": {"type": "list", "length": 5,
+      "sample": {"type": "dict", "keys": 8,
+        "shape": {"name": {"type": "string", "length": 6},
+                  "errors": {"type": "list", "length": 23},
+                  "latestDeploy": {"type": "dict", "keys": 6}}}}
+  },
+  "preview": { "head": [...], "tail": [...] }  // only for log-shaped payloads
+}
+```
+
+**How to act on the envelope:**
+
+1. Look at `payloadShape` first — it tells you which top-level key has the data you care about and how deep to go.
+2. Use the `Read` tool with offset/limit to pull only the slice you need — `Read /tmp/railway.json --offset 0 --limit 50` gives the top of the file; the `fileLineCount` tells you the upper bound.
+3. If the payload is log-shaped (has a `lines` key), the `preview.head` and `preview.tail` in the envelope are often enough — you may not need to `Read` at all.
+4. For list-shaped payloads (e.g. `projects` command), the envelope has `payloadType: "list"` + `payloadLength` + `sampleShape` describing the first item.
+
+**`--shape-depth <1|2|3>`** controls how deep `payloadShape` recurses. Default is `3` (two layers of nesting — enough for most nested structures). Drop to `1` if you only need top-level types and want a tiny envelope. Bump is capped at 3 to keep the envelope small.
+
+**Don't use `--output` when:**
+
+- The response is known to be small (`status`, `envs`, `services`). The envelope overhead isn't worth it.
+- You need the data immediately in the same response to act on (e.g. parsing `errorKinds` to decide the next step). The envelope doesn't include the data itself — it just points at the file.
+
 ## Flags worth knowing
 
 - `--pretty` — indent JSON output (accepted on every subcommand).
+- `--output <path>` — offload full payload to disk (see section above).
+- `--shape-depth <1|2|3>` — depth of `payloadShape` recursion in the `--output` envelope (default `3`).
 - `--env <name>` — target a specific Railway environment (production, staging, …). Defaults to the linked env when omitted.
 - `--since <duration>` — `30s` / `5m` / `2h` / `1d` / `1w` / ISO 8601. Only affects log fetches.
 - `--log-lines N` (overview) — override per-service log line count pulled from `railway logs` (default 500).

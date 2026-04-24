@@ -53,6 +53,47 @@ All list/show commands emit JSON to stdout. Use `--pretty` for indentation.
 
 Every payload carries a top-level `tool: {name, version}` field so agents can self-diagnose version drift from the output alone. Run `vercel-remote --version` to check the installed version directly.
 
+## Offloading large responses with `--output`
+
+Vercel responses get large fast — `logs` on a chatty deployment, `overview` with high `--limit`, `deployments list` across many deployments. Pulling all of that through the model's context is wasteful when you only need a slice.
+
+**Pass `--output <path>` before the subcommand** (it's a top-level flag, like `--pretty`):
+
+```bash
+vercel-remote --output /tmp/logs.json logs my-app-xyz.vercel.app --since 24h
+vercel-remote --output /tmp/deps.json deployments list --project my-app --limit 50
+```
+
+Instead of printing the full payload, stdout returns a compact envelope:
+
+```json
+{
+  "tool": {"name": "vercel-remote", "version": "..."},
+  "savedTo": "/tmp/logs.json",
+  "bytes": 48320,
+  "fileLineCount": 1204,
+  "payloadKeys": ["deployment", "entries"],
+  "payloadShape": {
+    "deployment": {"type": "string", "length": 24},
+    "entries": {"type": "list", "length": 412,
+      "sample": {"type": "dict", "keys": 5,
+        "shape": {"level": {"type": "string", "length": 5},
+                  "message": {"type": "string", "length": 187},
+                  "timestamp": {"type": "number"}}}}
+  }
+}
+```
+
+**How to act on it:**
+
+1. Check `payloadShape` to see where the data lives and how much there is. In the example above, the agent immediately knows there are 412 log entries with `{level, message, timestamp}` fields — no second call needed to discover shape.
+2. Use `Read` with offset/limit to pull the slice you need. `fileLineCount` is the upper bound.
+3. For list-shaped responses (`projects list`, `deployments list`), the envelope has `payloadType: "list"` + `payloadLength` + `sampleShape` describing the first item.
+
+**`--shape-depth <1|2|3>`** controls recursion depth. Default is `3` (two layers deep — surfaces patterns like `deployments[0].meta`). Drop to `1` for a minimal envelope.
+
+**When NOT to use `--output`:** small responses (`projects resolve`, `env list` — NAMES are already tiny), or when you need the data in the same turn to act on. The envelope points at the file; it doesn't carry the data.
+
 ## Piping to `jq`
 
 Output is JSON-first, so pipe freely to `jq` for focused extraction:

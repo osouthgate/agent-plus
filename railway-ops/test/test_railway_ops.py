@@ -899,7 +899,10 @@ class TestArgparseContract(unittest.TestCase):
     def test_output_flag_defaults_to_none(self) -> None:
         parser = ro.build_parser()
         args = parser.parse_args(["status"])
-        self.assertIsNone(args.output)
+        # With default=SUPPRESS the attr is absent when unused; emit call
+        # site uses getattr(args, "output", None) so None is the effective
+        # default.
+        self.assertIsNone(getattr(args, "output", None))
 
     def test_output_flag_parses(self) -> None:
         parser = ro.build_parser()
@@ -987,26 +990,97 @@ class TestWriteOutputFile(unittest.TestCase):
         self.assertEqual(summary["payloadLength"], 0)
         self.assertNotIn("preview", summary)
 
-    def test_payload_shape_reports_types_and_sizes(self) -> None:
+    def test_payload_shape_depth1_reports_types_and_sizes(self) -> None:
+        # Explicit depth=1 gives the old shallow shape — no nested detail.
+        import tempfile
+        td = Path(tempfile.mkdtemp())
+        out = td / "payload.json"
         payload = {
             "tool": {},
-            "service": "api",              # string
-            "lineCount": 42,                # number
-            "isError": True,                # boolean
-            "errorKinds": {"a": 1, "b": 2}, # dict with 2 keys
-            "lines": ["l1", "l2", "l3"],    # list with 3 items
-            "notes": None,                  # null
+            "service": "api",
+            "lineCount": 42,
+            "isError": True,
+            "errorKinds": {"a": 1, "b": 2},
+            "lines": ["l1", "l2", "l3"],
+            "notes": None,
         }
-        summary, _ = self._write(payload)
+        summary = ro._write_output_file(payload, str(out), shape_depth=1)
         shape = summary["payloadShape"]
-        # `tool` is excluded (it's metadata, not payload).
         self.assertNotIn("tool", shape)
         self.assertEqual(shape["service"], {"type": "string", "length": 3})
         self.assertEqual(shape["lineCount"], {"type": "number"})
         self.assertEqual(shape["isError"], {"type": "boolean"})
+        # At depth=1, dicts and lists don't include nested shape.
         self.assertEqual(shape["errorKinds"], {"type": "dict", "keys": 2})
         self.assertEqual(shape["lines"], {"type": "list", "length": 3})
         self.assertEqual(shape["notes"], {"type": "null"})
+
+    def test_payload_shape_default_depth_recurses_to_nested_list(self) -> None:
+        # Motivating case: langfuse `get-traces` returns
+        # `{traces: [{observations: [...]}]}` — the useful signal
+        # (observation count) lives two layers in. Default depth=3 must
+        # surface `traces[0].observations.length` directly in the envelope
+        # so the agent doesn't need a second Read to discover the shape.
+        payload = {
+            "tool": {},
+            "traces": [
+                {
+                    "id": "t1",
+                    "observations": [{"name": "agent.run"}, {"name": "llm.step"}],
+                    "totalCost": 0.002,
+                }
+            ],
+        }
+        summary, _ = self._write(payload)  # default depth=3
+        traces = summary["payloadShape"]["traces"]
+        self.assertEqual(traces["type"], "list")
+        self.assertEqual(traces["length"], 1)
+        # depth=3 peeks into traces[0] as a dict with shape.
+        sample = traces["sample"]
+        self.assertEqual(sample["type"], "dict")
+        self.assertEqual(sample["shape"]["observations"],
+                         {"type": "list", "length": 2})
+        self.assertEqual(sample["shape"]["id"],
+                         {"type": "string", "length": 2})
+
+    def test_payload_shape_dict_value_gets_nested_shape(self) -> None:
+        payload = {
+            "tool": {},
+            "errorKinds": {"fk_violation": 12, "timeout": 3},
+        }
+        summary, _ = self._write(payload)
+        ek = summary["payloadShape"]["errorKinds"]
+        self.assertEqual(ek["type"], "dict")
+        self.assertEqual(ek["keys"], 2)
+        self.assertIn("shape", ek)
+        self.assertEqual(ek["shape"]["fk_violation"], {"type": "number"})
+
+    def test_list_payload_default_depth_includes_sample_shape(self) -> None:
+        payload = [{"name": "proj-a", "id": "p1"}, {"name": "proj-b", "id": "p2"}]
+        summary, _ = self._write(payload)
+        # List payload gets sampleShape with nested dict shape at default depth.
+        self.assertEqual(summary["payloadLength"], 2)
+        self.assertIn("sampleShape", summary)
+        self.assertEqual(summary["sampleShape"]["type"], "dict")
+        self.assertIn("name", summary["sampleShape"]["shape"])
+
+    def test_shape_depth_flag_parses_in_either_position(self) -> None:
+        parser = ro.build_parser()
+        # Flag works before OR after the subcommand (SUPPRESS default
+        # prevents subparser re-declaration from clobbering top-level).
+        args = parser.parse_args(["--shape-depth", "3", "status"])
+        self.assertEqual(args.shape_depth, 3)
+        args = parser.parse_args(["status", "--shape-depth", "1"])
+        self.assertEqual(args.shape_depth, 1)
+        # When omitted, the attribute isn't set on the Namespace (SUPPRESS);
+        # the emit call site resolves the fallback to 2 via getattr.
+        args = parser.parse_args(["status"])
+        self.assertFalse(hasattr(args, "shape_depth"))
+
+    def test_shape_depth_rejects_out_of_range(self) -> None:
+        parser = ro.build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--shape-depth", "5", "status"])
 
 
 if __name__ == "__main__":

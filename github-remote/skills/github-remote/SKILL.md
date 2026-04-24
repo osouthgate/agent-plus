@@ -50,6 +50,48 @@ All list/show commands emit JSON to stdout. Use `--pretty` for indentation.
 
 **jq-friendly.** Default compact JSON pipes cleanly into `jq`. Every dict payload also carries a top-level `tool: {name, version}` field (injected by `_with_tool_meta`) so agents can self-diagnose version drift from the output alone — no extra `--version` subprocess call needed. Prefer `jq` against stable keys (`.pr.number`, `.checks.failing_jobs[]`, `.runs[].conclusion`) rather than parsing human output.
 
+## Offloading large responses with `--output`
+
+GitHub responses balloon quickly — `run logs` on a failing build, long `pr list`, `run show` with dozens of check annotations. Pulling the full payload through the model's context wastes tokens when you only need a slice.
+
+**Pass `--output <path>` before the subcommand** (it's a top-level flag, same position as `--pretty`):
+
+```bash
+github-remote --output /tmp/run.json run logs 1234567890 --errors-only
+github-remote --output /tmp/prs.json pr list --state open --limit 100
+```
+
+Stdout returns a compact envelope instead of the full payload:
+
+```json
+{
+  "tool": {"name": "github-remote", "version": "..."},
+  "savedTo": "/tmp/run.json",
+  "bytes": 93420,
+  "fileLineCount": 2104,
+  "payloadKeys": ["run_id", "jobs", "failing_jobs"],
+  "payloadShape": {
+    "run_id": {"type": "number"},
+    "jobs": {"type": "list", "length": 12,
+      "sample": {"type": "dict", "keys": 6,
+        "shape": {"name": {"type": "string", "length": 8},
+                  "conclusion": {"type": "string", "length": 7},
+                  "annotations": {"type": "list", "length": 23}}}},
+    "failing_jobs": {"type": "list", "length": 2}
+  }
+}
+```
+
+**How to act on it:**
+
+1. `payloadShape` tells you what's in the file without reading it. Agent sees `jobs[0].annotations.length: 23` and knows the interesting data is nested under each job.
+2. Use `Read` with offset/limit to pull only the slice you need.
+3. For list-shaped responses (`pr list`, `run list`), the envelope has `payloadType: "list"` + `payloadLength` + `sampleShape`.
+
+**`--shape-depth <1|2|3>`** controls recursion depth. Default is `3` (two layers — surfaces `checks[0].annotations.length` or `prs[0].head.sha`). `--shape-depth 1` gives a minimal top-level-only envelope.
+
+**When NOT to use `--output`:** small responses (`pr resolve`, `issue show` for a single item), or when you need the data in the same turn to act on.
+
 ## Design rules (agent-plus patterns)
 
 1. **Aggregate server-side.** `overview` returns PR state + mergeable + check-runs rollup + review summary + latest runs in one call — replaces 4-6 `gh` invocations.
