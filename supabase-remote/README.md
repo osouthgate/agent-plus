@@ -1,21 +1,23 @@
 # supabase-remote
 
-Remote CLI for day-to-day [Supabase](https://supabase.com) project ops. One file, stdlib Python 3, no dependencies. Wraps the Supabase Management API for project listing and the local `supabase` CLI for SQL execution — stripping the "untrusted data" envelope the CLI emits in agent mode so pipelines get plain JSON.
+Remote CLI for day-to-day [Supabase](https://supabase.com) project ops. One file, stdlib Python 3, no dependencies.
 
-Part of [agent-plus](../README.md) — a small collection of Claude Code plugins.
+Part of [agent-plus](../README.md) — Claude Code plugins that cut the tool-call and token cost of driving APIs from an agent.
 
 > Rainshift-specific Rayna ops (members lookup, comms tail, stuck-onboarding) live in the rainshift repo under `ops/rayna` and shell out to `sql-inline` here for the heavy lifting. This plugin stays generic.
 
 ## Why
 
-The `supabase` CLI is fine, but it optimises for humans at a REPL. Agents and scripts keep hitting the same rough edges:
+The `supabase` CLI is fine, but it optimises for humans at a REPL. Agents hit the same rough edges every time — this wrapper collapses each into one call.
 
-- `supabase db query` returns a JSON envelope with an untrusted-data preamble when it detects an agent. Parsing it without that knowledge produces junk.
-- Project refs are 20-char opaque strings. Commands take refs, not names.
-- There's no one-liner for "which of my tables is missing RLS".
-- Regenerating types is a multi-flag dance every time.
+**The agent-envelope gotcha.** `supabase db query` detects when it's being run by an agent and wraps results in a JSON envelope with an **"untrusted data" preamble**. If Claude doesn't know about that preamble, it parses the response as a raw result and produces garbage. `supabase-remote sql` / `sql-inline` strips the envelope server-side so downstream pipelines see plain JSON.
 
-This wrapper collapses each of those into a single command.
+**Other wins**
+
+- `rls-audit` → **1 call**, every table in the public schema, RLS enabled/disabled + policy count per table. Without it: loop over `information_schema.tables`, join to `pg_policies`, per-table. Turns "is anything dangerously exposed?" from an investigation into a boolean.
+- `sql seed.sql --verify-rows 12` → assert row count in the same call that applies the file. Catches partial applies without a follow-up `select count(*)`.
+- `gen-types packages/db/types.ts` — wraps the multi-flag `supabase gen types typescript --project-id ... --schema ...` dance into one command.
+- Project refs (20-char opaque strings) never appear in commands once you've set `SUPABASE_PROJECT_REF` as a default.
 
 ## Install
 
