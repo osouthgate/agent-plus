@@ -29,8 +29,8 @@
       "description": "OpenRouter CLI — balance with cron-friendly --alert-below, per-key usage stats, model catalogue search, per-provider endpoints, and API key management."
     },
     {
-      "name": "langfuse",
-      "source": "./langfuse",
+      "name": "langfuse-remote",
+      "source": "./langfuse-remote",
       "description": "Langfuse CLI — export/import prompts for backup and cross-env migration, smoke-test traces, health checks across multiple named instances."
     },
     {

@@ -30,6 +30,22 @@ hermes-remote chat --json "..."                            # full response body
 
 For multi-turn conversations or streaming, use an OpenAI-compatible SDK pointed at `$HERMES_URL/v1` — this wrapper is for one-shot calls and cron-friendly scripting.
 
+## When NOT to use this — fall back to the Hermes REST API directly
+
+**This wrapper covers a deliberately narrow slice:** status, model, env list (read-only), config get/set, cron CRUD, and one-shot chat. It does NOT wrap a local CLI — there is no `hermes` remote-control CLI to fall back to. "Fall back" here means **hit the Hermes REST API directly with `curl`** (or `http.client` / `requests`) using the same cookie + bearer token flow `hermes-remote` uses internally. There is no other route.
+
+Specific cases where you should talk to the Hermes endpoint directly, not through `hermes-remote`:
+
+- **Streaming chat responses.** `hermes-remote chat` buffers the full response then prints. For live token streaming, POST to `$HERMES_URL/v1/chat/completions` with `"stream": true` and an SSE-capable client.
+- **Multi-turn conversations / conversation history.** The `chat` subcommand is one-shot (system + user only). Maintain a `messages[]` array yourself and POST to `/v1/chat/completions` directly, or use an OpenAI-compatible SDK pointed at `$HERMES_URL/v1`.
+- **File uploads, attachments, or anything multipart.** Not wrapped. Hit the relevant Hermes endpoint with `curl -F` or a multipart-capable HTTP client.
+- **Mutating env vars, editing existing cron jobs, managing deliveries/platforms/skills, or triggering a gateway restart.** `hermes-remote env list` is read-only; `cron create` exists but there is no `cron edit`; gateway/platform/skill/delivery management isn't wrapped at all. Use `curl` against `/api/env`, `/api/cron/jobs/<id>` (PUT/PATCH), `/api/gateway/*`, `/api/platforms/*`, `/api/skills/*` with the session cookie + bearer token.
+- **Authentication/login flows or session management.** `hermes-remote` logs in silently on every call using `HERMES_PASSWORD`. If you need to inspect the raw `/login` response, manage cookies manually, or debug auth, hit `/login` directly.
+- **Any Hermes endpoint the wrapper simply doesn't expose yet** — job run history, raw logs, delivery channels, webhooks. Grab the cookie + token the same way (`POST /login`, scrape `__HERMES_SESSION_TOKEN__` from `/`) and call the endpoint directly.
+
+**Don't get stuck in a loop.** If the user needs something the wrapper clearly doesn't cover, switch to `curl` against the Hermes REST API immediately rather than contorting `hermes-remote` flags. The wrapper's job is to make the common read/cron paths ergonomic — not to be the only way in.
+
+
 ## Configure
 
 Config is layered. Highest precedence first:

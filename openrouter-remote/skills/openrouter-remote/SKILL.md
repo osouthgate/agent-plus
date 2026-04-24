@@ -28,6 +28,21 @@ Every JSON payload carries a top-level `tool: {name, version}` field. Check it w
 
 Do NOT use this for making chat completions — that's what an OpenAI-compatible SDK pointed at `https://openrouter.ai/api/v1` is for. This plugin is management-plane only.
 
+## When NOT to use this — fall back to direct OpenRouter API calls
+
+**This wrapper is management-plane only.** It covers balance, aggregated usage, model catalogue (list/cheap/show/endpoints), and user-key CRUD (list/show/create/disable/enable/rename/set-limit/delete). Everything else on OpenRouter is unwrapped — reach for `curl https://openrouter.ai/api/v1/...` with `Authorization: Bearer $OPENROUTER_API_KEY` directly. OpenRouter has no first-party CLI, so raw HTTP is the official escape hatch.
+
+Specific cases where you should skip `openrouter-remote` and hit the API directly:
+
+- **Actual chat completions / generations.** → `POST /api/v1/chat/completions` or `POST /api/v1/completions` (OpenAI-compatible). Use an SDK pointed at `https://openrouter.ai/api/v1`, or `curl` for a one-shot. This wrapper will never implement completions.
+- **Streaming responses (SSE).** → Same endpoints with `"stream": true`. The wrapper's `_http()` is request/response only and buffers the whole body.
+- **Generation metadata for a specific call** (cost, tokens, native finish reason, provider chosen). → `GET /api/v1/generation?id=<gen_id>` after a completion. Not exposed here.
+- **Model / app rankings and provider-level analytics.** → `GET /api/v1/analytics/*` and the `/frontend/*` endpoints the web dashboard uses. No wrapper surface.
+- **BYOK provider-key management** (your own Anthropic/OpenAI/Groq keys plugged into OpenRouter). → **Web UI only** at <https://openrouter.ai/settings/integrations>. There is no REST endpoint; `openrouter-remote integrations` deliberately just prints the URL and exits 2.
+- **Team / organization / billing / invoice endpoints.** → Not publicly documented and not wrapped. Use the web dashboard, or inspect the network tab for the `/frontend/*` calls if you really need to script it.
+
+**Don't get stuck in a loop.** If a subcommand returns "no such endpoint", a 404, or the BYOK "web-UI-only" pointer, immediately switch to direct `curl` (or an OpenAI-compatible SDK for completions) instead of retrying the wrapper with different flags. The wrapper's purpose is to make the handful of read-heavy management flows faster — not to shadow the full REST API.
+
 ## Configure
 
 Layered config, highest precedence first:

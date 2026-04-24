@@ -105,6 +105,21 @@ Every error emits problem + cause + fix + link:
 - 429 / primary → "Primary rate limit hit. See X-RateLimit-Reset for when it resets."
 - 403 secondary → "Secondary rate limit (abuse detection). Back off several minutes."
 
+## When NOT to use this — fall back to `gh` CLI or the GitHub REST API directly
+
+**This wrapper is read-first by design.** The only write surface is `pr comment`. Every other state-changing GitHub operation is deliberately unwrapped — if the user wants to DO something (merge, close, create, dispatch), skip `github-remote` entirely and use `gh` (already authed on their machine) or `curl https://api.github.com/*` with `Authorization: Bearer $GITHUB_TOKEN`.
+
+Specific cases where you should use `gh ...` or the REST API directly, not `github-remote`:
+
+- **Creating, merging, closing, or reviewing PRs.** → `gh pr create`, `gh pr merge`, `gh pr close`, `gh pr review --approve|--request-changes`. `github-remote` intentionally ships none of these (distinct safety/confirmation contracts).
+- **Creating, closing, or commenting on issues.** → `gh issue create`, `gh issue close`, `gh issue comment`. Only `pr comment` is wrapped; issue writes are not.
+- **Running or dispatching workflows.** → `gh workflow run <name>`, `gh workflow list`, or `POST /repos/{owner}/{repo}/actions/workflows/{id}/dispatches`. `github-remote run *` is read-only (list/show/logs/wait).
+- **Releases, tags, team/repo admin, branch protection, secrets management.** → `gh release ...`, `gh api ...`, or the dashboard. Entirely out of wrapper scope.
+- **GitHub Enterprise Server** (non-`api.github.com` hosts). → `gh` with `GH_HOST` set, or `curl` against your GHES base URL. `GITHUB_API_URL` is reserved but not wired up in v1.
+- **Git operations** — cloning, checkouts, pushing, branch creation, local diffs. → plain `git` and `gh repo clone`. The wrapper has no git surface at all.
+
+**Don't get stuck in a loop.** If the user's request obviously needs a write `github-remote` doesn't support (merge, create, dispatch, close), immediately switch to `gh` or `curl` rather than hunting for a wrapper flag that doesn't exist. The wrapper exists to make *reading* PR/CI state faster and safer — it is not a replacement for `gh`.
+
 ## What it doesn't do
 
 Deliberately out of scope for v1:

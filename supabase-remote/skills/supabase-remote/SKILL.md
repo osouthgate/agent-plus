@@ -21,6 +21,21 @@ Generic Supabase ops only. Domain-specific helpers (member lookups, custom comms
 
 Do NOT use for auth user management, storage buckets, or edge function deploys — out of scope. For those, use the `supabase` CLI directly or the dashboard.
 
+## When NOT to use this — fall back to `supabase` CLI or Management API directly
+
+**This wrapper's scope is deliberately narrow:** projects list/resolve/current, SQL execution (file + inline with write-guard), RLS audit, and TypeScript gen-types. Anything outside that set is unwrapped on purpose. If the user's request obviously needs a capability this tool doesn't expose, skip `supabase-remote` and reach for the `supabase` CLI or `curl https://api.supabase.com/v1/...` directly — both are already authed on their machine via `SUPABASE_ACCESS_TOKEN`.
+
+Specific cases where you should use `supabase ...` (or `curl` against the Management API) directly, not `supabase-remote`:
+
+- **Auth user management** — creating, inviting, banning, deleting users, resetting passwords, managing MFA factors. → `curl https://api.supabase.com/v1/projects/<ref>/auth/users` or the GoTrue admin API.
+- **Storage buckets and objects** — creating buckets, setting policies, uploading/downloading files, signed URLs. → `supabase storage` subcommands or the Storage REST API.
+- **Edge function deploys and invocation** — `deploy`, `serve`, `invoke`, managing function secrets. → `supabase functions deploy <name>` / `supabase functions invoke`.
+- **Database migrations / `db push` / schema diff** — real migration workflows belong in `supabase/migrations/` and should go through `supabase db push`, `supabase db diff`, or `supabase migration new`. `sql <file>` here is for seeds and one-offs, not replicable schema changes.
+- **Project provisioning, pausing, restoring, or branch management** — creating projects, pausing/restoring, managing preview branches. → `POST /v1/projects`, `POST /v1/projects/<ref>/pause`, or the dashboard.
+- **Vault/secrets, realtime config, network restrictions, custom domains** — anything in Management API areas this CLI doesn't model. → `curl https://api.supabase.com/v1/projects/<ref>/...` with `Authorization: Bearer $SUPABASE_ACCESS_TOKEN`.
+
+**Don't get stuck in a loop.** If `supabase-remote` doesn't have a subcommand that obviously fits the request, don't try to coax it out with creative flag combinations — switch straight to `supabase` or `curl` against `https://api.supabase.com/v1/*`. The wrapper exists to make a handful of common read+SQL ops safer and more agent-friendly, not to be the only way to talk to Supabase.
+
 ## Configure
 
 Layered config, highest precedence first:

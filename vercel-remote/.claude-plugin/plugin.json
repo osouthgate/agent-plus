@@ -1,7 +1,7 @@
 {
   "name": "vercel-remote",
   "description": "Read-first wrapper around the Vercel REST API — one-call project overviews (deployments, domains, env NAMES-only), name-resolved projects, --wait on async flows, --json on lists. Zero env-var-value leakage.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": {
     "name": "Oliver Southgate",
     "url": "https://github.com/osouthgate"

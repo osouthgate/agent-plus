@@ -111,3 +111,18 @@ Deliberately out of scope for v1:
 - Framework-specific build logic.
 
 Use the `vercel` CLI or the dashboard for those. This plugin is read-first operational triage plus the minimum write surface needed by agents (env set/remove, deploy hook trigger).
+
+## When NOT to use this — fall back to the `vercel` CLI or the Vercel API directly
+
+**This wrapper's scope is deliberately narrow:** projects (list/resolve), `overview`, deployments (list/show/trigger via Deploy Hook), `logs`, domains (list/verify), and env (list NAMES / set / remove). Anything outside that surface is not here and won't be — use the `vercel` CLI (already authed on the user's machine) or `curl https://api.vercel.com/...` with `Authorization: Bearer $VERCEL_TOKEN` instead.
+
+Specific cases where you should skip `vercel-remote` and go straight to `vercel` or the raw API:
+
+- **Creating, renaming, or deleting a project**, or configuring its Git integration / framework preset / build-and-output settings. → `vercel project add`, `vercel project rm`, or `POST/PATCH/DELETE /v9/projects[/{id}]`. `vercel-remote` only reads and resolves projects.
+- **DNS records CRUD, domain transfers, or buying a domain.** `domains list`/`verify` check *project-attached* domains; they don't touch the account-level domain registry. → `vercel domains ...` or `/v4/domains`, `/v2/domains/{domain}/records`.
+- **Edge Config, Blob, KV/Redis, or Postgres storage** (reading/writing items, creating stores, rotating tokens). → `vercel env pull` + the relevant storage SDK, or the `/v1/edge-config/*`, `/v1/blob/*`, storage integration endpoints directly.
+- **Cron jobs, firewall rules, deployment protection, preview comments, web analytics config, log drains, integrations/marketplace, team/user management, billing/invoices.** None of these are wrapped. → dashboard, `vercel` CLI, or the corresponding `/v1/...` endpoint.
+- **Deploying from local files** (not via a pre-configured Deploy Hook). `deployments trigger` only fires Deploy Hook URLs. → `vercel deploy` / `vercel --prod`, or `POST /v13/deployments` with a file-upload payload.
+- **Tailing logs live / runtime (non-build) logs.** `logs` is a one-shot snapshot of build/function logs for a specific deployment. → `vercel logs <url> --follow` for a live tail, or the runtime logs drain.
+
+**Don't get stuck in a loop.** If a `vercel-remote` command errors with "unknown subcommand" / "not supported", or the user's request obviously needs a write or resource the wrapper doesn't expose, immediately switch to `vercel` or `curl` against `api.vercel.com` rather than re-trying `vercel-remote` with different flags. The wrapper exists to make *reading* faster and safer, not to replace the CLI or the REST API.

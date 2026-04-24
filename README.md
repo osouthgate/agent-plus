@@ -10,7 +10,7 @@ Every plugin here exists because doing the same job by hand — `curl` + `jq` + 
 | :--- | :--- | :--- |
 | [`hermes-remote`](./hermes-remote) | A recurring Sonnet-on-every-tick cron burned **~$10 / 12h**. | Skillify pattern — `--script` does the deterministic work, minimal Haiku prompt decides "report or `[SILENT]`". Three orders of magnitude cheaper; successful quiet runs cost pennies. |
 | [`railway-ops`](./railway-ops) | Five sequential `railway` calls per service × N services for incident triage — **~40s on a 5-service project**, plus raw logs and env var *values* landing in the transcript. | `overview` — one call, parallel under the hood, **~8s**, classified errors/warnings only, env var *names* only (values stripped by a canary-tested invariant). |
-| [`langfuse`](./langfuse) | Four separate API hits to piece together "what went wrong for user X" — users, sessions, traces, observations. | `monitor-user <id>` — **1 structured JSON blob** with daily totals, recent sessions, latest trace per session, error observations. |
+| [`langfuse-remote`](./langfuse-remote) | Four separate API hits to piece together "what went wrong for user X" — users, sessions, traces, observations. | `monitor-user <id>` — **1 structured JSON blob** with daily totals, recent sessions, latest trace per session, error observations. |
 | [`coolify-remote`](./coolify-remote) | Set env var → redeploy → poll → verify in container. Four calls + a hand-rolled `until` loop that breaks on the Windows bash shim. | `env set hermes KEY=val --verify --deploy --wait` — **one call, one exit code**. |
 | [`openrouter-remote`](./openrouter-remote) | Pull the 350+ model catalogue into context, let Claude filter in-prompt. | `models list --supports tools --min-context 200000 --max-price-input 1.0` — client-side filter, **only matching rows ever reach Claude**. |
 | [`hcloud-remote`](./hcloud-remote) | `curl api.hetzner.cloud \| python3 -c "..."` — mangled by Windows bash shim, multiline heredocs break. | `hcloud-remote ssh hermes-vps` — resolves name to IP, execs ssh, in-process JSON parsing. |
@@ -36,7 +36,7 @@ Every plugin reinforces at least one of these. If you're writing a new plugin, s
 | Plugin | What it wraps | Headline commands |
 | :--- | :--- | :--- |
 | [`hermes-remote`](./hermes-remote) | [Hermes Agent](https://github.com/NousResearch/hermes-agent) deployments | `status`, `cron list/create/trigger`, `config get/set`, `chat`, `env list` |
-| [`langfuse`](./langfuse) | [Langfuse](https://langfuse.com) (cloud or self-hosted) | `health`, `monitor-user`, `export-prompts`, `migrate-prompts`, `trace-ping` |
+| [`langfuse-remote`](./langfuse-remote) | [Langfuse](https://langfuse.com) (cloud or self-hosted) | `health`, `monitor-user`, `export-prompts`, `migrate-prompts`, `trace-ping` |
 | [`coolify-remote`](./coolify-remote) | [Coolify](https://coolify.io) PaaS | `app list`, `env set --verify --deploy --wait`, `tls enable`, `deploy --wait`, `app exec` |
 | [`hcloud-remote`](./hcloud-remote) | [Hetzner Cloud](https://hetzner.com/cloud) (day-to-day ops only) | `server list/show/reboot`, `snapshot create/list`, `ssh <name>` |
 | [`openrouter-remote`](./openrouter-remote) | [OpenRouter](https://openrouter.ai) | `balance --alert-below`, `usage`, `models list/cheap/endpoints`, `keys create/disable/set-limit` |
@@ -67,7 +67,7 @@ claude plugin install hermes-remote@agent-plus     # or any other plugin
 claude plugin install coolify-remote@agent-plus
 claude plugin install hcloud-remote@agent-plus
 claude plugin install openrouter-remote@agent-plus
-claude plugin install langfuse@agent-plus
+claude plugin install langfuse-remote@agent-plus
 claude plugin install railway-ops@agent-plus
 claude plugin install supabase-remote@agent-plus
 claude plugin install vercel-remote@agent-plus

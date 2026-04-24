@@ -1,6 +1,8 @@
-# langfuse
+# langfuse-remote
 
 Remote CLI for managing [Langfuse](https://langfuse.com) instances (cloud or self-hosted) from Claude Code. Stdlib-only Python 3, no dependencies.
+
+> Renamed from `langfuse` → `langfuse-remote` (0.3.0) to disambiguate from the upstream Langfuse product. Matches the `*-remote` convention used across agent-plus plugins (coolify-remote, github-remote, hcloud-remote, hermes-remote, linear-remote, openrouter-remote, supabase-remote, vercel-remote).
 
 Part of [agent-plus](../README.md) — Claude Code plugins that cut the tool-call and token cost of driving APIs from an agent.
 
@@ -16,23 +18,23 @@ Plus the boring-but-necessary stuff: export/import prompts for backup, migrate p
 
 ```bash
 # Read-only debug — designed for AI agents
-langfuse monitor-user <user-id> --limit 5 --pretty
-langfuse get-traces <trace-id> [<trace-id> ...]
-langfuse get-sessions <session-id>
-langfuse list-user-traces <user-id> --from-timestamp 2026-04-01T00:00:00Z
+langfuse-remote monitor-user <user-id> --limit 5 --pretty
+langfuse-remote get-traces <trace-id> [<trace-id> ...]
+langfuse-remote get-sessions <session-id>
+langfuse-remote list-user-traces <user-id> --from-timestamp 2026-04-01T00:00:00Z
 
 # Instance ops
-langfuse health                                      # current instance
-langfuse health --all                                # every configured instance in one call
-langfuse list-instances
-langfuse show-instance
-langfuse trace-ping --name deploy-verify             # smoke-test ingestion
+langfuse-remote health                                      # current instance
+langfuse-remote health --all                                # every configured instance in one call
+langfuse-remote list-instances
+langfuse-remote show-instance
+langfuse-remote trace-ping --name deploy-verify             # smoke-test ingestion
 
 # Prompt backup / migration
-langfuse --instance prod export-prompts prod.json
-langfuse --instance prod import-prompts prod.json
-langfuse migrate-prompts --from cloud --to prod
-langfuse migrate-prompts --from cloud --to prod --file snapshot.json --keep
+langfuse-remote --instance prod export-prompts prod.json
+langfuse-remote --instance prod import-prompts prod.json
+langfuse-remote migrate-prompts --from cloud --to prod
+langfuse-remote migrate-prompts --from cloud --to prod --file snapshot.json --keep
 ```
 
 All commands take `--pretty` for indented JSON; otherwise output is compact and `jq`-ready. Unknown IDs come back as `{id, error: "not_found"}` instead of hard-failing — a batch of lookups keeps going. Auth / connectivity errors still hard-fail.
@@ -53,7 +55,7 @@ export LANGFUSE_SECRET_KEY="sk-lf-..."
 
 **Project `.env` auto-loading** (recommended when your app already has these keys):
 
-The CLI walks up from cwd for `.env.local` / `.env` and picks up any `LANGFUSE_*` key not already in the shell. If your app's `.env` has `LANGFUSE_BASE_URL` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`, running `langfuse health` from that dir just works.
+The CLI walks up from cwd for `.env.local` / `.env` and picks up any `LANGFUSE_*` key not already in the shell. If your app's `.env` has `LANGFUSE_BASE_URL` / `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY`, running `langfuse-remote health` from that dir just works.
 
 **Multiple named instances** — via env prefix, pick with `--instance <name>`:
 
@@ -79,7 +81,7 @@ export LANGFUSE_PROD_SECRET_KEY="sk-lf-..."
 }
 ```
 
-Env wins on conflict. `langfuse list-instances` shows what's resolved.
+Env wins on conflict. `langfuse-remote list-instances` shows what's resolved.
 
 ## Install
 
@@ -87,16 +89,16 @@ Env wins on conflict. `langfuse list-instances` shows what's resolved.
 
 ```bash
 claude plugin marketplace add osouthgate/agent-plus
-claude plugin install langfuse@agent-plus
+claude plugin install langfuse-remote@agent-plus
 ```
 
-Adds `langfuse` to PATH and loads the skill so Claude reaches for it automatically.
+Adds `langfuse-remote` to PATH and loads the skill so Claude reaches for it automatically.
 
 ### Session-only (dev / try-before-install)
 
 ```bash
 git clone https://github.com/osouthgate/agent-plus
-claude --plugin-dir ./agent-plus/langfuse
+claude --plugin-dir ./agent-plus/langfuse-remote
 ```
 
 `--plugin-dir` loads for the current shell only; nothing persisted.
@@ -104,9 +106,9 @@ claude --plugin-dir ./agent-plus/langfuse
 ### Standalone — no Claude Code
 
 ```bash
-curl -O https://raw.githubusercontent.com/osouthgate/agent-plus/main/langfuse/bin/langfuse
-chmod +x langfuse
-./langfuse health
+curl -O https://raw.githubusercontent.com/osouthgate/agent-plus/main/langfuse-remote/bin/langfuse-remote
+chmod +x langfuse-remote
+./langfuse-remote health
 ```
 
 ## API quirks codified here

@@ -17,6 +17,20 @@ Stdlib-only Python 3 CLI for the narrow slice of Hetzner Cloud API you actually 
 
 Do NOT use for: volumes, networks, firewalls, load balancers, floating IPs, image management, server creation/destruction. If you find yourself wanting any of those, reach for Terraform / `hcloud` (the upstream CLI) instead — this wrapper intentionally doesn't cover them.
 
+## When NOT to use this — fall back to `hcloud` CLI directly
+
+**This wrapper is deliberately tiny.** It covers server list/show/reboot, snapshot create/list, and ssh — nothing else. For anything outside that slice, skip `hcloud-remote` and use the upstream `hcloud` CLI (or Terraform) directly. It's already authed on the same `HCLOUD_TOKEN`.
+
+Specific cases where you should use `hcloud ...` (or Terraform) directly, not `hcloud-remote`:
+
+- **Creating or destroying servers.** → `hcloud server create ...` / `hcloud server delete <name>`. The wrapper has no `server create` or `server delete` on purpose — those are Terraform's job for anything you care about keeping.
+- **Volumes, networks, load balancers, floating IPs, firewalls.** → `hcloud volume|network|load-balancer|floating-ip|firewall ...`. None of these are wrapped; don't try to coerce `server show` into revealing attached-volume details.
+- **SSH key management** (adding/listing/rotating project SSH keys). → `hcloud ssh-key ...`. The wrapper's `ssh` subcommand just *uses* your local `~/.ssh/*` — it doesn't manage Hetzner's registered keys.
+- **Image management beyond snapshots** — deleting snapshots, listing backups/ISOs, rebuilding from an image. → `hcloud image ...`. The wrapper creates and lists snapshots but never deletes them (safety); prune via `hcloud image delete <id>` or the Console.
+- **Rescue mode, power on/off, rename, change type, resize.** → `hcloud server enable-rescue|poweron|poweroff|rename|change-type ...`. Only `reboot` is wrapped.
+
+**Don't get stuck in a loop.** If `hcloud-remote --help` doesn't show a subcommand for what the user wants, immediately switch to `hcloud` directly rather than guessing flags or chaining `server show --json | jq` to reverse-engineer missing functionality. The wrapper's job is to make the *common narrow slice* fast on Windows; everything else is `hcloud` territory.
+
 ## Configure
 
 Layered config, highest precedence first:

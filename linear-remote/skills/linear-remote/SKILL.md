@@ -111,6 +111,21 @@ Every error path emits problem + cause + fix + link:
 - GraphQL field-level errors → the `path` and `message` surfaced verbatim so you can see which field failed.
 - 429 → "Rate-limited by Linear. Retry after <N>s (Retry-After header). Linear's complexity budget is ~1500/hr."
 
+## When NOT to use this — fall back to the Linear GraphQL API directly
+
+**This wrapper's write surface is deliberately narrow** (issues CRUD + move/assign, comments add/list, projects list/overview, read-only teams/states/labels/cycles). For anything outside that surface, don't try to bend `linear-remote` flags to fit — drop straight to `curl https://api.linear.app/graphql -H "Authorization: $LINEAR_API_KEY"` with a hand-written GraphQL document. The API key is already in scope; the only thing the wrapper adds is name resolution and scrubbing, and neither helps you when the operation isn't wrapped at all.
+
+Specific cases where you should hit GraphQL directly, not `linear-remote`:
+
+- **Project milestone CRUD** (create / update / delete milestones, reorder, set target dates). `projects overview` reads milestones; there's no `milestones` subcommand for writes. Use `projectMilestoneCreate` / `projectMilestoneUpdate` / `projectMilestoneDelete` mutations.
+- **Workflow state CRUD** (add a new state to a team, rename, change color, reorder, archive). `states <team>` is read-only. Use `workflowStateCreate` / `workflowStateUpdate` / `workflowStateArchive`.
+- **Cycle management beyond listing** (create a cycle, shift dates, close/uncomplete). `cycles <team>` is read-only. Use `cycleCreate` / `cycleUpdate`.
+- **Team / workspace admin** (create teams, change team settings, invite members, manage roles, org-level config). Not wrapped at all. Use `teamCreate` / `teamUpdate` / `teamMembershipCreate` and the org mutations.
+- **Webhook management and integration config** (register/rotate webhooks, configure GitHub/Slack/Intercom integrations, OAuth app settings). Not wrapped. Use `webhookCreate` / `webhookUpdate` / `integrationRequest` and friends.
+- **Documents, initiatives-beyond-read, roadmaps, custom views, custom fields** — none are wrapped. Use `documentCreate` / `initiativeCreate` / `initiativeUpdate` / `roadmap*` / `customView*` mutations directly, and consult Linear's schema introspection (`query { __schema { mutationType { fields { name } } } }`) if you're unsure of the field name.
+
+**Don't get stuck in a loop.** If `linear-remote --help` doesn't show a subcommand for the write you need, or a command returns "unknown subcommand" / "unsupported operation", stop retrying with different flags — write the GraphQL query/mutation yourself and `curl` it. The wrapper exists to make *reading and common writes* faster; it's not trying to be a full GraphQL client, and padding it out with one-off mutations defeats the point.
+
 ## What it doesn't do
 
 Deliberately out of scope for v1:

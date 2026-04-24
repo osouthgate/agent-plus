@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-langfuse — remote CLI for Langfuse instances (cloud or self-hosted).
+langfuse-remote — remote CLI for Langfuse instances (cloud or self-hosted).
 
 Subcommands:
   export-prompts <file>      Dump all prompts + all versions from an instance to JSON
@@ -67,7 +67,7 @@ from typing import Any
 # the output alone — no extra subprocess call needed. Version is read from the
 # plugin manifest at runtime so bumping plugin.json automatically flows through.
 
-TOOL_NAME = "langfuse"
+TOOL_NAME = "langfuse-remote"
 
 
 @functools.lru_cache(maxsize=1)
@@ -773,7 +773,7 @@ def die(msg: str, code: int = 1):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="langfuse", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(prog="langfuse-remote", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version",
                    version=f"{TOOL_NAME} {_plugin_version()}")
     p.add_argument("--instance", "-i", help="Named instance (see `langfuse list-instances`). Default: config default or single configured.")

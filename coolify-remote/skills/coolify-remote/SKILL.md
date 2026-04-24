@@ -18,6 +18,21 @@ Stdlib-only Python 3 CLI wrapping [Coolify](https://coolify.io)'s REST API. One 
 
 Do NOT use for server provisioning — Coolify's server objects are already-bootstrapped hosts, not Hetzner VMs. For VM lifecycle use the (separate) hcloud CLI.
 
+## When NOT to use this — fall back to `coolify` CLI / Coolify API directly
+
+**This wrapper is deliberately narrow.** It covers the mutations we do weekly (env, domain, TLS, deploy, exec) plus read-only listing of apps and servers. It does NOT wrap Coolify's full surface area. If the user wants to do something outside that scope, don't try to contort `coolify-remote` — hit the Coolify REST API directly with `curl` (auth with `$COOLIFY_API_KEY`) or use the Coolify web UI.
+
+Specific cases where you should use raw `curl`/the Coolify API/the UI, not `coolify-remote`:
+
+- **Creating or deleting applications, services, or databases.** The wrapper only manages apps that already exist. Use `POST /api/v1/applications/{public,private-github,dockerfile,...}` or the UI's "New Resource" flow.
+- **Managing projects, teams, environments, or servers** (add, delete, validate, reconfigure). No wrapper commands exist — `coolify-remote server list` is read-only. Use `/api/v1/projects`, `/api/v1/teams`, `/api/v1/servers` directly.
+- **Database resources** (Postgres, MySQL, Redis, Clickhouse, etc.). The wrapper's `app` commands only target application resources. Database resources have their own endpoints (`/api/v1/databases/*`).
+- **Rolling back to a specific deployment, canceling an in-flight deploy, or streaming live build logs.** `deploy --wait` polls to a terminal state but can't cancel, roll back, or tail. Use the UI or `/api/v1/deployments/{uuid}` endpoints.
+- **Managing private keys, SSH keys, webhooks, or shared variables.** Not wrapped — use the UI or `/api/v1/security/keys`, `/api/v1/shared-variables`.
+- **Anything else the wrapper doesn't expose.** The commands listed below are the complete surface; if it's not there, it's not wrapped.
+
+**Don't get stuck in a loop.** If `coolify-remote --help` doesn't show a subcommand for what the user wants, or a command returns "no such subcommand", immediately switch to `curl`-ing the Coolify API (base: `$COOLIFY_URL`, `Authorization: Bearer $COOLIFY_API_KEY`) or the UI rather than re-trying `coolify-remote` with different flag combos. The wrapper's purpose is to collapse the *common* Coolify fumbles — not to be a full API client.
+
 ## Configure
 
 Layered config, highest precedence first:

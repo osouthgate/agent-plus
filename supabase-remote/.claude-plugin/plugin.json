@@ -1,7 +1,7 @@
 {
   "name": "supabase-remote",
   "description": "Remote CLI for day-to-day Supabase project ops — project list/resolve, SQL exec with JSON-envelope stripping and post-run row verification, RLS audit, TypeScript gen-types. Wraps the Management API + `supabase` CLI.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": {
     "name": "Oliver Southgate",
     "url": "https://github.com/osouthgate"
