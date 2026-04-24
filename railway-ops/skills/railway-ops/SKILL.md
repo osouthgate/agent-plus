@@ -16,6 +16,7 @@ Lives at `${CLAUDE_SKILL_DIR}/../../bin/railway-ops`; the plugin auto-adds `bin/
 - **`railway` CLI** installed and on PATH (`railway --version` must succeed).
 - **Authenticated** — `railway login` must have run (`railway whoami` must return a user).
 - **Project linked** — `railway link` must have been run in this repo (or pass `--env <name>` explicitly).
+- **Optional: `RAILWAY_API_TOKEN`** (or `RAILWAY_TOKEN`) env var — unlocks deploy history via Railway's GraphQL API, giving you `activeDeploy` (currently serving) separately from `latestDeploy` (most recent attempt), plus commit SHA, PR number, branch, and timestamps on each. Without a token the skill still works — it just falls back to a single CLI-sourced deploy with only `id`/`status`.
 
 The skill bails with a clear message if any of these preconditions are missing.
 
@@ -37,6 +38,10 @@ railway-ops errors <service> --env production --since 24h --limit 50 --pretty
 `overview` caps each service's errors[] at 20 and is noisy when you already know which service is on fire. `errors` pulls 10× the log lines, caps errors/warnings at 50 by default, and emits a bucketed `errorKinds` summary (fingerprint → count) so a flood of 800 identical FK violations can't hide behind the truncation. Read `errorTotal` and `errorKinds` first — they reveal scale before you read any individual line.
 
 **Scanning the whole env** — use `overview`, but always check `summary.errors` and each service's `errorTotal` / `errorKinds` before trusting the per-service `errors[]` list. `errors[]` is truncated; the kinds buckets are not.
+
+**"Is prod serving or broken?"** — check both `activeDeploy` AND `latestDeploy`. `activeDeploy=SUCCESS` 23 hours ago + `latestDeploy=FAILED` 8 minutes ago means traffic is fine, someone just tried to ship and the build failed — completely different triage from "prod is down." If `activeDeploy` is `null`, the GraphQL path wasn't available (no `RAILWAY_API_TOKEN`) or the service has never had a successful deploy.
+
+**"Errors since my current deploy came up"** — `errors <service> --since-deploy` scopes to logs from the active deploy's `createdAt` onward, so you don't see noise from a previous version. Needs `RAILWAY_API_TOKEN`; falls back to `--since` with a stderr warning if unavailable.
 
 ## Commands
 
@@ -60,6 +65,9 @@ railway-ops status --pretty
 
 # One service's errors + warnings (deeper than overview — bigger --limit)
 railway-ops errors api --env production --since 2h --limit 50 --pretty
+
+# Scope to logs since the active deploy came up (needs RAILWAY_API_TOKEN)
+railway-ops errors api --env production --since-deploy --pretty
 
 # Env var NAMES only for one service. Values are stripped at parse time and
 # never reach stdout or stderr.
@@ -99,7 +107,28 @@ railway-ops projects --pretty
       "id": "e2b67796-...",
       "status": "SUCCESS",
       "stopped": false,
-      "latestDeploy": { "id": "ddf2184d-...", "status": "SUCCESS" },
+      "activeDeploy": {
+        "id": "ddf2184d-...",
+        "status": "SUCCESS",
+        "createdAt": "2026-04-23T14:00:00Z",
+        "updatedAt": "2026-04-23T14:02:30Z",
+        "staticUrl": "https://api-production.up.railway.app",
+        "commitSha": "abc123",
+        "commitMessage": "release: v0.0.4.5",
+        "prNumber": 639,
+        "branch": "main"
+      },
+      "latestDeploy": {
+        "id": "c8000cda-...",
+        "status": "FAILED",
+        "createdAt": "2026-04-24T13:45:00Z",
+        "updatedAt": "2026-04-24T13:45:15Z",
+        "staticUrl": null,
+        "commitSha": "def456",
+        "commitMessage": "hotfix: stop dropping relationship_evidence FK",
+        "prNumber": 651,
+        "branch": "brockenhurst/hotfix/relationship-evidence-fk-race"
+      },
       "errors": [
         { "timestamp": "...", "level": "error", "message": "...", "module": "..." }
       ],
@@ -129,7 +158,8 @@ railway-ops projects --pretty
 ### Log classification
 
 - Pulls last ~500 lines per service via `railway logs --json --since <dur>`.
-- Classifies by the `level` field (Pino/stdlib logger convention) first, falling back to regex on the `message` text (`/\b(error|fatal|panic|exception|traceback|unhandled)\b/i` for errors, `/\b(warn|warning)\b/i` for warnings).
+- **Postgres-aware classification** runs first: lines matching `<timestamp> UTC [<pid>] <LEVEL>:` are classified by the embedded `LEVEL` (pg's `LOG`, `STATEMENT`, `DETAIL`, `HINT`, `NOTICE` → ignored; `ERROR`, `FATAL`, `PANIC` → error; `WARNING` → warning). Without this, Railway's "all stderr is level=error" envelope buries the real signal under hundreds of routine `LOG: checkpoint complete` lines.
+- Then classifies by the `level` field (Pino/stdlib logger convention), falling back to regex on the `message` text (`/\b(error|fatal|panic|exception|traceback|unhandled)\b/i` for errors, `/\b(warn|warning)\b/i` for warnings).
 - Dedupes consecutive identical messages. Caps each bucket at `--limit` (default 20) most-recent entries per service. The `errors` subcommand uses its own `--limit` (default 50) for deeper single-service triage.
 - **Truncation is visible:** `errors[]` / `warnings[]` are capped, but `errorTotal` / `warningTotal` / `errorKinds` / `warningKinds` are computed across every classified line, so you can always tell how much the cap is hiding.
 

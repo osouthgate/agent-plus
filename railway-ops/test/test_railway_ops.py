@@ -236,6 +236,190 @@ class TestParseLogEntries(unittest.TestCase):
         self.assertTrue(entries[1].get("_non_json"))
 
 
+# ──────────────────────────── pg log classification ────────────────────────────
+
+
+class TestPostgresLogClassification(unittest.TestCase):
+    """Postgres writes routine activity to stderr as LOG/DETAIL/HINT/STATEMENT.
+    Railway stamps stderr as level=error, so without pg-aware classification
+    the bucket fills with 500 `checkpoint complete` lines and drowns the real
+    signal. These tests pin the embedded-level override."""
+
+    def test_checkpoint_log_not_error(self) -> None:
+        msg = (
+            "2026-04-24 13:36:15.296 UTC [22] LOG:  checkpoint complete: "
+            "wrote 3 buffers (0.0%)"
+        )
+        self.assertTrue(ro.is_pg_log_line(msg))
+        self.assertIsNone(ro.pg_embedded_level(msg))
+        # Even when Railway stamps it as error, classify_log_line returns None.
+        self.assertIsNone(ro.classify_log_line({"level": "error", "message": msg}))
+
+    def test_pg_error_still_classified_as_error(self) -> None:
+        msg = (
+            '2026-04-24 13:37:46.719 UTC [1991] ERROR:  column "provider" '
+            "does not exist at character 82"
+        )
+        self.assertEqual(ro.pg_embedded_level(msg), "error")
+        self.assertEqual(ro.classify_log_line({"level": "error", "message": msg}), "error")
+
+    def test_pg_statement_line_not_error(self) -> None:
+        msg = (
+            "2026-04-24 13:37:46.719 UTC [1991] STATEMENT:  "
+            "SELECT coalesce(json_agg(t), '[]'::json)::text FROM ..."
+        )
+        # STATEMENT is attached to an adjacent ERROR; the ERROR line itself
+        # is already counted, so we don't want to double-count.
+        self.assertIsNone(ro.pg_embedded_level(msg))
+
+    def test_pg_warning_classified_as_warning(self) -> None:
+        msg = (
+            "2026-04-24 13:37:46.719 UTC [1991] WARNING:  deprecated cast"
+        )
+        self.assertEqual(ro.pg_embedded_level(msg), "warning")
+
+    def test_pg_fatal_classified_as_error(self) -> None:
+        msg = "2026-04-24 13:37:46.719 UTC [1991] FATAL:  connection refused"
+        self.assertEqual(ro.pg_embedded_level(msg), "error")
+
+    def test_non_pg_line_falls_through(self) -> None:
+        self.assertFalse(ro.is_pg_log_line("regular app log"))
+        self.assertIsNone(ro.pg_embedded_level("regular app log"))
+
+    def test_flood_of_pg_checkpoints_collapses_to_zero_errors(self) -> None:
+        """The exact scenario from the user's real loamdb-postgres snapshot:
+        500 LOG lines stamped error=true by Railway should produce 0 errors."""
+        entries = [
+            {"level": "error",
+             # Rotate across a plausible HH:MM:SS space so every line still
+             # parses as a real pg log (the real source has 500 distinct
+             # checkpoint events spread over hours, not 500 within one minute).
+             "message": (f"2026-04-24 {(i // 3600) % 24:02d}:"
+                         f"{(i // 60) % 60:02d}:{i % 60:02d}.296 UTC [22] "
+                         "LOG:  checkpoint complete: wrote 3 buffers"),
+             "timestamp": f"t{i}"}
+            for i in range(500)
+        ]
+        # Add 2 real errors too
+        entries.append({
+            "level": "error",
+            "message": '2026-04-24 13:37:46.719 UTC [1991] ERROR:  '
+                       'column "provider" does not exist at character 82',
+            "timestamp": "t-real",
+        })
+        errors, warnings, stats = ro._bucket_with_totals(entries, cap=20)
+        self.assertEqual(stats["errorTotal"], 1, "only the real ERROR should count")
+        self.assertEqual(stats["warningTotal"], 0)
+        self.assertEqual(len(errors), 1)
+
+
+# ──────────────────────────── deploy splitting ────────────────────────────
+
+
+class TestClassifyDeploys(unittest.TestCase):
+    def test_returns_none_for_empty_history(self) -> None:
+        active, latest = ro.classify_deploys([])
+        self.assertIsNone(active)
+        self.assertIsNone(latest)
+
+    def test_latest_is_first_active_is_most_recent_success(self) -> None:
+        # Real-world shape: newest attempt failed, previous one serving.
+        history = [
+            {"id": "d3", "status": "FAILED", "createdAt": "2026-04-24T14:00:00Z"},
+            {"id": "d2", "status": "SUCCESS", "createdAt": "2026-04-23T14:00:00Z"},
+            {"id": "d1", "status": "SUCCESS", "createdAt": "2026-04-22T14:00:00Z"},
+        ]
+        active, latest = ro.classify_deploys(history)
+        self.assertEqual(latest["id"], "d3")
+        self.assertEqual(active["id"], "d2")
+
+    def test_active_equals_latest_when_newest_succeeded(self) -> None:
+        history = [
+            {"id": "d3", "status": "SUCCESS", "createdAt": "t3"},
+            {"id": "d2", "status": "FAILED", "createdAt": "t2"},
+        ]
+        active, latest = ro.classify_deploys(history)
+        self.assertEqual(active["id"], latest["id"])
+        self.assertEqual(latest["id"], "d3")
+
+    def test_active_is_none_when_nothing_ever_succeeded(self) -> None:
+        history = [
+            {"id": "d2", "status": "FAILED"},
+            {"id": "d1", "status": "CRASHED"},
+        ]
+        active, latest = ro.classify_deploys(history)
+        self.assertIsNone(active)
+        self.assertEqual(latest["id"], "d2")
+
+
+class TestSlimDeploy(unittest.TestCase):
+    def test_extracts_commit_meta(self) -> None:
+        node = {
+            "id": "d1",
+            "status": "SUCCESS",
+            "createdAt": "2026-04-23T14:00:00Z",
+            "updatedAt": "2026-04-23T14:01:00Z",
+            "staticUrl": "https://example.up.railway.app",
+            "meta": {
+                "commitHash": "abc123def",
+                "commitMessage": "feat: add thing\n\nlong body here",
+                "prNumber": 639,
+                "branch": "main",
+            },
+        }
+        slim = ro._slim_deploy(node)
+        self.assertEqual(slim["id"], "d1")
+        self.assertEqual(slim["status"], "SUCCESS")
+        self.assertEqual(slim["commitSha"], "abc123def")
+        self.assertIn("feat: add thing", slim["commitMessage"])
+        self.assertEqual(slim["prNumber"], 639)
+        self.assertEqual(slim["branch"], "main")
+
+    def test_none_passthrough(self) -> None:
+        self.assertIsNone(ro._slim_deploy(None))
+
+    def test_empty_meta_gives_none_fields(self) -> None:
+        slim = ro._slim_deploy({"id": "d1", "status": "SUCCESS"})
+        self.assertIsNone(slim["commitSha"])
+        self.assertIsNone(slim["commitMessage"])
+        self.assertIsNone(slim["prNumber"])
+
+
+class TestResolveEnvironmentId(unittest.TestCase):
+    def test_matches_env_name_case_insensitive(self) -> None:
+        status = {
+            "environments": {
+                "edges": [
+                    {"node": {"id": "env-prod", "name": "production"}},
+                    {"node": {"id": "env-staging", "name": "staging"}},
+                ]
+            }
+        }
+        self.assertEqual(ro._resolve_environment_id(status, "Production"), "env-prod")
+        self.assertEqual(ro._resolve_environment_id(status, "staging"), "env-staging")
+
+    def test_returns_none_when_env_missing(self) -> None:
+        status = {"environments": {"edges": []}}
+        self.assertIsNone(ro._resolve_environment_id(status, "production"))
+
+    def test_returns_none_when_env_name_is_none(self) -> None:
+        self.assertIsNone(ro._resolve_environment_id({}, None))
+
+
+class TestFetchDeployHistoryNoToken(unittest.TestCase):
+    """Without a token the GraphQL path must silently return None so callers
+    fall back to the CLI-only shape. No network calls, no raises."""
+
+    def test_no_token_returns_none(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertIsNone(ro.fetch_deploy_history("svc-1", "env-1"))
+
+    def test_empty_service_id_returns_none(self) -> None:
+        with patch.dict("os.environ", {"RAILWAY_API_TOKEN": "fake"}):
+            self.assertIsNone(ro.fetch_deploy_history(None, "env-1"))
+            self.assertIsNone(ro.fetch_deploy_history("", "env-1"))
+
+
 # ──────────────────────────── fingerprint + kinds ────────────────────────────
 
 
@@ -514,14 +698,20 @@ class TestOverviewSchemaContract(unittest.TestCase):
 
         snap = data["services"][0]
         expected_service_keys = {
-            "name", "id", "status", "stopped", "latestDeploy",
+            "name", "id", "status", "stopped", "activeDeploy", "latestDeploy",
             "errors", "warnings", "errorTotal", "warningTotal",
             "errorKinds", "warningKinds", "truncated", "envVarNames",
         }
         self.assertEqual(set(snap.keys()), expected_service_keys,
                          "service snapshot keys must remain stable")
         self.assertIsInstance(snap["latestDeploy"], dict)
-        self.assertEqual(set(snap["latestDeploy"].keys()), {"id", "status"})
+        self.assertEqual(set(snap["latestDeploy"].keys()), {
+            "id", "status", "createdAt", "updatedAt", "staticUrl",
+            "commitSha", "commitMessage", "prNumber", "branch",
+        })
+        # activeDeploy is None when GraphQL enrichment isn't available
+        # (no RAILWAY_API_TOKEN in tests); traffic info simply isn't known.
+        self.assertIsNone(snap["activeDeploy"])
 
     def test_json_round_trips_cleanly(self) -> None:
         """End-to-end: build_overview output must serialise to JSON without errors."""

@@ -63,6 +63,55 @@ CMD_TIMEOUT_SEC = 30
 ERROR_RE = re.compile(r"\b(error|fatal|panic|exception|traceback|unhandled)\b", re.IGNORECASE)
 WARNING_RE = re.compile(r"\b(warn|warning)\b", re.IGNORECASE)
 
+# Postgres log lines come out of the container on stderr with an embedded
+# pg-level tag: `2026-04-24 13:36:15.296 UTC [22] LOG:  checkpoint complete…`.
+# Railway stamps every line from stderr as level=error, which floods the bucket
+# with routine LOG/STATEMENT/DETAIL noise. When a message matches this shape we
+# trust the embedded level instead of the envelope.
+_PG_LINE_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+\w+\s+\[\d+\]\s+"
+    r"(LOG|INFO|NOTICE|DEBUG\d?|DETAIL|HINT|CONTEXT|STATEMENT|QUERY|LOCATION|"
+    r"WARNING|ERROR|FATAL|PANIC):\s",
+    re.IGNORECASE,
+)
+_PG_LEVEL_MAP = {
+    "ERROR": "error", "FATAL": "error", "PANIC": "error",
+    "WARNING": "warning",
+    # Everything else is informational. STATEMENT/DETAIL/HINT/CONTEXT/QUERY are
+    # attached to an adjacent real event and will be captured via its ERROR line.
+    "LOG": None, "INFO": None, "NOTICE": None, "DEBUG": None,
+    "DEBUG1": None, "DEBUG2": None, "DEBUG3": None, "DEBUG4": None, "DEBUG5": None,
+    "DETAIL": None, "HINT": None, "CONTEXT": None,
+    "STATEMENT": None, "QUERY": None, "LOCATION": None,
+}
+
+
+def pg_embedded_level(msg: str) -> Optional[str]:
+    """If `msg` is a Postgres log line, return its embedded level mapped to
+    'error' | 'warning' | None. Returns None for non-pg lines so the caller
+    falls back to the envelope `level` field.
+
+    Example: '2026-04-24 13:36:15.296 UTC [22] LOG:  checkpoint complete…'
+    → None (not a real error, just pg's routine LOG stream).
+    """
+    if not msg:
+        return None
+    m = _PG_LINE_RE.match(msg.strip())
+    if not m:
+        return None
+    tag = m.group(1).upper()
+    # `_PG_LEVEL_MAP[tag]` is the mapped classification (or None).
+    # A tag that matched the regex but isn't in the map (shouldn't happen,
+    # but defensive) returns None too — i.e. ignore as noise.
+    if tag in _PG_LEVEL_MAP:
+        return _PG_LEVEL_MAP[tag]
+    return None
+
+
+def is_pg_log_line(msg: str) -> bool:
+    """True if the message matches the canonical pg log line shape."""
+    return bool(msg and _PG_LINE_RE.match(msg.strip()))
+
 # Top-N cap for the per-service errorKinds / warningKinds bucketed summaries.
 # The buckets exist specifically so a flood of identical errors can't hide behind
 # the truncated errors[] list — keep this generous enough that a real incident
@@ -205,9 +254,16 @@ def classify_log_line(line_json: dict[str, Any]) -> Optional[str]:
     """Return 'error', 'warning', or None for an already-parsed JSON log line.
 
     Priority order:
-      1. Explicit `level` field (Pino, standard loggers).
-      2. Message content regex match.
+      1. Postgres-embedded level, if the message is a pg log line. This runs
+         FIRST because Railway stamps stderr as level=error, which otherwise
+         floods the bucket with routine `LOG: checkpoint complete` noise.
+      2. Explicit `level` field (Pino, standard loggers).
+      3. Message content regex match.
     """
+    msg = str(line_json.get("message", "") or line_json.get("msg", ""))
+    if msg and is_pg_log_line(msg):
+        return pg_embedded_level(msg)
+
     level = str(line_json.get("level", "")).lower()
     if level in ("error", "fatal", "critical"):
         return "error"
@@ -220,7 +276,6 @@ def classify_log_line(line_json: dict[str, Any]) -> Optional[str]:
             return "error"
         if lv == 40:
             return "warning"
-    msg = str(line_json.get("message", "") or line_json.get("msg", ""))
     if msg:
         if ERROR_RE.search(msg):
             return "error"
@@ -230,7 +285,13 @@ def classify_log_line(line_json: dict[str, Any]) -> Optional[str]:
 
 
 def classify_log_text(line: str) -> Optional[str]:
-    """Fallback classification for non-JSON log lines."""
+    """Fallback classification for non-JSON log lines.
+
+    Postgres-shape lines are classified by their embedded level first so
+    `LOG: checkpoint complete` doesn't get matched as an error by the regex.
+    """
+    if is_pg_log_line(line):
+        return pg_embedded_level(line)
     if ERROR_RE.search(line):
         return "error"
     if WARNING_RE.search(line):
@@ -410,6 +471,147 @@ def fetch_env_var_names(service: str, env: Optional[str]) -> list[str]:
     return strip_env_values(out)
 
 
+# ──────────────────────────── GraphQL deploy history ────────────────────────────
+#
+# `railway service status --all --json` only returns ONE deployment per service
+# — which is misleading in the common UI state of "SUCCESS deploy serving
+# traffic, newer FAILED attempt on top." To expose both, we hit Railway's
+# GraphQL API directly. Guarded behind RAILWAY_API_TOKEN / RAILWAY_TOKEN; if
+# absent or the request fails, callers silently fall back to the single-deploy
+# shape pulled from the CLI.
+
+RAILWAY_GRAPHQL_URL = "https://backboard.railway.com/graphql/v2"
+
+_DEPLOYMENTS_QUERY = """
+query Deployments($serviceId: String!, $environmentId: String) {
+  deployments(
+    first: 10
+    input: { serviceId: $serviceId, environmentId: $environmentId }
+  ) {
+    edges {
+      node {
+        id
+        status
+        createdAt
+        updatedAt
+        staticUrl
+        meta
+      }
+    }
+  }
+}
+"""
+
+
+def _railway_api_token() -> Optional[str]:
+    """Return the first non-empty Railway API token from the environment."""
+    for key in ("RAILWAY_API_TOKEN", "RAILWAY_TOKEN"):
+        v = os.environ.get(key, "").strip()
+        if v:
+            return v
+    return None
+
+
+def _graphql_request(query: str, variables: dict[str, Any], *,
+                     timeout: int = 15) -> Optional[dict[str, Any]]:
+    """POST a GraphQL query to Railway. Returns the `data` field or None on
+    ANY failure (missing token, network, HTTP error, GraphQL errors). Never
+    raises — callers use None as the signal to fall back.
+
+    Imported lazily so we don't pay urllib startup cost when the GraphQL path
+    isn't being used.
+    """
+    token = _railway_api_token()
+    if not token:
+        return None
+    import urllib.request
+    import urllib.error
+    body = json.dumps({"query": query, "variables": variables}).encode("utf-8")
+    req = urllib.request.Request(
+        RAILWAY_GRAPHQL_URL,
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "railway-ops/0.2",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.HTTPError, urllib.error.URLError,
+            json.JSONDecodeError, TimeoutError, OSError) as e:
+        sys.stderr.write(f"railway-ops: graphql request failed: {e}\n")
+        return None
+    if payload.get("errors"):
+        sys.stderr.write(f"railway-ops: graphql errors: {payload['errors']}\n")
+        return None
+    return payload.get("data")
+
+
+def _slim_deploy(node: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Flatten a GraphQL deployment node into the stable shape we emit. Pulls
+    the interesting bits from `meta` (commit SHA, message, PR number) so agents
+    don't have to dig, but keeps the raw meta too."""
+    if not node:
+        return None
+    meta = node.get("meta") or {}
+    commit_msg = str(meta.get("commitMessage") or "").strip()
+    return {
+        "id": node.get("id"),
+        "status": node.get("status"),
+        "createdAt": node.get("createdAt"),
+        "updatedAt": node.get("updatedAt"),
+        "staticUrl": node.get("staticUrl"),
+        "commitSha": meta.get("commitHash") or meta.get("commit"),
+        "commitMessage": commit_msg[:300] if commit_msg else None,
+        "prNumber": meta.get("prNumber") or meta.get("pullRequestNumber"),
+        "branch": meta.get("branch"),
+    }
+
+
+def fetch_deploy_history(service_id: Optional[str],
+                         environment_id: Optional[str]) -> Optional[list[dict[str, Any]]]:
+    """Return newest-first list of recent deployments for a service, or None
+    if the GraphQL path is unavailable (no token, request failed, schema drift).
+
+    Callers MUST handle None — the cheap CLI `service status` path provides
+    the single-deploy fallback used when this returns None.
+    """
+    if not service_id:
+        return None
+    data = _graphql_request(_DEPLOYMENTS_QUERY, {
+        "serviceId": service_id,
+        "environmentId": environment_id,
+    })
+    if not data:
+        return None
+    edges = ((data.get("deployments") or {}).get("edges")) or []
+    nodes = [e.get("node") for e in edges if isinstance(e, dict) and e.get("node")]
+    return nodes
+
+
+def classify_deploys(history: list[dict[str, Any]]) -> tuple[
+        Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    """From a newest-first deploy list, pick (activeDeploy, latestDeploy).
+
+    - `latestDeploy` is always history[0] — the most recent attempt, regardless
+      of status. This is what the railway UI flags at the top of the list.
+    - `activeDeploy` is the most recent deploy whose status is SUCCESS — the
+      one actually serving traffic. It may be the same as latestDeploy (when
+      the newest attempt succeeded), older than it (newer attempt failed), or
+      None (nothing ever succeeded).
+    """
+    if not history:
+        return None, None
+    latest = history[0]
+    active = next(
+        (d for d in history if (d.get("status") or "").upper() == "SUCCESS"),
+        None,
+    )
+    return active, latest
+
+
 # ──────────────────────────── overview builder ────────────────────────────
 
 
@@ -420,21 +622,50 @@ def build_service_snapshot(
     since: str,
     log_lines: int,
     bucket_cap: int,
+    environment_id: Optional[str] = None,
 ) -> dict[str, Any]:
     name = service_row.get("name") or service_row.get("id") or "unknown"
+    service_id = service_row.get("id")
     raw_logs = fetch_logs(name, env, lines=log_lines, since=since)
     entries = parse_log_entries(raw_logs)
     errors, warnings, stats = _bucket_with_totals(entries, bucket_cap)
     env_var_names = fetch_env_var_names(name, env)
+
+    # Fallback deploy shape from the CLI — always present, single entry.
+    cli_deploy = {
+        "id": service_row.get("deploymentId"),
+        "status": service_row.get("status"),
+        "createdAt": None,
+        "updatedAt": None,
+        "staticUrl": None,
+        "commitSha": None,
+        "commitMessage": None,
+        "prNumber": None,
+        "branch": None,
+    }
+    active_deploy: Optional[dict[str, Any]] = None
+    latest_deploy: dict[str, Any] = cli_deploy
+
+    # Richer history via GraphQL, if a token is available. Any failure falls
+    # back to the CLI shape silently — the overview must not break just because
+    # the API refused a query.
+    history = fetch_deploy_history(service_id, environment_id)
+    if history:
+        active_node, latest_node = classify_deploys(history)
+        slim_active = _slim_deploy(active_node)
+        slim_latest = _slim_deploy(latest_node)
+        if slim_latest:
+            latest_deploy = slim_latest
+        if slim_active:
+            active_deploy = slim_active
+
     return {
         "name": name,
-        "id": service_row.get("id"),
+        "id": service_id,
         "status": service_row.get("status"),
         "stopped": service_row.get("stopped"),
-        "latestDeploy": {
-            "id": service_row.get("deploymentId"),
-            "status": service_row.get("status"),
-        },
+        "activeDeploy": active_deploy,
+        "latestDeploy": latest_deploy,
         "errors": errors,
         "warnings": warnings,
         "errorTotal": stats["errorTotal"],
@@ -444,6 +675,26 @@ def build_service_snapshot(
         "truncated": stats["errorTotal"] > len(errors) or stats["warningTotal"] > len(warnings),
         "envVarNames": env_var_names,
     }
+
+
+def _resolve_environment_id(status: dict[str, Any], env_name: Optional[str]) -> Optional[str]:
+    """Pick the environment ID matching `env_name` from `railway status --json`.
+
+    Railway's status payload exposes `environments.edges[].node.{id, name}`;
+    we match case-insensitively on the name. If env_name is None, we can't
+    disambiguate, so we return None and let the GraphQL query omit the filter.
+    """
+    if not env_name:
+        return None
+    edges = ((status.get("environments") or {}).get("edges")) or []
+    lower = env_name.lower()
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        node = edge.get("node") or {}
+        if str(node.get("name", "")).lower() == lower:
+            return node.get("id")
+    return None
 
 
 _FAILURE_STATUSES = {"FAILED", "CRASHED", "ERRORED", "REMOVED"}
@@ -497,6 +748,11 @@ def build_overview(
         # just leave this as None and rely on the CLI default.
         resolved_env = None
 
+    # Resolve env NAME → env ID from the status payload so the GraphQL
+    # deployments query can filter correctly. If env not found, pass None and
+    # let the API return deploys across all envs for the service.
+    environment_id = _resolve_environment_id(status, resolved_env)
+
     services = list_services(resolved_env)
 
     if service_filter:
@@ -513,6 +769,7 @@ def build_overview(
             pool.submit(
                 build_service_snapshot, svc, resolved_env,
                 since=since, log_lines=log_lines, bucket_cap=bucket_cap,
+                environment_id=environment_id,
             ): svc.get("name", "?")
             for svc in services
         }
@@ -583,14 +840,42 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 def cmd_errors(args: argparse.Namespace) -> None:
     check_prereqs()
+    since = args.since
+    since_source = "flag"
+    # --since-deploy: use the currently-active deploy's createdAt as the
+    # cutoff, so triage scopes to "errors since the running deploy came up".
+    # Needs GraphQL (which needs RAILWAY_API_TOKEN) — falls back to --since
+    # if we can't resolve an active deploy, with a stderr warning so the user
+    # knows why the scope is wider than they asked for.
+    if getattr(args, "since_deploy", False):
+        status = get_status()
+        env_id = _resolve_environment_id(status, args.env)
+        svc = next(
+            (s for s in list_services(args.env)
+             if (s.get("name") or "").lower() == args.service.lower()),
+            None,
+        )
+        history = fetch_deploy_history(svc.get("id") if svc else None, env_id)
+        active_node, _latest = classify_deploys(history or [])
+        active = _slim_deploy(active_node)
+        if active and active.get("createdAt"):
+            since = active["createdAt"]
+            since_source = "active-deploy"
+        else:
+            sys.stderr.write(
+                "railway-ops: --since-deploy: could not resolve an active "
+                "deploy (no RAILWAY_API_TOKEN, service not found, or no "
+                "successful deploy yet). Falling back to --since=" + since + "\n"
+            )
     # Pull more lines than overview — this command is focused.
-    raw = fetch_logs(args.service, args.env, lines=max(args.limit * 10, 500), since=args.since)
+    raw = fetch_logs(args.service, args.env, lines=max(args.limit * 10, 500), since=since)
     entries = parse_log_entries(raw)
     errors, warnings, stats = _bucket_with_totals(entries, args.limit)
     emit({
         "service": args.service,
         "env": args.env or "<linked>",
-        "since": args.since,
+        "since": since,
+        "sinceSource": since_source,
         "errors": errors,
         "warnings": warnings,
         "errorTotal": stats["errorTotal"],
@@ -683,6 +968,11 @@ def build_parser() -> argparse.ArgumentParser:
     er.add_argument("--limit", type=int, default=DEFAULT_ERRORS_LIMIT,
                     help=(f"cap on errors and warnings buckets "
                           f"(default: {DEFAULT_ERRORS_LIMIT})"))
+    er.add_argument("--since-deploy", action="store_true", dest="since_deploy",
+                    help=("pull logs since the currently-active deploy's "
+                          "createdAt (overrides --since). Requires "
+                          "RAILWAY_API_TOKEN; falls back to --since with a "
+                          "warning if unavailable."))
 
     ev = sub.add_parser("envs", help="env var NAMES only for one service (values stripped)")
     _add_globals(ev)
