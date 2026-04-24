@@ -69,9 +69,14 @@ Only `GITHUB_*` prefixed vars are read.
 
 ## Usage
 
+`--output <path>` is available on every subcommand (pass it before the subcommand): writes the full JSON payload to disk and prints a compact envelope (`savedTo`, `bytes`, `payloadKeys`, plus head/tail previews for log-shaped payloads). Use for large responses (`run logs`, long `pr list`, `run show` with fat annotations) that are wasteful to route through the model's context window.
+
 ```bash
 # One-call snapshot — PR + mergeable + checks + reviews + runs
 github-remote overview feat/my-branch --pretty
+
+# Save a big workflow log dump to disk; stdout returns just a summary envelope
+github-remote --output /tmp/run.json run logs 1234567890 --errors-only
 
 # List open PRs
 github-remote pr list --state open --limit 10

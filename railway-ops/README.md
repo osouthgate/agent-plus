@@ -61,6 +61,8 @@ The CLI checks preconditions at startup and exits with a clear message if any ar
 
 All commands emit JSON on stdout. `--pretty` switches to indented JSON for humans; omit it for compact output suitable for `jq` / pipelines. `--env` accepts short forms (`prod` → `production`, `stag` → `staging`); an ambiguous substring raises a clear error rather than silently picking one.
 
+`--output <path>` (available on every subcommand) writes the full JSON payload to disk and prints only a compact envelope on stdout — `savedTo`, `bytes`, `payloadKeys`, and (for log-shaped payloads) head+tail line previews. Use it when the response is large enough that routing it through an agent's context window is wasteful (`build-logs` with high `--lines`, `overview` for many services). The envelope is the agent's cue to decide whether to `Read` the file at all.
+
 ```bash
 # One-call snapshot — project, env, services, active+latest deploys with commit meta,
 # recent errors/warnings with fingerprint buckets, env var NAMES. When latestDeploy

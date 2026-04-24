@@ -57,9 +57,14 @@ Only `VERCEL_*` prefixed vars are read.
 
 ## Usage
 
+`--output <path>` is available on every subcommand (pass it before the subcommand): writes the full JSON payload to disk and prints a compact envelope (`savedTo`, `bytes`, `payloadKeys`, plus head/tail previews for log-shaped payloads). Use for large responses (`logs`, `overview` across many deployments) that are wasteful to route through the model's context window.
+
 ```bash
 # One-call snapshot — project + recent deployments + domains + env NAMES + warnings
 vercel-remote overview --project my-app --pretty
+
+# Save a big log dump to disk; stdout returns just a summary envelope
+vercel-remote --output /tmp/dep.json logs my-app-xyz.vercel.app --since 24h
 
 # List projects
 vercel-remote projects list --pretty

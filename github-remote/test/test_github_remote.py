@@ -387,5 +387,52 @@ class TestEmitSentinel(unittest.TestCase):
         self.assertEqual(parsed["status"], "timeout")
 
 
+class TestWriteOutputFile(unittest.TestCase):
+    """The --output envelope shape is part of the public contract."""
+
+    def _write(self, payload: dict) -> tuple[dict, Path]:
+        import tempfile
+        td = Path(tempfile.mkdtemp())
+        out = td / "nested" / "payload.json"
+        summary = gr._write_output_file(payload, str(out))
+        return summary, out
+
+    def test_writes_file_and_returns_envelope(self) -> None:
+        payload = {"tool": {"name": "x"}, "run_id": 42,
+                   "lines": ["a", "b", "c"]}
+        summary, path = self._write(payload)
+        self.assertTrue(path.exists())
+        self.assertEqual(json.loads(path.read_text("utf-8")), payload)
+        self.assertEqual(summary["savedTo"], str(path.resolve()))
+        self.assertGreater(summary["bytes"], 0)
+        self.assertEqual(set(summary["payloadKeys"]), {"run_id", "lines"})
+        self.assertNotIn("tool", summary["payloadKeys"])
+
+    def test_log_payload_gets_head_and_tail_preview(self) -> None:
+        payload = {"tool": {}, "lines": [f"line {i}" for i in range(100)]}
+        summary, _ = self._write(payload)
+        self.assertEqual(summary["preview"]["totalLines"], 100)
+        self.assertEqual(summary["preview"]["head"][0], "line 0")
+        self.assertEqual(summary["preview"]["tail"][-1], "line 99")
+
+    def test_short_log_payload_omits_tail(self) -> None:
+        summary, _ = self._write({"tool": {}, "lines": ["a", "b", "c"]})
+        self.assertEqual(summary["preview"]["tail"], [])
+
+    def test_non_log_payload_has_no_preview(self) -> None:
+        summary, _ = self._write({"tool": {}, "prs": [{"number": 1}]})
+        self.assertNotIn("preview", summary)
+
+    def test_creates_parent_directories(self) -> None:
+        _, path = self._write({"tool": {}, "k": "v"})
+        self.assertTrue(path.parent.is_dir())
+
+    def test_output_flag_parses(self) -> None:
+        parser = gr.build_parser()
+        args = parser.parse_args(["--output", "/tmp/x.json",
+                                  "overview", "main"])
+        self.assertEqual(args.output, "/tmp/x.json")
+
+
 if __name__ == "__main__":
     unittest.main()

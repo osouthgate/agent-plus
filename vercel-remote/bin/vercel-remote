@@ -763,13 +763,44 @@ def env_remove(
 # ──────────────────────────── emit ────────────────────────────
 
 
-def emit_json(obj: Any, *, pretty: bool = False) -> None:
+def emit_json(obj: Any, *, pretty: bool = False,
+              output: Optional[str] = None) -> None:
     scrubbed = _scrub(obj)
     wrapped = _with_tool_meta(scrubbed)
+    if output and isinstance(wrapped, dict):
+        wrapped = _write_output_file(wrapped, output)
     if pretty:
         print(json.dumps(wrapped, indent=2, sort_keys=False, default=str))
     else:
         print(json.dumps(wrapped, default=str))
+
+
+def _write_output_file(payload: dict, output_path: str) -> dict:
+    """Write the full payload as JSON to `output_path` and return a compact
+    summary envelope. Lets the agent offload large responses (deployment logs,
+    overview snapshots) to disk instead of pulling them through the model's
+    context window."""
+    path = Path(output_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2, default=str)
+    path.write_text(text, encoding="utf-8")
+
+    summary: dict[str, Any] = {
+        "tool": payload.get("tool", _tool_meta()),
+        "savedTo": str(path),
+        "bytes": len(text.encode("utf-8")),
+        "fileLineCount": text.count("\n") + 1,
+        "payloadKeys": [k for k in payload.keys() if k != "tool"],
+    }
+    lines = payload.get("lines")
+    if isinstance(lines, list) and lines:
+        preview_n = 10
+        summary["preview"] = {
+            "totalLines": len(lines),
+            "head": lines[:preview_n],
+            "tail": lines[-preview_n:] if len(lines) > preview_n * 2 else [],
+        }
+    return summary
 
 
 # ──────────────────────────── CLI ────────────────────────────
@@ -780,6 +811,13 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--team", help="VERCEL_TEAM_ID (override env)")
     p.add_argument("--env-file", help="explicit .env file path")
     p.add_argument("--pretty", action="store_true", help="indent JSON output")
+    p.add_argument("--output", metavar="PATH",
+                   help=("write the full JSON payload to PATH and print a compact "
+                         "summary (savedTo, bytes, payloadKeys, and — for log "
+                         "payloads — head/tail previews). Use this when the "
+                         "response is large enough that routing it through the "
+                         "model's context is wasteful (e.g. deployment logs, "
+                         "overview for many deployments)."))
 
 
 def _cfg_from_args(args: argparse.Namespace) -> dict[str, str]:
@@ -911,43 +949,43 @@ def main(argv: Optional[list[str]] = None) -> int:
                     {"id": p.get("id"), "name": p.get("name"), "framework": p.get("framework")}
                     for p in projects
                 ]
-                emit_json(slim, pretty=args.pretty)
+                emit_json(slim, pretty=args.pretty, output=getattr(args, "output", None))
             elif args.action == "resolve":
                 if not args.ref:
                     die("projects resolve requires a name-or-id argument")
-                emit_json(resolve_project(args.ref, cfg), pretty=args.pretty)
+                emit_json(resolve_project(args.ref, cfg), pretty=args.pretty, output=getattr(args, "output", None))
 
         elif args.cmd == "overview":
-            emit_json(build_overview(args.project or "", args.limit, cfg), pretty=args.pretty)
+            emit_json(build_overview(args.project or "", args.limit, cfg), pretty=args.pretty, output=getattr(args, "output", None))
 
         elif args.cmd == "deployments":
             if args.action == "list":
                 deps = list_deployments(args.project, args.state, args.limit, cfg)
-                emit_json(deps, pretty=args.pretty)
+                emit_json(deps, pretty=args.pretty, output=getattr(args, "output", None))
             elif args.action == "show":
-                emit_json(show_deployment(args.ref, cfg), pretty=args.pretty)
+                emit_json(show_deployment(args.ref, cfg), pretty=args.pretty, output=getattr(args, "output", None))
             elif args.action == "trigger":
                 emit_json(
                     trigger_deploy_hook(args.hook_url, wait=args.wait, timeout=args.timeout, cfg=cfg),
-                    pretty=args.pretty,
+                    pretty=args.pretty, output=getattr(args, "output", None),
                 )
 
         elif args.cmd == "logs":
             emit_json(
                 fetch_logs(args.ref, args.since, args.errors_only, args.limit, cfg),
-                pretty=args.pretty,
+                pretty=args.pretty, output=getattr(args, "output", None),
             )
 
         elif args.cmd == "domains":
             if args.action == "list":
-                emit_json(list_domains(args.project, cfg), pretty=args.pretty)
+                emit_json(list_domains(args.project, cfg), pretty=args.pretty, output=getattr(args, "output", None))
             elif args.action == "verify":
                 emit_json(
                     verify_domain(
                         args.domain, args.project,
                         wait=args.wait, timeout=args.timeout, cfg=cfg,
                     ),
-                    pretty=args.pretty,
+                    pretty=args.pretty, output=getattr(args, "output", None),
                 )
 
         elif args.cmd == "env":
@@ -956,13 +994,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                 pid = project.get("id") or project.get("name") or args.project
                 names = fetch_env_names(pid, args.env, cfg)
                 emit_json({"project": project.get("name"), "env": args.env, "names": names},
-                          pretty=args.pretty)
+                          pretty=args.pretty, output=getattr(args, "output", None))
             elif args.action == "set":
                 emit_json(env_set(args.key, args.value, args.project, args.env, cfg=cfg),
-                          pretty=args.pretty)
+                          pretty=args.pretty, output=getattr(args, "output", None))
             elif args.action == "remove":
                 emit_json(env_remove(args.key, args.project, args.env, cfg=cfg),
-                          pretty=args.pretty)
+                          pretty=args.pretty, output=getattr(args, "output", None))
 
         return 0
     except VercelError as e:

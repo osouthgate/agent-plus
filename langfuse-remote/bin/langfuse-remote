@@ -561,7 +561,39 @@ def cmd_show_instance(args: argparse.Namespace) -> int:
 
 def _emit_json(args: argparse.Namespace, obj: dict) -> None:
     indent = 2 if getattr(args, "pretty", False) else None
-    print(json.dumps(_with_tool_meta(obj), indent=indent, ensure_ascii=False))
+    wrapped = _with_tool_meta(obj)
+    output = getattr(args, "output", None)
+    if output and isinstance(wrapped, dict):
+        wrapped = _write_output_file(wrapped, output)
+    print(json.dumps(wrapped, indent=indent, ensure_ascii=False))
+
+
+def _write_output_file(payload: dict, output_path: str) -> dict:
+    """Write the full payload as JSON to `output_path` and return a compact
+    summary envelope. Lets the agent offload large responses (full trace
+    dumps, session exports) to disk instead of pulling them through the
+    model's context window."""
+    path = Path(output_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2, ensure_ascii=False, default=str)
+    path.write_text(text, encoding="utf-8")
+
+    summary: dict[str, Any] = {
+        "tool": payload.get("tool", _tool_meta()),
+        "savedTo": str(path),
+        "bytes": len(text.encode("utf-8")),
+        "fileLineCount": text.count("\n") + 1,
+        "payloadKeys": [k for k in payload.keys() if k != "tool"],
+    }
+    lines = payload.get("lines")
+    if isinstance(lines, list) and lines:
+        preview_n = 10
+        summary["preview"] = {
+            "totalLines": len(lines),
+            "head": lines[:preview_n],
+            "tail": lines[-preview_n:] if len(lines) > preview_n * 2 else [],
+        }
+    return summary
 
 
 def _fetch_by_id(inst: dict, label: str, path_template: str, ids: list[str]) -> list[dict]:
@@ -779,6 +811,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--instance", "-i", help="Named instance (see `langfuse list-instances`). Default: config default or single configured.")
     p.add_argument("--env-file", action="append", default=[], help="Additional .env file to load before config resolution (repeatable). Auto-discovery still runs.")
     p.add_argument("--no-autoload", action="store_true", help="Disable .env auto-discovery from cwd upward.")
+    p.add_argument("--output", metavar="PATH",
+                   help=("Write the full JSON payload to PATH and print a compact "
+                         "summary (savedTo, bytes, payloadKeys) instead. Use for "
+                         "large dumps (traces, sessions, exports) that are "
+                         "wasteful to route through the model's context."))
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sp = sub.add_parser("export-prompts", help="Dump all prompts + versions to JSON")

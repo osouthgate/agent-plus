@@ -4,6 +4,11 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## Unreleased
+
+### Added
+- `--output <path>` global flag — writes the full JSON payload to disk and prints a compact envelope (`savedTo`, `bytes`, `payloadKeys`, head/tail previews for log-shaped payloads). Use for large responses (`logs`, long `overview`) that are wasteful to route through the model's context window. [2026-04-24]
+
 ## 0.1.0 - 2026-04-24
 
 Initial release.

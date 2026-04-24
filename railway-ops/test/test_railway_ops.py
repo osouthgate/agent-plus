@@ -896,6 +896,69 @@ class TestArgparseContract(unittest.TestCase):
     def test_back_compat_bucket_cap_alias(self) -> None:
         self.assertEqual(ro.OVERVIEW_BUCKET_CAP, ro.DEFAULT_OVERVIEW_BUCKET_CAP)
 
+    def test_output_flag_defaults_to_none(self) -> None:
+        parser = ro.build_parser()
+        args = parser.parse_args(["status"])
+        self.assertIsNone(args.output)
+
+    def test_output_flag_parses(self) -> None:
+        parser = ro.build_parser()
+        args = parser.parse_args(["build-logs", "api", "--output", "/tmp/x.json"])
+        self.assertEqual(args.output, "/tmp/x.json")
+
+
+class TestWriteOutputFile(unittest.TestCase):
+    """The --output envelope shape is part of the public contract."""
+
+    def _write(self, payload: dict) -> tuple[dict, Path]:
+        import tempfile
+        td = Path(tempfile.mkdtemp())
+        out = td / "nested" / "payload.json"
+        summary = ro._write_output_file(payload, str(out))
+        return summary, out
+
+    def test_writes_file_with_full_payload(self) -> None:
+        payload = {"tool": {"name": "x"}, "service": "api",
+                   "lines": ["a", "b", "c"]}
+        summary, path = self._write(payload)
+        self.assertTrue(path.exists())
+        # Full payload round-trips through disk.
+        self.assertEqual(json.loads(path.read_text("utf-8")), payload)
+        self.assertEqual(summary["savedTo"], str(path.resolve()))
+
+    def test_envelope_reports_bytes_and_keys(self) -> None:
+        payload = {"tool": {}, "service": "api", "env": "prod", "lineCount": 0}
+        summary, _ = self._write(payload)
+        self.assertGreater(summary["bytes"], 0)
+        self.assertEqual(set(summary["payloadKeys"]),
+                         {"service", "env", "lineCount"})
+        self.assertNotIn("tool", summary["payloadKeys"])
+
+    def test_log_payload_gets_head_and_tail_preview(self) -> None:
+        payload = {"tool": {}, "lines": [f"line {i}" for i in range(100)]}
+        summary, _ = self._write(payload)
+        self.assertIn("preview", summary)
+        self.assertEqual(summary["preview"]["totalLines"], 100)
+        self.assertEqual(summary["preview"]["head"][0], "line 0")
+        self.assertEqual(summary["preview"]["tail"][-1], "line 99")
+
+    def test_short_log_payload_omits_tail(self) -> None:
+        # When len(lines) <= 2 * preview_n (20), tail is redundant with head.
+        payload = {"tool": {}, "lines": ["a", "b", "c"]}
+        summary, _ = self._write(payload)
+        self.assertEqual(summary["preview"]["tail"], [])
+
+    def test_non_log_payload_has_no_preview(self) -> None:
+        payload = {"tool": {}, "services": [{"name": "x"}]}
+        summary, _ = self._write(payload)
+        self.assertNotIn("preview", summary)
+
+    def test_creates_parent_directories(self) -> None:
+        payload = {"tool": {}, "k": "v"}
+        _, path = self._write(payload)
+        # _write() put the file under `nested/` which didn't exist — mkdir -p.
+        self.assertTrue(path.parent.is_dir())
+
 
 if __name__ == "__main__":
     unittest.main()

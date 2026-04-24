@@ -1020,12 +1020,44 @@ def die(msg: str) -> None:
     sys.exit(1)
 
 
-def emit(data: Any, pretty: bool) -> None:
+def emit(data: Any, pretty: bool, output: Optional[str] = None) -> None:
     wrapped = _with_tool_meta(data)
+    if output and isinstance(wrapped, dict):
+        wrapped = _write_output_file(wrapped, output)
     if pretty:
         print(json.dumps(wrapped, indent=2, default=str))
     else:
         print(json.dumps(wrapped, default=str))
+
+
+def _write_output_file(payload: dict, output_path: str) -> dict:
+    """Write the full payload as JSON to `output_path` and return a compact
+    summary envelope. Lets the agent offload large responses (build logs,
+    service snapshots) to disk instead of pulling them through the model's
+    context window."""
+    path = Path(output_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2, default=str)
+    path.write_text(text, encoding="utf-8")
+
+    summary: dict[str, Any] = {
+        "tool": payload.get("tool", _tool_meta()),
+        "savedTo": str(path),
+        "bytes": len(text.encode("utf-8")),
+        "fileLineCount": text.count("\n") + 1,
+        "payloadKeys": [k for k in payload.keys() if k != "tool"],
+    }
+    # Log-shaped payloads carry their line array under `lines`; preview head
+    # and tail so the agent can decide whether to Read the file at all.
+    lines = payload.get("lines")
+    if isinstance(lines, list) and lines:
+        preview_n = 10
+        summary["preview"] = {
+            "totalLines": len(lines),
+            "head": lines[:preview_n],
+            "tail": lines[-preview_n:] if len(lines) > preview_n * 2 else [],
+        }
+    return summary
 
 
 def _resolve_cli_env(args: argparse.Namespace) -> None:
@@ -1054,7 +1086,7 @@ def cmd_overview(args: argparse.Namespace) -> None:
         service_filter=args.service,
         bucket_cap=args.limit,
     )
-    emit(data, args.pretty)
+    emit(data, args.pretty, getattr(args, "output", None))
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -1071,7 +1103,7 @@ def cmd_status(args: argparse.Namespace) -> None:
             for e in (status.get("environments", {}) or {}).get("edges", [])
             if isinstance(e, dict) and isinstance(e.get("node"), dict)
         ],
-    }, args.pretty)
+    }, args.pretty, getattr(args, "output", None))
 
 
 def cmd_errors(args: argparse.Namespace) -> None:
@@ -1120,7 +1152,7 @@ def cmd_errors(args: argparse.Namespace) -> None:
         "errorKinds": top_n_kinds(stats["errorKinds"]),
         "warningKinds": top_n_kinds(stats["warningKinds"]),
         "truncated": stats["errorTotal"] > len(errors) or stats["warningTotal"] > len(warnings),
-    }, args.pretty)
+    }, args.pretty, getattr(args, "output", None))
 
 
 def cmd_build_logs(args: argparse.Namespace) -> None:
@@ -1181,7 +1213,7 @@ def cmd_build_logs(args: argparse.Namespace) -> None:
         "lines": tail,
         "errorKinds": top_n_kinds(stats["errorKinds"]),
         "lineCount": stats["lineCount"],
-    }, args.pretty)
+    }, args.pretty, getattr(args, "output", None))
 
 
 def cmd_envs(args: argparse.Namespace) -> None:
@@ -1193,7 +1225,7 @@ def cmd_envs(args: argparse.Namespace) -> None:
         "env": args.env or "<linked>",
         "envVarNames": names,
         "count": len(names),
-    }, args.pretty)
+    }, args.pretty, getattr(args, "output", None))
 
 
 def cmd_services(args: argparse.Namespace) -> None:
@@ -1212,7 +1244,7 @@ def cmd_services(args: argparse.Namespace) -> None:
             }
             for s in services
         ],
-    }, args.pretty)
+    }, args.pretty, getattr(args, "output", None))
 
 
 def cmd_projects(args: argparse.Namespace) -> None:
@@ -1225,7 +1257,7 @@ def cmd_projects(args: argparse.Namespace) -> None:
     except json.JSONDecodeError as e:
         die(f"could not parse `railway list --json`: {e}")
         return
-    emit(data, args.pretty)
+    emit(data, args.pretty, getattr(args, "output", None))
 
 
 # ──────────────────────────── argparse ────────────────────────────
@@ -1233,6 +1265,12 @@ def cmd_projects(args: argparse.Namespace) -> None:
 
 def _add_globals(p: argparse.ArgumentParser) -> None:
     p.add_argument("--pretty", action="store_true", help="indent JSON output")
+    p.add_argument("--output", metavar="PATH",
+                   help=("write the full JSON payload to PATH and print a compact "
+                         "summary (savedTo, bytes, payloadKeys, and — for log "
+                         "payloads — head/tail line previews). Use this when the "
+                         "response is large enough that routing it through the "
+                         "model's context is wasteful (e.g. build-logs, overview)."))
 
 
 def build_parser() -> argparse.ArgumentParser:
