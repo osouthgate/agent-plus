@@ -21,7 +21,7 @@ Every plugin here exists because doing the same job by hand — `curl` + `jq` + 
 
 These aren't theoretical. Each row is a pain point that got codified after burning time.
 
-## The five patterns that make this work
+## The patterns that make this work
 
 Every plugin reinforces at least one of these. If you're writing a new plugin, start here:
 
@@ -30,6 +30,8 @@ Every plugin reinforces at least one of these. If you're writing a new plugin, s
 3. **`--wait` on every async mutation.** Deploys, cron triggers, backups — if it returns an action ID, the CLI polls for you. No hand-rolled loops.
 4. **`--json` on every list / show.** Structured output into `jq` is the default. Human-formatted output is for interactive use.
 5. **Strip values the agent shouldn't see.** Env var values, secrets, long blobs — if the agent doesn't need it to decide the next step, it doesn't go into the transcript.
+6. **Self-diagnosing output.** Every JSON payload carries a top-level `tool: {name, version}` field read from the plugin manifest at runtime. Version drift (stale plugin cache, PATH pinning) is visible from the output alone — no extra subprocess call. Every plugin also exposes a `--version` flag for direct checks.
+7. **Stay in your lane.** Each plugin's SKILL.md explicitly lists the cases where the agent should drop to the raw CLI / API instead of looping on a rejection. Wrappers cover the 80% that's cheap to make fast; writes, admin ops, and anything narrowly out-of-scope belong to the upstream tool.
 
 ## Plugins
 
