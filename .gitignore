@@ -16,3 +16,6 @@ Thumbs.db
 .gstack/
 plans/
 .claude/settings.local.json
+
+# gstack auto-creates CLAUDE.md with skill routing; we use AGENTS.md instead
+/CLAUDE.md
