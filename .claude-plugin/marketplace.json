@@ -5,7 +5,7 @@
     "url": "https://github.com/osouthgate"
   },
   "metadata": {
-    "description": "Stdlib-only Python CLIs for managing remote infrastructure from Claude Code — Hermes Agent, Coolify, Hetzner Cloud, OpenRouter, Langfuse, Railway. Every plugin is a single-file CLI with zero dependencies; all usable standalone outside Claude Code too."
+    "description": "Stdlib-only Python CLIs that cut the tool-call and token cost of driving third-party infrastructure APIs from an AI agent. Every plugin is a single-file CLI with zero dependencies; all usable standalone outside Claude Code too."
   },
   "plugins": [
     {
@@ -37,6 +37,11 @@
       "name": "railway-ops",
       "source": "./railway-ops",
       "description": "Read-first Railway CLI wrapper — single-call env overviews (services, deploy status, errors, env var NAMES-only) for fast incident triage."
+    },
+    {
+      "name": "supabase-remote",
+      "source": "./supabase-remote",
+      "description": "Supabase CLI wrapper — strips the agent-envelope preamble from sql queries, single-call rls-audit across every table, gen-types into one command."
     }
   ]
 }
