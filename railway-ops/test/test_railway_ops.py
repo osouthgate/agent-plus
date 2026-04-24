@@ -236,6 +236,37 @@ class TestParseLogEntries(unittest.TestCase):
         self.assertTrue(entries[1].get("_non_json"))
 
 
+# ──────────────────────────── tool metadata ────────────────────────────
+
+
+class TestToolMeta(unittest.TestCase):
+    def test_injects_tool_field_on_dict(self) -> None:
+        wrapped = ro._with_tool_meta({"project": "x"})
+        self.assertIn("tool", wrapped)
+        self.assertEqual(wrapped["tool"]["name"], "railway-ops")
+        self.assertIn("version", wrapped["tool"])
+        # Tool field is first (dict insertion order) so agents see it up-top.
+        self.assertEqual(list(wrapped.keys())[0], "tool")
+        self.assertEqual(wrapped["project"], "x")
+
+    def test_non_dict_passes_through(self) -> None:
+        self.assertEqual(ro._with_tool_meta([1, 2, 3]), [1, 2, 3])
+        self.assertEqual(ro._with_tool_meta("str"), "str")
+        self.assertIsNone(ro._with_tool_meta(None))
+
+    def test_existing_tool_field_preserved(self) -> None:
+        payload = {"tool": {"name": "other", "version": "9.9"}, "data": 1}
+        wrapped = ro._with_tool_meta(payload)
+        # Don't overwrite — caller already set it.
+        self.assertEqual(wrapped["tool"]["name"], "other")
+
+    def test_plugin_version_reads_manifest(self) -> None:
+        # Version should match what's in plugin.json; if manifest missing, 'unknown'.
+        v = ro._plugin_version()
+        self.assertIsInstance(v, str)
+        self.assertNotEqual(v, "")
+
+
 # ──────────────────────────── pg log classification ────────────────────────────
 
 

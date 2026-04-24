@@ -39,6 +39,7 @@ Hard safety rules:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import re
@@ -46,7 +47,42 @@ import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any, Callable, Optional
+
+
+# ──────────────────────────── tool identity ────────────────────────────
+# Every JSON payload this tool emits carries a top-level `tool: {name, version}`
+# field so agents can self-diagnose version drift from the output alone — no
+# extra subprocess call needed. Version is read from the plugin manifest at
+# runtime so bumping plugin.json automatically flows through here.
+
+TOOL_NAME = "railway-ops"
+
+
+@functools.lru_cache(maxsize=1)
+def _plugin_version() -> str:
+    """Read the plugin version from `.claude-plugin/plugin.json` relative to
+    this file. Returns 'unknown' on any error — never raises."""
+    try:
+        manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return str(data.get("version", "unknown"))
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+
+
+def _tool_meta() -> dict[str, str]:
+    return {"name": TOOL_NAME, "version": _plugin_version()}
+
+
+def _with_tool_meta(payload: Any) -> Any:
+    """Inject `tool: {name, version}` at the top of a dict payload. Pass-through
+    for non-dict payloads (list, str, None) so single-value responses stay the
+    shape they were."""
+    if isinstance(payload, dict) and "tool" not in payload:
+        return {"tool": _tool_meta(), **payload}
+    return payload
 
 # ──────────────────────────── constants ────────────────────────────
 
@@ -966,10 +1002,11 @@ def die(msg: str) -> None:
 
 
 def emit(data: Any, pretty: bool) -> None:
+    wrapped = _with_tool_meta(data)
     if pretty:
-        print(json.dumps(data, indent=2, default=str))
+        print(json.dumps(wrapped, indent=2, default=str))
     else:
-        print(json.dumps(data, default=str))
+        print(json.dumps(wrapped, default=str))
 
 
 def _resolve_cli_env(args: argparse.Namespace) -> None:
@@ -1067,6 +1104,66 @@ def cmd_errors(args: argparse.Namespace) -> None:
     }, args.pretty)
 
 
+def cmd_build_logs(args: argparse.Namespace) -> None:
+    """Explicit build-log fetch for a failed deploy.
+
+    Resolution order for the target deploy:
+      1. --deployment <id> if passed.
+      2. Most recent FAILED/CRASHED/ERRORED deploy in the service's history.
+      3. Most recent deploy, regardless of status (useful for SUCCESSful deploys
+         whose build output you still want to see).
+
+    Needs RAILWAY_API_TOKEN for steps 2 and 3 (deploy resolution via GraphQL).
+    If you already know the deployment ID, pass --deployment and no token is
+    required — just a `railway logs --deployment <id>` call.
+    """
+    check_prereqs()
+    _resolve_cli_env(args)
+
+    deployment_id: Optional[str] = getattr(args, "deployment", None)
+    target_deploy: Optional[dict[str, Any]] = None
+
+    if not deployment_id:
+        status = get_status()
+        env_id = _resolve_environment_id(status, args.env)
+        svc = next(
+            (s for s in list_services(args.env)
+             if (s.get("name") or "").lower() == args.service.lower()),
+            None,
+        )
+        if not svc:
+            die(f"service {args.service!r} not found in env "
+                f"{args.env or '<linked>'}")
+        history = fetch_deploy_history(svc.get("id"), env_id) or []
+        if not history:
+            die("could not fetch deploy history — set RAILWAY_API_TOKEN or "
+                "pass --deployment <id> explicitly")
+        # Prefer the most recent failure; fall back to most recent regardless.
+        failed = next(
+            (d for d in history
+             if (d.get("status") or "").upper() in _DEPLOY_FAILURE_STATUSES),
+            None,
+        )
+        target_deploy = failed or history[0]
+        deployment_id = target_deploy.get("id")
+        if not deployment_id:
+            die("deploy history returned no deployment id")
+
+    raw = fetch_deployment_logs(deployment_id, lines=args.lines)
+    entries = parse_log_entries(raw)
+    tail, stats = _bucket_build_log(entries, tail_cap=args.lines)
+    emit({
+        "service": args.service,
+        "env": args.env or "<linked>",
+        "deployment": _slim_deploy(target_deploy) if target_deploy else {
+            "id": deployment_id, "status": None,
+        },
+        "lines": tail,
+        "errorKinds": top_n_kinds(stats["errorKinds"]),
+        "lineCount": stats["lineCount"],
+    }, args.pretty)
+
+
 def cmd_envs(args: argparse.Namespace) -> None:
     check_prereqs()
     _resolve_cli_env(args)
@@ -1123,6 +1220,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="railway-ops",
         description="Read-first wrapper around the Railway CLI for incident triage.",
     )
+    p.add_argument("--version", action="version",
+                   version=f"{TOOL_NAME} {_plugin_version()}")
     _add_globals(p)
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -1157,6 +1256,17 @@ def build_parser() -> argparse.ArgumentParser:
                           "RAILWAY_API_TOKEN; falls back to --since with a "
                           "warning if unavailable."))
 
+    bl = sub.add_parser("build-logs",
+                        help="build-stream logs for a failed (or specific) deploy")
+    _add_globals(bl)
+    bl.add_argument("service", help="Railway service name")
+    bl.add_argument("--env", help="Railway environment name")
+    bl.add_argument("--deployment",
+                    help=("Specific deployment id. If omitted, resolves to the "
+                          "most recent FAILED deploy (needs RAILWAY_API_TOKEN)."))
+    bl.add_argument("--lines", type=int, default=200,
+                    help="max build-log lines to emit (default: 200)")
+
     ev = sub.add_parser("envs", help="env var NAMES only for one service (values stripped)")
     _add_globals(ev)
     ev.add_argument("service")
@@ -1177,6 +1287,7 @@ DISPATCH = {
     "overview": cmd_overview,
     "status": cmd_status,
     "errors": cmd_errors,
+    "build-logs": cmd_build_logs,
     "envs": cmd_envs,
     "services": cmd_services,
     "projects": cmd_projects,
