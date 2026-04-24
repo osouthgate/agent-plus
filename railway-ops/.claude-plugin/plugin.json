@@ -1,7 +1,7 @@
 {
   "name": "railway-ops",
   "description": "Read-first wrapper around the Railway CLI — single-call env overviews (services, deploy status, recent errors/warnings, env var NAMES-only) for fast incident triage. Zero env-var-value leakage.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": {
     "name": "Oliver Southgate",
     "url": "https://github.com/osouthgate"

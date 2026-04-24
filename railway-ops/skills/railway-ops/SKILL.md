@@ -41,6 +41,8 @@ railway-ops errors <service> --env production --since 24h --limit 50 --pretty
 
 **"Is prod serving or broken?"** — check both `activeDeploy` AND `latestDeploy`. `activeDeploy=SUCCESS` 23 hours ago + `latestDeploy=FAILED` 8 minutes ago means traffic is fine, someone just tried to ship and the build failed — completely different triage from "prod is down." If `activeDeploy` is `null`, the GraphQL path wasn't available (no `RAILWAY_API_TOKEN`) or the service has never had a successful deploy.
 
+**"Why did the failed deploy fail?"** — when `latestDeploy.status` is FAILED/CRASHED/ERRORED AND it's a different deploy from `activeDeploy`, the overview auto-includes a `buildLogTail` (last ~30 build-log lines), a `buildErrorKinds` fingerprint summary, and `buildLineCount` right on the `latestDeploy` object. One call tells the whole story: active is still serving, this newer attempt failed, here's why. Look at `buildErrorKinds` first — `"Build Failed: failed to compute cache key: ... not found": 1` pinpoints the Docker layer that broke without scrolling.
+
 **"Errors since my current deploy came up"** — `errors <service> --since-deploy` scopes to logs from the active deploy's `createdAt` onward, so you don't see noise from a previous version. Needs `RAILWAY_API_TOKEN`; falls back to `--since` with a stderr warning if unavailable.
 
 ## Commands
@@ -127,7 +129,15 @@ railway-ops projects --pretty
         "commitSha": "def456",
         "commitMessage": "hotfix: stop dropping relationship_evidence FK",
         "prNumber": 651,
-        "branch": "brockenhurst/hotfix/relationship-evidence-fk-race"
+        "branch": "brockenhurst/hotfix/relationship-evidence-fk-race",
+        "buildLogTail": [
+          { "timestamp": "...", "message": "[err] [builder 4/6] COPY package.json ./" },
+          { "timestamp": "...", "message": "[err] Build Failed: ... \"/package.json\": not found" }
+        ],
+        "buildErrorKinds": {
+          "Build Failed: failed to compute cache key: ... not found": 1
+        },
+        "buildLineCount": 42
       },
       "errors": [
         { "timestamp": "...", "level": "error", "message": "...", "module": "..." }

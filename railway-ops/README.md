@@ -11,9 +11,10 @@ Not a replacement for the Railway dashboard or CLI. This exists so an AI agent (
 **Measured wins**
 
 - `overview` fans out to every service in parallel (~8 worker threads): logs + deploy status + env var names per service, all in one call. A 5-service project resolves in **~8s** instead of **~40s** sequential.
-- Log lines are classified server-side — `error` / `warning` / other — deduped and capped at 20-most-recent per service. Claude sees structured buckets, not raw log blobs.
+- Log lines are classified server-side — `error` / `warning` / other — deduped and capped per service (default 20, configurable via `--limit`). Claude sees structured buckets, not raw log blobs.
 - **Env var values never touch output.** `railway variables` exposes values; this CLI parses them in `strip_env_values`, keeps names, drops the dict. A canary-value no-leak test asserts no value substring can appear in any output path. Designed specifically to prevent accidental leakage into AI agent transcripts.
 - **Read-only by design.** `railway up`, `railway redeploy`, and variable writes are not wrapped. If you need to write, use `railway` directly.
+- **JSON-first contract.** Every command emits a single JSON document on stdout. Field names are stable across releases (additive changes only). Human-readable output is opt-in via `--pretty`; the default is compact JSON for piping into `jq`, scripts, or agent tooling.
 
 ## Install
 
@@ -53,9 +54,14 @@ The CLI checks both at startup and exits with a clear message if either is missi
 
 ## Commands
 
+All commands emit JSON on stdout. `--pretty` switches to indented JSON for humans; omit it for compact output suitable for `jq` / pipelines.
+
 ```bash
 # One-call snapshot — project, env, services, deploy status, recent errors/warnings, env var NAMES
-railway-ops overview [--env production|staging] [--since 24h] [--pretty]
+# --service narrows the snapshot to a single service (focused triage).
+# --limit caps errors/warnings per service (default 20).
+railway-ops overview [--env production|staging] [--service <name>] \
+                     [--since 24h] [--log-lines 500] [--limit 20] [--pretty]
 
 # Current linked context (project/env/service + whoami)
 railway-ops status [--pretty]
@@ -73,13 +79,43 @@ railway-ops services [--env <name>] [--pretty]
 railway-ops projects
 ```
 
+## JSON contract
+
+`overview` emits a stable top-level shape:
+
+| Field        | Type            | Notes                                                                 |
+|--------------|-----------------|-----------------------------------------------------------------------|
+| `project`    | string          | Linked project name                                                   |
+| `projectId`  | string \| null  | Railway project id when available                                     |
+| `env`        | string          | Resolved environment, or `"<linked>"` when no `--env` is passed       |
+| `since`      | string          | The `--since` window used for log queries                             |
+| `filter`     | object \| null  | `{ "service": "<name>" }` when `--service` is passed, else `null`     |
+| `summary`    | object          | `{ services, failures, errors, warnings }` rollup across services     |
+| `services`   | array<object>   | Per-service snapshots: `name`, `status`, `errors`, `warnings`, `envVarNames` |
+
+Contract rules:
+
+- Fields listed above are guaranteed to be present (non-breaking additions allowed in future releases).
+- `summary` always returns all four counters, even when every value is `0`.
+- Env var *values* are never emitted — only `envVarNames`. Enforced by canary-value no-leak tests.
+- `--pretty` only affects whitespace; field names and nesting are identical to the compact output.
+
 ## Example output
 
 ```bash
 $ railway-ops overview --env production --pretty
 {
   "project": "loamdb",
+  "projectId": "proj-abc123",
   "env": "production",
+  "since": "24h",
+  "filter": null,
+  "summary": {
+    "services": 2,
+    "failures": 1,
+    "errors": 19,
+    "warnings": 1
+  },
   "services": [
     { "name": "api",      "status": "active", "errors": [], "warnings": [ ... 1 ... ], "envVarNames": [ ... ] },
     { "name": "postgres", "status": "FAILED", "errors": [ ... 19 ... ], "envVarNames": [ ... ] }
@@ -90,14 +126,20 @@ $ railway-ops overview --env production --pretty
 ## Architecture
 
 - Shells out to `railway` via `subprocess.run` with a 30s timeout per call.
-- Services queried in parallel via `multiprocessing.ThreadPool` (8 workers).
+- Services queried in parallel via `concurrent.futures.ThreadPoolExecutor` (8 workers).
 - Env var parsing isolated in `strip_env_values`, covered by canary-value no-leak tests.
-- Log classification is regex-based: `/\b(error|ERROR|FATAL|panic|exception|traceback)\b/` → errors, `/\b(warn|WARN|warning)\b/i` → warnings. Each bucket deduped and capped at 20 most-recent entries to keep output bounded.
+- Log classification is regex-based: `/\b(error|ERROR|FATAL|panic|exception|traceback)\b/` → errors, `/\b(warn|WARN|warning)\b/i` → warnings. Each bucket is deduped and capped at `--limit` most-recent entries (default 20) to keep output bounded.
 
 ## Tests
 
 ```bash
-python -m unittest discover test
+python -m unittest discover -s test -p "test_*.py"
 ```
 
-18 tests covering strip_env_values (including canary-value no-leak invariant), log classification, bucket dedupe+cap, and end-to-end snapshot shape with stubbed subprocess.
+33 tests covering:
+
+- `strip_env_values` (including canary-value no-leak invariants across object, list, and `KEY=VALUE` shapes).
+- Log classification, bucket dedupe + cap, and plain-text vs JSON log handling.
+- End-to-end snapshot shape with a stubbed `railway` subprocess runner.
+- **Schema contract tests** for `overview` JSON output: top-level keys, `summary` rollup math, `filter` narrowing (case-insensitive, empty-match), `bucket_cap` plumb-through, per-service key stability, and JSON round-trip safety.
+- Argparse contract: ensures `overview` exposes `--service` and `--limit` with stable defaults.

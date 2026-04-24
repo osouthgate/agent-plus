@@ -471,6 +471,112 @@ def fetch_env_var_names(service: str, env: Optional[str]) -> list[str]:
     return strip_env_values(out)
 
 
+def fetch_deployment_logs(deployment_id: str, *, lines: int = 300) -> str:
+    """Fetch logs for a specific deployment (both build and runtime streams).
+
+    Used primarily to pull the build-log tail for FAILED deploys. The Railway
+    CLI targets a deployment with `--deployment <id>`; for build failures this
+    returns only the build log since runtime never started.
+    """
+    if not deployment_id:
+        return ""
+    args = ["logs", "--deployment", deployment_id, "--json", "--lines", str(lines)]
+    rc, out, err = railway(args, timeout=30)
+    if rc != 0:
+        sys.stderr.write(
+            f"railway-ops: deployment logs for '{deployment_id}' failed: "
+            f"{err.strip() or out.strip()}\n"
+        )
+        return ""
+    return out
+
+
+def _slim_build_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Slim a build-log entry down to the triage-relevant bits."""
+    msg = str(entry.get("message") or entry.get("msg") or "").strip()
+    return {
+        "timestamp": entry.get("timestamp") or entry.get("time"),
+        "message": msg[:500],
+    }
+
+
+_DEPLOY_FAILURE_STATUSES = {"FAILED", "CRASHED", "ERRORED", "SKIPPED"}
+
+# Build logs fail in ways runtime logs don't — Docker "COPY failed", BuildKit
+# "cache key" errors, "not found", "exit code: <n>". Runtime ERROR_RE misses
+# most of these, so we use a broader regex specifically for the build stream.
+# Intentionally permissive: this only runs on build-log context, where noise
+# is low and false positives are cheap.
+_BUILD_FAILURE_RE = re.compile(
+    r"\b("
+    r"error|fatal|failed|failure|panic|exception|traceback|unhandled|"
+    r"cannot|denied|refused|unable|timeout|killed|"
+    r"exit(?:\s+code)?|not\s+found|no\s+such"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _bucket_build_log(entries: list[dict[str, Any]], *, tail_cap: int) -> tuple[
+        list[dict[str, Any]], dict[str, Any]]:
+    """Bucket build-log entries: collect every non-empty line into `tail`
+    (capped at the most-recent `tail_cap`), and fingerprint-count lines
+    matching `_BUILD_FAILURE_RE` into `errorKinds`. Returns (tail, stats).
+
+    Separate from `_bucket_with_totals` because build logs have different
+    failure keywords and don't need dedupe (build output is already linear).
+    """
+    tail: list[dict[str, Any]] = []
+    error_kinds: dict[str, int] = {}
+    line_count = 0
+    for entry in entries:
+        msg = str(entry.get("message") or entry.get("msg") or "").strip()
+        if not msg:
+            continue
+        line_count += 1
+        tail.append({
+            "timestamp": entry.get("timestamp") or entry.get("time"),
+            "message": msg[:500],
+        })
+        if _BUILD_FAILURE_RE.search(msg):
+            fp = fingerprint_message(msg)
+            if fp:
+                error_kinds[fp] = error_kinds.get(fp, 0) + 1
+    return tail[-tail_cap:], {"errorKinds": error_kinds, "lineCount": line_count}
+
+
+def enrich_deploy_with_build_logs(deploy: Optional[dict[str, Any]],
+                                  *, tail: int = 30) -> Optional[dict[str, Any]]:
+    """If `deploy` is in a failure state, mutate it in-place to add:
+      - `buildLogTail`: last `tail` entries as slim dicts
+      - `buildErrorKinds`: fingerprint→count across all build-log errors (pre-tail)
+      - `buildLineCount`: total classified log lines pulled (signal for "did we
+        get any logs at all")
+
+    Safe no-op if deploy is None, has no id, or isn't in a failure state.
+    Failures in log fetch are swallowed — enrichment is best-effort.
+    """
+    if not deploy:
+        return deploy
+    status = (deploy.get("status") or "").upper()
+    if status not in _DEPLOY_FAILURE_STATUSES:
+        return deploy
+    deploy_id = deploy.get("id")
+    if not deploy_id:
+        return deploy
+    raw = fetch_deployment_logs(deploy_id, lines=300)
+    if not raw:
+        return deploy
+    entries = parse_log_entries(raw)
+    tail_entries, stats = _bucket_build_log(entries, tail_cap=tail)
+    if not tail_entries:
+        return deploy
+    deploy["buildLogTail"] = tail_entries
+    deploy["buildErrorKinds"] = top_n_kinds(stats["errorKinds"])
+    deploy["buildLineCount"] = stats["lineCount"]
+    return deploy
+
+
 # ──────────────────────────── GraphQL deploy history ────────────────────────────
 #
 # `railway service status --all --json` only returns ONE deployment per service
@@ -658,6 +764,18 @@ def build_service_snapshot(
             latest_deploy = slim_latest
         if slim_active:
             active_deploy = slim_active
+
+    # If the latest attempt failed AND it's distinct from what's actually
+    # serving, auto-include a build-log tail + errorKinds so the overview
+    # carries everything needed to triage a failed deploy in one call. This
+    # is specifically the UI "ACTIVE (23h ago) + FAILED (8m ago)" case.
+    latest_failed_and_newer = (
+        (latest_deploy.get("status") or "").upper() in _DEPLOY_FAILURE_STATUSES
+        and (active_deploy is None
+             or active_deploy.get("id") != latest_deploy.get("id"))
+    )
+    if latest_failed_and_newer:
+        enrich_deploy_with_build_logs(latest_deploy, tail=30)
 
     return {
         "name": name,

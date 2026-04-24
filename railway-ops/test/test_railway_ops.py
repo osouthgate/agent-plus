@@ -313,6 +313,72 @@ class TestPostgresLogClassification(unittest.TestCase):
         self.assertEqual(len(errors), 1)
 
 
+# ──────────────────────────── build log enrichment ────────────────────────────
+
+
+class TestEnrichDeployWithBuildLogs(unittest.TestCase):
+    """When latestDeploy is FAILED and distinct from activeDeploy, the overview
+    should auto-include a build-log tail + errorKinds so one call tells the
+    whole story — no second invocation needed."""
+
+    def test_no_enrichment_for_success_deploy(self) -> None:
+        deploy = {"id": "d1", "status": "SUCCESS"}
+        result = ro.enrich_deploy_with_build_logs(deploy)
+        self.assertNotIn("buildLogTail", result)
+        self.assertNotIn("buildErrorKinds", result)
+
+    def test_no_enrichment_for_none(self) -> None:
+        self.assertIsNone(ro.enrich_deploy_with_build_logs(None))
+
+    def test_no_enrichment_for_missing_id(self) -> None:
+        deploy = {"status": "FAILED"}
+        result = ro.enrich_deploy_with_build_logs(deploy)
+        self.assertNotIn("buildLogTail", result)
+
+    def test_failed_deploy_gets_build_log_tail(self) -> None:
+        # Mirror the real Railway build failure shape — lines prefixed with
+        # [err] from the builder, culminating in the "Build Failed" line.
+        build_logs = "\n".join([
+            json.dumps({"timestamp": "t1", "message": "[err] [builder 3/6] COPY packages/ packages/"}),
+            json.dumps({"timestamp": "t2", "message": "[err] [builder 4/6] COPY package.json ./"}),
+            json.dumps({
+                "timestamp": "t3",
+                "message": (
+                    '[err] Build Failed: failed to compute cache key: failed to '
+                    'calculate checksum of ref abc::def: "/package.json": not found'
+                ),
+            }),
+        ])
+        stub = StubRunner({
+            ("logs", "--deployment", "d-failed", "--json", "--lines", "300"): (0, build_logs, ""),
+        })
+        deploy = {"id": "d-failed", "status": "FAILED"}
+        with patch.object(ro, "run_cmd", stub):
+            result = ro.enrich_deploy_with_build_logs(deploy, tail=10)
+        self.assertIn("buildLogTail", result)
+        self.assertIn("buildErrorKinds", result)
+        self.assertEqual(result["buildLineCount"], 3)
+        # All three lines classified as errors (contain "err" / "Build Failed").
+        # errorKinds should surface the cache-key failure fingerprint.
+        self.assertGreater(len(result["buildErrorKinds"]), 0)
+        # The final "Build Failed" line should be in the tail somewhere.
+        tail_messages = [e["message"] for e in result["buildLogTail"]]
+        self.assertTrue(
+            any("Build Failed" in m for m in tail_messages),
+            f"Build Failed line missing from tail: {tail_messages}",
+        )
+
+    def test_empty_build_logs_safe(self) -> None:
+        # `railway logs --deployment` returns empty for a deploy that never
+        # reached any builder output (e.g. queue eviction). Enrichment must
+        # not crash, must not add empty fields.
+        stub = StubRunner({})  # empty — unknown-call fallback is (0, "", "")
+        deploy = {"id": "d-skipped", "status": "FAILED"}
+        with patch.object(ro, "run_cmd", stub):
+            result = ro.enrich_deploy_with_build_logs(deploy)
+        self.assertNotIn("buildLogTail", result)
+
+
 # ──────────────────────────── deploy splitting ────────────────────────────
 
 
