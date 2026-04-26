@@ -197,5 +197,81 @@ This is the only piece of "observability" that survives the principle triage: it
 
 ---
 
+## Tooling ideas surfaced from session mining
+
+Side-channel input. The user asked: "useful tools / scripts / hooks / skills we can create that would really help people (myself included)? E.g. session-start hooks could auto-load project data within a `.agent-plus` folder (Supabase, Vercel, Railway overviews) so we have local details available from day one. We could put a pointer from `CLAUDE.md` / `AGENTS.md` to this overview explaining the tech stack and IDs and structure of things."
+
+To inform this, an Explore agent mined 6 Claude Code session transcripts (`/root/.claude/projects/-home-user-agent-plus/*.jsonl`, ~700KB each) for repeated tool-call patterns. It found ~67 grep operations and ~60 directory-discovery operations across 6 sessions, most of them collapsible. Synthesised into the user's framing, the high-value ideas are:
+
+### T-1 — `.agent-plus/` workspace + session-start manifest hook (highest leverage)
+
+**Pain.** Every session begins with the agent re-discovering: which plugins are installed, which env vars are set, what the project's Supabase project ID is, which Vercel project corresponds to this folder, which Railway services exist, which branch we're on. Identical `find`, `ls`, `git status`, and per-plugin `*-remote ... list` calls every cold start.
+
+**Proposal.** A `.agent-plus/` directory at the repo root with one or more JSON files:
+
+- `.agent-plus/manifest.json` — installed plugins, versions, available skills, current branch.
+- `.agent-plus/services.json` — for each plugin the user opts in, the *resolved* identity for this project (Supabase project ref, Vercel project ID, Railway env names, GitHub repo, Linear team ID). Values cached locally; secrets stay out.
+- `.agent-plus/env-status.json` — which required env vars are set (names only), which are missing.
+
+Populated by a new `agent-plus init` command (one-off discovery: hits each configured plugin once, caches answers). Refreshed by `agent-plus refresh` (idempotent). A SessionStart hook reads these files and surfaces them in the agent's first turn so day-one context is correct without rediscovery.
+
+**CLAUDE.md / AGENTS.md pointer.** A new `## Project services` block in `AGENTS.md` (or the gstack-generated `CLAUDE.md` if installed) reads from `.agent-plus/services.json` so the agent learns "this repo's Supabase project is `abc`, Vercel project is `my-app`, Railway env is `production`" without burning tokens to find it.
+
+**Pattern reinforced.** P1 (aggregate), P2 (resolve by name), P5 (strip values — only NAMES and IDs land in the manifest, never secrets). High agent-token-savings.
+
+### T-2 — `git-context` skill / aggregator
+
+**Pain.** Every session: `git status && git branch --show-current && git log --oneline -10` (7 occurrences across the mined sessions, sometimes more). Sequential, parses-prone, rebuilds context the harness already has.
+
+**Proposal.** Skill `git-context` (or a flag on the SessionStart hook) returns one JSON: `{branch, isDirty, lastCommits[], stagedFiles, unstagedFiles, upstream, divergence}`. Stdlib subprocess wrapper around `git status --porcelain=v2 --branch` + `git log --oneline -n N`. ~80 lines.
+
+**Pattern reinforced.** P1 (aggregate), P4 (`--json` everywhere).
+
+### T-3 — `envcheck` validator
+
+**Pain.** Mined transcripts show 21+ references to credentials/tokens; agent sometimes proceeds with a misconfigured env var and discovers the failure mid-task. No central validation.
+
+**Proposal.** `agent-plus envcheck` walks every installed plugin's required env-var prefix list, verifies presence + format (length, prefix sanity), reports missing names — names only, never values. Output goes into `.agent-plus/env-status.json` so the SessionStart hook can warn at turn 1. Reuses the per-plugin "missing-config errors point to both `.env` and `~/.claude/settings.json`" convention.
+
+**Pattern reinforced.** P5 (no value leakage), P7 (self-diagnosing).
+
+### T-4 — Plugin checksum / drift hook
+
+**Pain.** Plugins update; the agent uses a stale CLI signature; failure mode is silent (a flag the agent thought existed silently no-ops, or a renamed subcommand returns "command not found"). No early-warning.
+
+**Proposal.** SessionStart hook compares `.agent-plus/plugin-checksums.json` against the actual `bin/<plugin>` files; if drift, regenerates and prints a one-line "plugin X updated since last session — re-read SKILL.md if behaviour changed" notice.
+
+**Pattern reinforced.** P6 (self-diagnosing), guardrail.
+
+### T-5 — `agent-plus list` / `agent-plus search` (discoverability)
+
+Already proposed in Phase 3.5 — restated here because session mining confirmed the cost: 67 grep operations across 6 sessions, ~60% of which were the agent searching the agent-plus tree to figure out what's available. A discoverability tool collapses that to one call.
+
+**Pattern reinforced.** P1 (aggregate), P2 (resolve by name).
+
+### T-6 — `repo-context` (universal primitive, also surfaced under Phase 3.5 as `repo-analyze`)
+
+The session-mined version of this plugin includes the cwd-specific bits: file-tree, language mix, framework detection, top-level deps, entrypoints, README highlights, **plus** the contents of `.agent-plus/services.json` if present. Same file as Phase 3.5's `repo-analyze` — one tool, two entry points (call it from the SessionStart hook for context bootstrapping, or call it ad-hoc when the agent lands in an unfamiliar repo).
+
+### T-7 — Multi-step `curl|jq` collapser plugin
+
+**Pain.** The agent still hand-rolls `curl ... | jq` chains for any service that doesn't have a plugin yet. Same pattern, recurring.
+
+**Proposal.** Not actually a new plugin — better captured as a *guideline* for which APIs to wrap next. Use this section as a backlog feeder: track recurring `curl|jq` patterns from session mining as candidates for the next plugin.
+
+### T-8 — `agent-plus doctor` (consolidated diagnostic)
+
+Bundles T-3 (envcheck), T-4 (drift), T-2 (git-context), and a `--json` summary of `.agent-plus/manifest.json`. One command answers "why is my agent struggling on this repo" without running four separate checks.
+
+**Pattern reinforced.** P1 (aggregate), P7 (self-diagnosing).
+
+### Two ideas explicitly *not* taken from session mining
+
+- **"Plugin registry shipped to agent as context"** (Explore agent's idea #8): rejected. Claude Code's harness already loads SKILL.md per plugin on demand. Pre-loading the whole registry is the kind of "context-bloat" the project's Pattern 5 explicitly fights.
+- **"Workspace bootstrap that mkdir's planning folders"** (idea #4): folded into T-1 as a side-effect of `agent-plus init` rather than a standalone tool.
+
+---
+
+
 
 
