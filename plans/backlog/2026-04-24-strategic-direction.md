@@ -313,6 +313,66 @@ Items below are sequenced by `effort × leverage` with the smallest, highest-lev
 
 ---
 
+## NOT-in-scope (deferred)
+
+Each item below was raised in the original review and is *intentionally* not on the backlog. One-line rationale per item.
+
+- **Workflow engine.** Duplicates Claude Code's job; needs an LLM in the loop, breaking determinism. (E-1.)
+- **Persistent state layer.** Stateless tools are the value prop; state belongs to the harness. (E-2.)
+- **Execution loop.** Same. (E-3.)
+- **Tool governance / sandboxing.** Wrong layer; harness handles it. (E-4.)
+- **Replay / debug / workflow versioning.** Stateless tools = command + args is the replay key; nothing to debug beyond the JSON output. (E-7.)
+- **Multi-agent orchestration.** Out of scope for a tool layer; revisit only inside a hypothetical separate runtime repo, never inside agent-plus.
+- **Shipping as managed SaaS.** Premature. Revisit once at least 5 universal primitives are live and someone-else-pays-for-managed becomes a defensible question.
+- **Plugin "permissions plane" inside `bin/`.** Permissions are a harness concern (`~/.claude/settings.json`, hooks). The plugin's job is to do one thing well, not to gate itself.
+- **Generic SKILL-driven workflows shipped from the repo.** Skills are per-plugin (`<plugin>/skills/<plugin>/SKILL.md`); they teach Claude when to reach for *that plugin's* script. Cross-cutting workflow skills belong in gstack, not here.
+
+---
+
+## Cross-phase themes
+
+A few observations sit across CEO / Eng / DX phases — surfacing them here so they're not lost in the per-section noise.
+
+1. **The `--output` / `payloadShape` envelope is the single biggest leverage point.** Three independent phases (Eng E-6, DX envelope-contract, Backlog B-DOC-1) all converge on it. Recommend treating it as the next surface to standardise — both because it's already implemented and because every future plugin extends it.
+2. **`.agent-plus/` is the natural home for *non-plugin* state.** Everything in the Tooling-Ideas section that needs to remember something across calls (manifest, services, env-status, plugin-checksums) lives there. Keeps individual plugins stateless while giving the *workspace* a memory layer that's still deterministic (just JSON files on disk).
+3. **The repo's principles hold up under attack.** The original review recommended seven structural changes. Five collapse cleanly under documented principles (auto-decided REJECT in Eng review). The two PARTIAL accepts (telemetry, schema-aware envelope) actually reinforce existing principles instead of replacing them. This is a strong signal that the repo's identity as written is internally consistent and not just rationalisation.
+4. **Discoverability is the silent multiplier.** Today's friction isn't *building* one more plugin — it's *finding* the one that already solves your problem. `B-DISCO-1` is small, low-risk, and compounds the value of every plugin already shipped.
+5. **Token-savings telemetry is the only honest answer to "is this useful to others?"** Today the README's table is convincing because the user measured it. The same standard should apply to anything proposed here. `B-TEL-1` is the cheapest way to make every future claim falsifiable.
+
+---
+
+## Decision audit trail
+
+Every auto-decided issue in this plan, in one table, so a future reviewer (or a future `/autoplan` re-run) can audit the reasoning without reconstructing it.
+
+| ID | Phase | Issue | Decision | Classification | Principle | Rationale |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `D-1` | 1 (CEO) | Adopt agent-runtime path? | REJECT | Strategic | P-IDENTITY, P-CLAUDE-CODE-IS-THE-RUNTIME | Duplicates Claude Code; commoditising market segment. |
+| `D-2` | 1 (CEO) | Adopt tool-layer path? | ACCEPT | Strategic | P-IDENTITY, P-DETERMINISM-OVER-FEATURES | Reinforces every existing principle. |
+| `D-3` | UC-1 | Force user gate on direction? | YES | User-challenge | n/a | Original review's signal is non-zero; user must own the call. |
+| `D-4` | UC-2 | Force user gate on broad-utility ambition? | YES | User-challenge | P-COMMUNITY-AMBITION | Maintenance tax is real; user must opt in. |
+| `D-5` | 3 (Eng) | Workflow engine | REJECT | Architectural | P-DETERMINISM | E-1. |
+| `D-6` | 3 (Eng) | State layer | REJECT | Architectural | P-DETERMINISM | E-2. |
+| `D-7` | 3 (Eng) | Execution loop | REJECT | Architectural | P4 (DRY w/ harness) | E-3. |
+| `D-8` | 3 (Eng) | Tool governance / sandbox | REJECT | Architectural | Wrong layer | E-4. |
+| `D-9` | 3 (Eng) | Observability of agent | PARTIAL → opt-in tool telemetry | Architectural | P6 + P1 | E-5. **TASTE DECISION.** |
+| `D-10` | 3 (Eng) | Validation gates | PARTIAL → schema-aware envelope | Architectural | P7 | E-6. |
+| `D-11` | 3 (Eng) | Workflow versioning / replay | REJECT | Architectural | Pragmatic | E-7. |
+| `D-12` | 3 (Eng) | Tool permissioning | DEFER | Architectural | Wrong layer | E-8. |
+| `D-13` | 3 (Eng) | Audit trail | DEFER | Architectural | Already partial | E-9. |
+| `D-14` | 3.5 (DX) | Universal-primitive plugins (5 candidates) | ACCEPT (gated) | Product | P-COMMUNITY-AMBITION | Shipped only if user confirms premise. |
+| `D-15` | 3.5 (DX) | Discoverability layer (`agent-plus list/search`) | ACCEPT | Product | P1, P2 | Tiny effort, compounds existing plugin value. |
+| `D-16` | 3.5 (DX) | Envelope-contract documentation | ACCEPT | DX | P7 | Implicit → explicit; no code change. |
+| `D-17` | 3.5 (DX) | Token-savings telemetry as north star | ACCEPT | DX | P6 | Makes future claims falsifiable. |
+| `D-18` | T (mining) | `.agent-plus/` workspace + SessionStart hook | ACCEPT | Product | P1, P2, P5 | High leverage, low blast radius. |
+| `D-19` | T (mining) | Plugin-registry pre-load to agent | REJECT | Product | P5 (anti-bloat) | Harness already lazy-loads SKILL.md. |
+| `D-20` | T (mining) | Workspace-bootstrap as standalone tool | FOLD INTO D-18 | Product | n/a | Side-effect of `agent-plus init`. |
+
+**Counts.** 5 ACCEPT, 1 ACCEPT (gated), 8 REJECT (auto), 2 PARTIAL ACCEPT, 2 DEFER, 2 USER GATES, 1 FOLD-IN. **Of 20 decisions, 16 are auto-decided on documented principles; 2 require user premise confirmation; 1 is a flagged TASTE DECISION (`D-9`).**
+
+---
+
+
 
 
 
