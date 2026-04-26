@@ -127,4 +127,75 @@ Each of the original review's "evolution" recommendations is triaged through the
 
 ---
 
+## Phase 3.5 — DX Review ("useful to other people?")
+
+The new strategic question from the counter-review's extension. Treated as its own phase because it's the only place the plan's ranked output changes shape based on a user decision (P-COMMUNITY-AMBITION).
+
+### Plugin reusability triage
+
+Going through each of the ten plugins in `.claude-plugin/marketplace.json` and asking: "if a stranger landed on this repo today, would this plugin be useful to them without changes?"
+
+| Plugin | Reusable for whom? | Verdict |
+| :--- | :--- | :--- |
+| `github-remote` | Anyone with a GitHub workflow | **Universal** |
+| `vercel-remote` | Any Vercel user | **Universal** |
+| `linear-remote` | Any Linear user | **Universal** |
+| `supabase-remote` | Any Supabase user | **Universal** |
+| `langfuse-remote` | Any Langfuse user | **Universal** |
+| `openrouter-remote` | Any OpenRouter user | **Universal** |
+| `coolify-remote` | Coolify users (smaller PaaS audience) | **Niche but well-scoped** |
+| `railway-ops` | Railway users | **Niche but well-scoped** |
+| `hcloud-remote` | Hetzner Cloud users | **Niche but well-scoped** |
+| `hermes-remote` | Hermes Agent operators (very small group) | **Personal / overlapping users only** |
+
+**Count: 6 universal-with-stack-match, 4 niche-but-clean, 0 generic primitives.** The structural gap between "personal infra layer" and "stdlib for AI coding agents" is *the missing universal-primitive tier* — plugins that help an agent on *any* codebase, regardless of which third-party APIs that codebase uses.
+
+### Time-to-hello-world for a new user
+
+- Install one plugin you already need: ~5 min (find marketplace, run `claude plugin install <name>@agent-plus`, set 1–2 env vars).
+- Discover which of the ten plugins applies to your stack: ~30 min (read root README's table, click into each plugin's README).
+
+The friction sits in **discoverability**, not in any individual plugin's setup. This matters because adding more plugins makes the discoverability problem worse unless we add a lookup tool.
+
+### Five universal-primitive plugins worth proposing
+
+Each of these would help the user's *own* agent today (so it passes the "would I use this tomorrow?" filter) and is also broadly useful (so it passes the side-effect-of-broad-usefulness filter). Each follows the established envelope contract: stdlib Python, single file, `bin/`, `skills/`, `--json`, `--output PATH`, `--version`, `tool: {name, version}` envelope.
+
+1. **`repo-analyze`** — file-tree, language mix, framework detection, build-tool detection, top-level deps, entrypoints, README highlights. *Justification: today's "tell me about this repo" expands to 50+ Read tool calls before the agent has a working mental model. One JSON blob would replace that.* Reinforces Pattern 1 (aggregate). High agent-token-savings ceiling.
+2. **`dep-graph`** — language-aware import graph + reverse-import lookup (`dep-graph imports-of src/foo.ts`, `dep-graph imported-by src/foo.ts`). *Replaces ad-hoc grep loops that the agent rebuilds from scratch every session.* Reinforces Pattern 1. Medium agent-token-savings, high tool-call savings.
+3. **`diff-summary`** — structured classification of an open diff: file-level role labels (test/config/doc/source), risk-tier per file, public-API-touched flag, lines-added/removed/moved. *Lets the agent triage a PR or a working tree without reading every file.* Reinforces Pattern 1 + Pattern 4. Direct fit for code-review and pre-commit flows.
+4. **`log-parse`** — generic stack-trace + error-bucket extraction across formats (Python tracebacks, Node `Error: ... at ...`, JSON-line logs, plain text). Outputs ranked errors with frequencies and sample line-numbers. *Today the agent reads raw log files and reinvents the parsing in-prompt every time.* Reinforces Pattern 1 + Pattern 5 (strip noise). Direct fit alongside existing `railway-ops build-logs`.
+5. **`schema-extract`** — DB / API schema introspection from any of `*.sql`, `openapi.yaml`, `*.graphql`, Prisma, Drizzle, into one envelope. *Today the agent reads each of these files differently. A normalised envelope means downstream tools (codegen, doc gen, query helpers) get one input shape.* Reinforces Pattern 1 + Pattern 7 (self-diagnosing). Synergy with `supabase-remote gen-types`.
+
+### Discoverability layer
+
+`agent-plus list` and `agent-plus search "<keyword>"`, both reading from `.claude-plugin/marketplace.json`. Without this, growing the collection has diminishing returns — users can't find what they don't know exists. Tiny wrapper script, ~150 lines.
+
+Stretch: `agent-plus search "deploy log"` returns ranked plugins whose READMEs hit the keyword, with the matched section quoted. Deterministic ranking (BM25 over README text, no LLM call).
+
+### Standardised envelope as the public contract
+
+The existing `_with_tool_meta()` helper (consistent across `bin/coolify-remote:75-81`, `bin/github-remote`, `bin/hcloud-remote`, `bin/railway-ops`) is a **de facto contract** — every plugin's JSON output has `tool: {name, version}` plus `--output` payload-offload semantics plus `payloadShape`. Today this is implicit: documented in commits, inconsistently surfaced in READMEs.
+
+Promote it to an explicit, documented public contract. New section in root `README.md` — "Envelope Contract" — that says:
+
+- Every plugin's `--json` output is a JSON object with these top-level keys: `tool`, `payload` (or, when `--output` is used, `payloadPath` and `payloadShape`).
+- `tool.name` and `tool.version` are read from the plugin's `plugin.json` at runtime.
+- `--output PATH` writes the payload to disk and returns a shape descriptor instead of the payload, so large blobs never touch the agent transcript.
+- `--shape-depth N` controls how deep the shape descriptor recurses.
+- `--version` prints `tool.version` and exits 0.
+
+This becomes the surface third parties can rely on, the surface the proposed `agent-plus list` / `dep-graph` / `repo-analyze` plugins all extend, and the surface a future telemetry layer keys off.
+
+### Token-savings telemetry as north star
+
+Opt-in `AGENT_PLUS_TELEMETRY=langfuse` env var. When set, every plugin run emits one Langfuse trace via the existing `langfuse-remote` plugin: `{cmd, args, exit_code, payload_bytes, duration_ms, started_at}`. Aggregating these answers the question "how useful are these plugins to other people" *empirically* instead of by claim.
+
+Off by default — privacy default is no network egress beyond the API the plugin already calls. `--telemetry off` overrides the env var. Same pattern as the existing `--env-file` precedence rule.
+
+This is the only piece of "observability" that survives the principle triage: it observes *the tool*, not *the agent*. Aligns with E-5 PARTIAL.
+
+---
+
+
 
