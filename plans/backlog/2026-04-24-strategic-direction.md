@@ -372,6 +372,77 @@ Every auto-decided issue in this plan, in one table, so a future reviewer (or a 
 
 ---
 
+## Pre-Gate Verification
+
+Mirrors the autoplan SKILL's verification step — confirms each phase's required outputs were produced before asking the user to ratify the plan.
+
+- [x] Phase 0 — premises listed, gate clearly marked, scope flags set (UI no, DX yes).
+- [x] Phase 1 (CEO) — strategic questions answered, alternatives dismissed, competitive risks named.
+- [x] User Challenges — both decisions surfaced with cost-of-being-wrong each way.
+- [x] Phase 3 (Eng) — every original-review recommendation triaged through the principles, decision codes assigned.
+- [x] Phase 3.5 (DX) — reusability triage complete (6/4/0), universal-primitive candidates enumerated, discoverability layer scoped, envelope contract scoped, telemetry scoped.
+- [x] Tooling ideas — session-mining ideas synthesised into 8 candidates + 2 explicit rejections.
+- [x] Ranked backlog — items sequenced, sequencing rule explicit, top-3 callout included.
+- [x] NOT-in-scope — every dropped item has a one-line rationale.
+- [x] Decision audit trail — table closes the loop on every auto-decision.
+- [x] Restore-point integrity — verbatim review texts preserved as Appendix A and B side-car files.
+- [x] Premise gate visibility — Phase 0 contains a "PREMISE GATE" callout naming the two premises that need confirmation.
+- [x] No drift hook trigger — `.claude/hooks/check-readme-drift.sh` only fires on `<plugin>/bin/*` or `<plugin>/skills/*/SKILL.md` changes; this branch only adds top-level `plans/` files. Confirmed by reading the hook before the first commit.
+
+---
+
+## Final Approval Gate
+
+The user-facing summary block, in autoplan's exact shape.
+
+> **Plan: Strategic-Direction Backlog for agent-plus**
+>
+> **Total decisions:** 20.
+>
+> **User challenges (require your call):**
+>
+> 1. **UC-1** — Path A (agent runtime) vs Path B (tool layer). *Recommendation: Path B.* Confirm or override.
+> 2. **UC-2** — Is broad usefulness a goal or a free side-effect of building primitives you already want? *Recommendation: side-effect (don't build a plugin you wouldn't use tomorrow).* Confirm or override.
+>
+> **Taste decisions (close calls flagged for visibility):**
+>
+> 1. **D-9** — Opt-in `AGENT_PLUS_TELEMETRY=langfuse`. Cheap to ship; arguably-pure telemetry observes *the tool*, not *the agent*. Reasonable to defer if you want zero network egress as the lifelong default.
+>
+> **Auto-decided on documented principles:** 16 / 20 (rejection of runtime layer recs E-1..E-4, E-7; partial acceptance of E-5/E-6; rejection of plugin-registry-preload and absorption of mkdir-bootstrap).
+>
+> **Top three to ship next (if approved):**
+>
+> 1. `B-DOC-1` — document the envelope contract in root README.
+> 2. `B-INIT-1..3` + `B-HOOK-1` — `.agent-plus/` workspace + SessionStart hook for day-one project context.
+> 3. `B-PLUGIN-1` — `repo-analyze`, the highest-leverage universal primitive (gated on UC-2 = side-effect).
+>
+> **Out-of-scope, deferred:** workflow engine, state layer, execution loop, tool governance, replay/debug, multi-agent orchestration, managed SaaS, plugin permissions plane.
+>
+> **Your options:**
+>
+> - **Approve** — ratify both user challenges as recommended; I'll start executing the top three in order.
+> - **Override on UC-1** — pick Path A; I'll re-run the plan with that as the premise (most of the backlog will change).
+> - **Override on UC-2** — pick "personal-only"; I'll drop `B-PLUGIN-1..5` from the ranked backlog and rerank.
+> - **Interrogate** — point at any specific decision (`D-9`, etc.) and I'll defend it or revise it.
+> - **Revise** — name a section that's wrong / missing / over-confident; I'll fix it before anything ships.
+
+---
+
+## Appendices
+
+- **Appendix A — Original Strategic Review** (verbatim, restore-point #1) → [`./2026-04-24-strategic-direction.appendix-a.md`](./2026-04-24-strategic-direction.appendix-a.md). Text preserved unmodified for `/autoplan` re-runnability.
+- **Appendix B — Counter-Review and "useful to others?" extension** (verbatim, restore-point #2) → [`./2026-04-24-strategic-direction.appendix-b.md`](./2026-04-24-strategic-direction.appendix-b.md). Same. *(Note: depending on the privacy decision still pending — see session message about [the dual-remote gist](https://gist.github.com/mfbenitezp/5a49086a6c8333fc3b82e56b7892f7ee) — these side-car files may be sanitised, removed, or migrated to a private companion repo. The main backlog doc is intended to remain public regardless.)*
+- **Appendix C — AGENTS.md design-pattern excerpt** (the constraint surface every backlog item rides on):
+  - Pattern 1: Aggregate server-side, return one blob.
+  - Pattern 2: Resolve by name, not ID.
+  - Pattern 3: `--wait` on every async mutation.
+  - Pattern 4: `--json` on every list/show.
+  - Pattern 5: Strip values the agent shouldn't see.
+  - Pattern 6 (root README): Self-diagnosing output (`tool: {name, version}`, `--version`).
+  - Pattern 7 (root README): Stay in your lane (SKILLs name where to drop to the raw CLI).
+  - Philosophy: deterministic work belongs in scripts, not prompts. The LLM orchestrates; the code does.
+
+
 
 
 
