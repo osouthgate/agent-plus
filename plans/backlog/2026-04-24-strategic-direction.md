@@ -77,3 +77,33 @@ P-IDENTITY through P-ENVELOPE-CONTRACT all hold under the counter-review's logic
 - **gstack moves down-stack into primitives.** Real risk — gstack is the closest existing comp. Mitigant: agent-plus's primitives are API-anchored (Railway, Vercel, etc.), gstack's are workflow-anchored (planning, review). The two could end up complementary rather than competitive.
 
 ---
+
+## USER CHALLENGES (decision required)
+
+This is the central call the user has to make. Surfaced in autoplan format.
+
+### Challenge 1 — Runtime vs. tool layer
+
+- **What the original review said.** Evolve agent-plus into a deterministic agent runtime: workflow engine, persistent state, execution loop, tool-governance plane, observability of agent decisions, validation gates between steps, optional replay/debug. ("You are one iteration away from building a system that defines how AI-assisted development actually runs.")
+- **What both perspectives (counter-review + AGENTS.md) recommend instead.** Stay a deterministic *tool layer*. Don't build the brain — build the reflexes. The repo's identity (`AGENTS.md`: "deterministic work belongs in scripts, not prompts") and the documented design patterns (server-side aggregation, name-resolution, `--wait`, `--json`, value-stripping) describe a primitive set. A runtime would replace those patterns rather than reinforce them.
+- **Why the counter-framing wins, on the principles already in repo.**
+  - Pattern 1 (aggregate server-side) and Pattern 4 (`--json` everywhere) describe a tool, not a runtime.
+  - Pattern 5 (strip values the agent shouldn't see) is enforcement at the *output boundary*, which is the only place a deterministic script can enforce anything. A workflow engine would enforce at *step boundaries* — but the agent making the step decisions is non-deterministic, so the enforcement decays.
+  - The Stop hook (`.claude/hooks/check-readme-drift.sh`) already gives the user the one piece of "enforcement" they wanted (docs-stay-honest) at the right layer (Claude Code), not inside `bin/`.
+- **What we might be missing.** The original review may be reading external market signals (the agent-runtime category is heating up; LangGraph, Mastra, CrewAI all funded) that the user is closer to than this analysis is. If the user's *personal* roadmap includes turning agent-plus into a product/SaaS one day, a runtime layer becomes the moat. The counter-review's framing optimises for usefulness; the original review's framing optimises for defensibility.
+- **If we pick the tool-layer path and we're wrong, the cost is.** ~6 months building primitives while a runtime competitor captures the user's exact slot. Mitigant: token-efficiency primitives are still useful *inside* any runtime — worst case they become inputs to someone else's runtime, not orphaned.
+- **If we pick the runtime path and we're wrong, the cost is.** ~6 months building workflow infrastructure that Claude Code makes redundant (or that the market converges on a different schema for), with no primitive set to fall back on. Higher tail risk.
+- **Recommendation.** Adopt the counter-review's framing. Ratify P-IDENTITY, P-CLAUDE-CODE-IS-THE-RUNTIME, P-DETERMINISM-OVER-FEATURES, P-NO-RUNTIME-AMBITIONS. Treat any future runtime work as a strictly separate repo so it doesn't muddy this one's value prop.
+- **User decision required.** Confirm Path B (tool layer) is the chosen direction, or override with Path A and re-run this plan.
+
+### Challenge 2 — "Useful to other people the way gstack is?"
+
+- **What the user asked.** "Could agent-plus be useful like this to other people?"
+- **Honest answer.** Today, partially. Six of ten plugins (GitHub, Vercel, Linear, Supabase, Langfuse, OpenRouter) are directly useful to anyone on those stacks. Four (Hermes Agent, Coolify, Hetzner, Railway) are useful only to overlapping users. **Zero of the ten are universal primitives** — there's nothing in the repo that helps an agent operate on a *generic* codebase rather than a specific service.
+- **What that means.** The structural gap between "personal infra layer" and "stdlib for AI coding agents" is *the missing universal-primitive tier*, plus a discoverability layer so users can find what's relevant to them.
+- **What we might be missing.** Maybe the user *doesn't* want the broad audience. Building for others has a real maintenance tax (issues, PRs, version compat, doc rigour) and the user's stated priority is their own leverage. The honest answer to "could it be useful to others" is "yes, with work" — but whether that work is worth doing is the user's call.
+- **Recommendation.** Treat broad usefulness as a *side-effect* of the universal-primitive tier, not the goal. If `repo-analyze` and `dep-graph` ship because they save the user's own agent tokens on every coding session, the fact that they're also broadly useful is a free win. Don't build any plugin *because* it's broadly useful.
+- **User decision required.** Confirm P-COMMUNITY-AMBITION — are you in the "broad usefulness is a free side-effect, build the primitives anyway" camp, or the "I want to keep this personal, so don't build a plugin unless I'd use it tomorrow" camp? The ranked backlog below changes ordering depending on the answer.
+
+---
+
