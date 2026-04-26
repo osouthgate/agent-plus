@@ -272,6 +272,48 @@ Bundles T-3 (envcheck), T-4 (drift), T-2 (git-context), and a `--json` summary o
 
 ---
 
+## Ranked backlog
+
+Items below are sequenced by `effort × leverage` with the smallest, highest-leverage moves first. Effort estimated in calendar-days for one focused contributor. "Token-savings" estimates assume a typical multi-tool agent session today; numbers are directional, not measured. "Premise" column lists which of P-1..P-9 the item depends on; items that depend on `P-COMMUNITY-AMBITION` or `P-NO-RUNTIME-AMBITIONS` are blocked until the user clears the **PREMISE GATE**.
+
+| ID | Item | Effort | Pattern | Token / call savings | Premise dep | Severity |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `B-DOC-1` | Add **"Envelope Contract"** section to root `README.md` documenting the `tool: {name, version}`, `--output`/`payloadShape`, `--shape-depth`, `--version` surface as a public contract. | 0.5d | P7 | 0 (docs) | none | high — unblocks every B-PLUGIN below |
+| `B-DOC-2` | Add **"Project services" pointer block** to `AGENTS.md` referencing `.agent-plus/services.json`. Stub-only until T-1 ships. | 0.25d | P1 | 0 (docs) | none | low |
+| `B-TEL-1` | Implement opt-in `AGENT_PLUS_TELEMETRY=langfuse` env var hook in one plugin (start with `github-remote` — highest call-volume per session). One Langfuse trace per CLI run with `{cmd, exit_code, payload_bytes, duration_ms}`. | 1d | P6 | indirect (measurement) | none | medium — north-star metric |
+| `B-TEL-2` | Roll telemetry hook out to remaining 9 plugins (mechanical change after `B-TEL-1` is reviewed). | 1d | P6 | indirect | depends on B-TEL-1 | medium |
+| `B-ENV-1` | Extend the `--output` envelope's `payloadShape` with optional `confidence` and `validatedAgainst` fields where the underlying API gives schema info. Land in `vercel-remote` first (Vercel REST has stable schemas). | 1.5d | P7 | small | none | medium |
+| `B-INIT-1` | Ship `agent-plus init` (T-1, scaffolding only): creates `.agent-plus/` directory + empty `manifest.json` / `services.json` / `env-status.json`. Idempotent. | 0.5d | P1 | enables T-* | none | high |
+| `B-INIT-2` | Ship `agent-plus refresh` (T-1): for each installed plugin, hits the lightest-cost identity endpoint (Supabase `projects list`, Vercel `projects list`, Railway `projects list`, GitHub `repo view`, Linear `teams list`) and writes resolved IDs/names into `services.json`. NAMES + IDs only, no secrets. | 2d | P1, P2, P5 | very high (eliminates day-0 rediscovery) | none | high |
+| `B-INIT-3` | Ship `agent-plus envcheck` (T-3): walks per-plugin env-var prefixes, validates presence + format, writes `env-status.json`. Names only. | 1d | P5, P7 | small but high-trust | none | medium |
+| `B-HOOK-1` | SessionStart hook that reads `.agent-plus/*.json` and surfaces a concise summary at turn 1 ("Project: my-app on Vercel; Supabase ref abc; Railway envs prod/staging; missing env: SUPABASE_SERVICE_ROLE"). | 1d | P1 | very high | depends on B-INIT-1..3 | high |
+| `B-HOOK-2` | Plugin-drift hook (T-4): SessionStart compares `plugin-checksums.json` against `bin/` files, prints one-line drift notice. | 0.5d | P6 | small | depends on B-INIT-1 | low |
+| `B-DOCTOR-1` | `agent-plus doctor` (T-8): aggregator over manifest + envcheck + drift + git-context. Single command, one JSON. | 1d | P1, P7 | medium | depends on B-INIT-* | medium |
+| `B-DISCO-1` | `agent-plus list` reading from `.claude-plugin/marketplace.json` + each plugin's README synopsis. | 0.5d | P1 | medium (discoverability) | none | medium |
+| `B-DISCO-2` | `agent-plus search "<keyword>"` over plugin READMEs. Deterministic ranking (BM25). No LLM call. | 1d | P1 | medium | depends on B-DISCO-1 | medium |
+| `B-PLUGIN-1` | New plugin **`repo-analyze`** (Phase 3.5 #1, also T-6): file-tree + language mix + frameworks + entrypoints + README highlights, optionally including `.agent-plus/services.json`. | 3d | P1 | very high (replaces 50+ Reads) | P-COMMUNITY-AMBITION (only if user wants the broad-utility primitive) | high if premise confirmed |
+| `B-PLUGIN-2` | New plugin **`dep-graph`** (Phase 3.5 #2): language-aware import graph + reverse-import lookup. Start with TS / JS / Python. | 4d | P1 | high | P-COMMUNITY-AMBITION | medium |
+| `B-PLUGIN-3` | New plugin **`diff-summary`** (Phase 3.5 #3): file-role labels + risk tier + public-API-touched flag, run on a working tree or a base..head range. | 3d | P1, P4 | high (PR triage / pre-commit) | P-COMMUNITY-AMBITION | medium |
+| `B-PLUGIN-4` | New plugin **`log-parse`** (Phase 3.5 #4): generic stack-trace + error-bucket extraction across formats. Pairs with `railway-ops build-logs`. | 3d | P1, P5 | medium | P-COMMUNITY-AMBITION | medium |
+| `B-PLUGIN-5` | New plugin **`schema-extract`** (Phase 3.5 #5): SQL / OpenAPI / GraphQL / Prisma / Drizzle → one envelope. | 4d | P1, P7 | medium | P-COMMUNITY-AMBITION | low |
+
+### Sequencing rule
+
+1. Land **`B-DOC-1`** (envelope contract) and **`B-INIT-1`** (workspace scaffold) first — both are pre-requisites for almost everything else and neither depends on the premise gate.
+2. Then **`B-INIT-2` + `B-INIT-3` + `B-HOOK-1`** as one logical block — these together deliver the "day-one project context" win that motivates the whole `.agent-plus/` proposal.
+3. Then **`B-TEL-1`** so the next round of work has a token-savings dial-tone to measure against.
+4. Pause for premise gate. If user confirms `P-COMMUNITY-AMBITION`, proceed to `B-PLUGIN-1` (`repo-analyze`) as the highest-leverage universal primitive. Otherwise, stop here — the user has already gained the bulk of the value.
+5. Discoverability (`B-DISCO-*`) and remaining universal primitives slot in opportunistically based on which one's pain shows up first in real usage.
+
+### Top 3 (if you only do three)
+
+1. `B-DOC-1` — Envelope Contract section in root README.
+2. `B-INIT-1` + `B-INIT-2` + `B-HOOK-1` (the `.agent-plus/` workspace + day-one context hook).
+3. `B-PLUGIN-1` — `repo-analyze` (assuming `P-COMMUNITY-AMBITION` is confirmed).
+
+---
+
+
 
 
 
