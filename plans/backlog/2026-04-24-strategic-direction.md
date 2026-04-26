@@ -107,3 +107,24 @@ This is the central call the user has to make. Surfaced in autoplan format.
 
 ---
 
+## Phase 3 — Eng Review (architecture)
+
+Each of the original review's "evolution" recommendations is triaged through the six design patterns documented in `AGENTS.md` ("aggregate server-side", "resolve by name", "`--wait` on async", "`--json` everywhere", "strip values"), the seventh in the README ("self-diagnosing output"), plus the AGENTS.md philosophy line ("deterministic work belongs in scripts, not prompts"). Decision codes: **REJECT** (auto-decided against principle), **ACCEPT** (auto-decided in favour), **PARTIAL** (in-scope under a narrowed framing), **DEFER** (out of scope this round, revisit).
+
+| ID | Recommendation | Decision | Principle hit | Rationale |
+| :--- | :--- | :--- | :--- | :--- |
+| `E-1` | Workflow engine (analyze→plan→validate→execute→review) | **REJECT** | Philosophy + Pattern 4 | Needs an LLM in the loop to choose transitions, which makes the system non-deterministic at exactly the layer the repo claims is deterministic. Claude Code already orchestrates step transitions. |
+| `E-2` | Persistent state layer (JSON / SQLite / markdown) | **REJECT** | Philosophy | Stateful agents are non-deterministic by construction (state shapes the next decision). Stateless tools are the value prop — any plugin that needs context gets it via flags, not a stateful store. |
+| `E-3` | Execution loop ("load state → execute → validate → store → continue") | **REJECT** | Pattern 4 (DRY w/ harness) | This is what Claude Code already does. Re-implementing it in agent-plus competes with the harness instead of complementing it. |
+| `E-4` | Tool governance / sandboxing / whitelisting | **REJECT (in-plugin scope)** | Wrong layer | Tool permissioning belongs to the harness (`~/.claude/settings.json`), not to a CLI that the harness invokes. The `--output PATH` payload-offload pattern already covers the "agent shouldn't see this" subset of the same concern at the right layer. |
+| `E-5` | Observability of agent decisions | **PARTIAL** | Pattern 6 + Pattern 1 | Reject the "agent observability" framing. **Accept** an opt-in `AGENT_PLUS_TELEMETRY=langfuse` env var that emits one Langfuse trace per CLI run with `{cmd, exit_code, payload_bytes, duration_ms}`. Reuses the existing `langfuse-remote` plugin. Marked **TASTE DECISION**: close call — could be done as nothing if the user wants to keep the layer truly stateless. |
+| `E-6` | Validation gates between steps | **PARTIAL** | Pattern 7 | Reject the "step gates" framing. **Accept** extending the existing `payloadShape` in the `--output` envelope with a `confidence` and `validatedAgainst` field where the underlying API gives schema info (e.g. Vercel's REST schema). Same envelope, richer self-description. |
+| `E-7` | Workflow versioning / replay / debug | **REJECT** | Pragmatic | Solves a problem stateless tools don't have. Replay = re-run the same command with the same args. Debug = read the JSON output. |
+| `E-8` | Permission controls for tools | **DEFER** | Wrong layer | Same reasoning as E-4. Revisit only if a plugin needs to gate something *internally* (e.g. Supabase `rls-audit` already-implicitly read-only) — even then this is a flag, not a governance plane. |
+| `E-9` | Audit trail for tool calls | **DEFER** | Pattern 6 | Already partially solved by the `tool: {name, version}` envelope field plus harness-level transcript. Revisit only if E-5 telemetry reveals a real gap. |
+
+**Net effect.** Two `PARTIAL` accepts (telemetry, schema-aware envelope) — both consume existing plumbing rather than introducing new infrastructure. Five `REJECT`s — all auto-decided on documented principles, no user gate needed. Two `DEFER`s.
+
+---
+
+
