@@ -6,7 +6,7 @@ Part of [agent-plus](../README.md). Stdlib-only Python 3, no dependencies, no Sa
 
 ## Why
 
-Skill authors are flying blind. You write a SKILL.md, ship it, and have no idea whether agents reach for it correctly, what they fall back to, or which flag they wished was there. The hosted alternatives (e.g. Skillfully) solve this by posting telemetry to a third-party service — fine for some teams, a non-starter for others.
+Skill authors are flying blind. You write a SKILL.md, ship it, and have no idea whether agents reach for it correctly, what they fall back to, or which flag they wished was there. Hosted alternatives solve this by posting telemetry to a third-party service — fine for some teams, a non-starter for others.
 
 `skill-feedback` flips the model: **the agent self-assesses every time it uses a skill, and the entry stays on the user's machine until they explicitly choose to share it.**
 
