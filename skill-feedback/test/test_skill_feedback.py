@@ -430,14 +430,14 @@ class TestFilterSinceCorrectness(unittest.TestCase):
             {"ts": sf._now_iso(), "skill": "x", "rating": 5, "outcome": "success"},
             {"ts": "2030-01-01T00:00:00", "skill": "x", "rating": 4, "outcome": "success"},
         ])
-        rc, out, err = _run("show", "x", "--since", "100y" if False else "365d", env=self.env)
-        # Above ternary is a no-op; --since 365d is the real arg.
+        rc, out, err = _run("show", "x", "--since", "365d", env=self.env)
         self.assertEqual(rc, 0, err)
         data = json.loads(out)
-        # Both fall inside a 365d window when "now" is naively coerced to UTC
-        # (the fresh one always; the 2030 one if test runs before 2031).
+        # The fresh entry is always in window. The 2030 entry is in window
+        # while tests run within ~365d of 2030 — assertion stays >= 1 so
+        # the test stays stable past 2031. The point of the test is that
+        # the naive ts doesn't raise TypeError, not the count.
         self.assertGreaterEqual(data["count"], 1)
-        # Crucially: no TypeError leaked through.
         self.assertNotIn("TypeError", err)
 
     def test_no_since_returns_all_including_malformed(self) -> None:
