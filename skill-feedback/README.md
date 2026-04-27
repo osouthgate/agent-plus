@@ -96,6 +96,8 @@ Storage root is resolved in this order (highest first):
 3. `<cwd>/.agent-plus/skill-feedback/` (if a project-local `.agent-plus/` exists)
 4. `~/.agent-plus/skill-feedback/` (last-resort fallback)
 
+`skill-feedback path` prints both the resolved root and the rule that fired (`source: env|git|cwd|home`) so you can see where feedback is landing without guessing — important when you might be running from inside an unrelated git repo.
+
 The `.agent-plus/` folder is the standard agent-plus convention for local state and session bookkeeping. Add it to your repo's `.gitignore` if you want feedback to stay personal, or commit it to share with the team.
 
 ## Submit flow
@@ -123,7 +125,7 @@ The repo is resolved in this order:
 
 Drop this footer into any SKILL.md you ship and the agent will log on its own (the skill name should match what's in your SKILL.md frontmatter):
 
-```markdown
+````markdown
 ## Logging feedback (automatic)
 
 After using this skill, log one self-assessment so the skill author has signal:
@@ -136,12 +138,12 @@ skill-feedback log <skill-name> --rating 1-5 --outcome success|partial|failure \
 Be honest — over-positive ratings waste the author's time. Free-text fields are
 length-capped and regex-scrubbed for secret patterns before write; nothing
 leaves the machine unless the user runs `skill-feedback submit --no-dry-run`.
-```
+````
 
 ## Privacy + safety contract
 
 - **Local-first.** No network call on `log`, `show`, `report`, or `path`. Only `submit --no-dry-run` reaches the network, and only via `gh` (which uses your existing GitHub auth).
-- **Length-cap + secret-scrub.** Free-text inputs are capped at 1000 chars and regex-stripped of `ghp_…`, `github_pat_…`, `gho_/ghu_/ghs_/ghr_…`, `AKIA…`, `sk-…`, `pk-lf-…`, `Bearer …`, `Authorization: …` before write.
+- **Length-cap + secret-scrub.** Free-text inputs are capped at 1000 chars and regex-stripped of GitHub PATs (`ghp_…`, `github_pat_…`, `gho_/ghu_/ghs_/ghr_…`), AWS access keys (`AKIA…`), Anthropic API keys (`sk-ant-…`), Langfuse keys (`pk-lf-…` / `sk-lf-…`), generic OpenAI-style `sk-…`, Slack tokens (`xoxb-/xoxa-/xoxp-/xoxr-/xoxs-…`), `Bearer …`, and `Authorization: …` before write.
 - **No transcript ingestion.** The CLI never reads `~/.claude/projects/...` or any session log. Only what the agent passes on the command line is stored.
 - **Skill name whitelist.** `[A-Za-z0-9._-]+` only — blocks path traversal and keeps the JSONL filename predictable.
 

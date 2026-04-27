@@ -4,6 +4,30 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## Unreleased
+
+### Fixed
+- **Repo-resolution regex now handles dots in repo names and `.git` suffix.** Previously `_resolve_repo_from_plugin` parsed `https://github.com/foo/some.lib` as `foo/some` and `https://github.com/foo/bar.git` as `foo/bar.git` (no strip). New regex extracts `foo/some.lib` and `foo/bar` correctly. Without this, `submit` could file an issue against the wrong repo. [2026-04-27]
+- **Skill-name whitelist now rejects `..` and leading dots.** The old `[A-Za-z0-9._-]+` regex accepted `..` (it's just two dots). Tightened to require an alphanumeric first character and reject any `..` substring, so `..`, `..foo`, `foo..bar` all fail. Caught by a new test, not exploited in any release. [2026-04-27]
+- **README "Wiring it into a skill" section** used a triple-backtick `markdown` fence that closed prematurely on the inner bash example, leaking prose out of the code block when rendered on GitHub. Switched to a quad-backtick outer fence. [2026-04-27]
+
+### Added
+- **Test suite** at `test/test_skill_feedback.py` (stdlib unittest, 21 tests):
+  - Scrub canary: every secret pattern (`ghp_…`, `github_pat_…`, `gho_…`, `ghs_…`, `AKIA…`, `sk-ant-…`, `sk-lf-…`, `pk-lf-…`, `sk-…`, `xoxb-/xoxp-…`, `Bearer …`, `Authorization: …`) injected via `--note` and `--friction` is verified absent from the on-disk JSONL, `show`, `report`, and `submit` output paths.
+  - Skill-name validation: `..`, `../etc/passwd`, `foo/bar`, null bytes, leading dots, and over-length names all reject with non-zero exit.
+  - Storage precedence: `SKILL_FEEDBACK_DIR` > git-toplevel > cwd-marker > home; `path` reports which rule fired.
+  - Schema-1 round-trip: `log` then `show` returns the same entry.
+  - Repo-URL regex: 9 cases including `.lib` repo names, `.git` suffix, SSH form, query strings.
+  - `submit --dry-run` never invokes `gh`; missing-repo path emits `note` field.
+- **Anthropic and Slack secret patterns** added to the scrub set: `sk-ant-…`, `xoxb-/xoxa-/xoxp-/xoxr-/xoxs-…`. The previous set was the github-remote subset; this plugin's job is specifically "store text the agent passes in", so it gets a strictly larger scrub set.
+- **`path` command now reports which precedence rule fired** via a `source: env|git|cwd|home` field, so users aren't surprised when feedback lands in an unrelated git repo's `.agent-plus/`.
+
+### Changed
+- **`cmd_report` aggregations use `collections.Counter`** instead of dict comprehensions calling `.count()` per bucket. Single-pass instead of O(5n).
+- **Removed redundant outcome validation** in `cmd_log` — argparse's `choices=` already enforces it.
+- **Removed dead `gh_remote = shutil.which("github-remote")` + empty branch** in `cmd_submit`. Plugin will not silently rely on github-remote until that plugin actually exposes issue-create. Updated the no-`gh` fallback message to say only `gh` is checked.
+- **Removed redundant `except SystemExit: raise`** in `main`. `SystemExit` inherits `BaseException`, so the broad `except Exception` never swallowed it.
+
 ## 0.1.0 - 2026-04-26
 
 Initial release.

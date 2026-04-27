@@ -90,7 +90,7 @@ Run `skill-feedback path` to print the resolved root, or `skill-feedback path --
 ## Privacy + safety contract
 
 - **Local-first.** No network call on `log`, `show`, `report`, or `path`. Only `submit --no-dry-run` can reach a network, and only via `gh`.
-- **Length-cap + secret-scrub.** Free-text inputs are capped at 1000 chars and regex-stripped of `ghp_…`, `github_pat_…`, `gho_/ghu_/ghs_/ghr_…`, `AKIA…`, `sk-…`, `pk-lf-…`, `Bearer …`, `Authorization: …` patterns before write.
+- **Length-cap + secret-scrub.** Free-text inputs are capped at 1000 chars and regex-stripped of GitHub PATs (`ghp_…`, `github_pat_…`, `gho_/ghu_/ghs_/ghr_…`), AWS access keys (`AKIA…`), Anthropic API keys (`sk-ant-…`), Langfuse keys (`pk-lf-…` / `sk-lf-…`), generic OpenAI-style `sk-…`, Slack tokens (`xoxb-/xoxa-/xoxp-/xoxr-/xoxs-…`), `Bearer …`, and `Authorization: …` patterns before write.
 - **No transcript ingestion.** The CLI never reads `~/.claude/projects/...` or any session log. Only what the agent passes on the command line is stored.
 - **Skill name is whitelisted.** `[A-Za-z0-9._-]+` only — prevents path traversal and keeps the JSONL filename predictable.
 
