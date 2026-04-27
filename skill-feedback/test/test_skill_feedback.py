@@ -46,22 +46,38 @@ def _run(*args: str, env: dict | None = None) -> tuple[int, str, str]:
 
 class TestScrubText(unittest.TestCase):
     """The privacy contract: free-text fields must never carry token-shaped
-    substrings to disk. This is the canary test — if it fails, we leak."""
+    substrings to disk. This is the canary test — if it fails, we leak.
 
+    Canaries are constructed via string concatenation rather than literals
+    so GitHub's push-protection / TruffleHog / etc. don't false-positive
+    on the test file. The runtime joined value is identical to a real
+    token shape and exercises the real regex."""
+
+    # Concatenated at runtime → identical to a single literal, but the file
+    # contents never contain a complete recognisable token.
     canaries = {
-        "github_classic": "ghp_abcdefghij1234567890ABCD",
-        "github_fine":    "github_pat_abc123def456ghi789jklmnoPQR",
-        "github_oauth":   "gho_abcdefghij1234567890ABCD",
-        "github_app":     "ghs_abcdefghij1234567890ABCD",
-        "aws":            "AKIA1234567890ABCDEF",
-        "anthropic":      "sk-ant-abcdefghij1234567890ABCD",
-        "langfuse_pub":   "pk-lf-abcdefghij1234567890ABCD",
-        "langfuse_sec":   "sk-lf-abcdefghij1234567890ABCD",
-        "openai":         "sk-abcdefghij1234567890ABCD",
-        "slack_bot":      "xoxb-1234567890-1234567890-abcdefghij",
-        "slack_user":     "xoxp-1234567890-1234567890-abcdefghij",
-        "bearer":         "Bearer abcdefghij1234567890ABCD",
-        "auth_header":    "Authorization: Token abc123def456",
+        "github_classic": "ghp_" + "abcdefghij1234567890ABCD",
+        "github_fine":    "github_" + "pat_abc123def456ghi789jklmnoPQR",
+        "github_oauth":   "gho_" + "abcdefghij1234567890ABCD",
+        "github_app":     "ghs_" + "abcdefghij1234567890ABCD",
+        "aws":            "AKIA" + "1234567890ABCDEF",
+        "anthropic":      "sk-ant-" + "abcdefghij1234567890ABCD",
+        "langfuse_pub":   "pk-lf-" + "abcdefghij1234567890ABCD",
+        "langfuse_sec":   "sk-lf-" + "abcdefghij1234567890ABCD",
+        "openai":         "sk-" + "abcdefghij1234567890ABCD",
+        "stripe_live":    "sk" + "_live_" + "abcdefghij1234567890ABCD",
+        "stripe_test":    "sk" + "_test_" + "abcdefghij1234567890ABCD",
+        "stripe_pub":     "pk" + "_live_" + "abcdefghij1234567890ABCD",
+        "stripe_restricted": "rk" + "_live_" + "abcdefghij1234567890ABCD",
+        "supabase":       "sbp_" + "abcdefghij1234567890ABCD",
+        "sentry":         "sntrys_" + "abcdefghij1234567890ABCD",
+        "google_api":     "AIza" + "SyA-1234567890abcdefghij_klmnopqrstuv",
+        "slack_bot":      "xoxb-" + "1234567890-1234567890-abcdefghij",
+        "slack_user":     "xoxp-" + "1234567890-1234567890-abcdefghij",
+        "discord_bot":    "MTAxMjM0NTY3ODkwMTIzNDU2" + ".GabcDe." + "fghijklmnopqrstuvwxyz1234567890ABCDEF",
+        "jwt":            "eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0." + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        "bearer":         "Bearer " + "abcdefghij1234567890ABCD",
+        "auth_header":    "Authorization: " + "Token abc123def456",
     }
 
     def test_each_canary_redacted(self) -> None:
@@ -341,6 +357,234 @@ class TestVersionFlag(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertTrue(out.strip())  # non-empty
         self.assertNotIn("{", out)    # plain string, not JSON
+
+
+# ──────────────────────────── timestamp handling (blockers 1+2) ────────────────────────────
+
+
+class TestParseIso(unittest.TestCase):
+    """Naive ISO strings must coerce to UTC (not return naive datetime),
+    otherwise comparing them to the tz-aware cutoff in _filter_since
+    raises TypeError. Empty / None inputs return None."""
+
+    def test_aware_z(self) -> None:
+        dt = sf._parse_iso("2026-04-26T21:30:00Z")
+        self.assertIsNotNone(dt)
+        self.assertIsNotNone(dt.tzinfo)
+
+    def test_aware_offset(self) -> None:
+        dt = sf._parse_iso("2026-04-26T21:30:00+00:00")
+        self.assertIsNotNone(dt)
+        self.assertIsNotNone(dt.tzinfo)
+
+    def test_naive_coerced_to_utc(self) -> None:
+        dt = sf._parse_iso("2026-04-26T21:30:00")
+        self.assertIsNotNone(dt, "naive ISO must parse, not return None")
+        self.assertIsNotNone(dt.tzinfo, "naive ISO must coerce to tz-aware")
+
+    def test_none_passthrough(self) -> None:
+        self.assertIsNone(sf._parse_iso(None))
+
+    def test_empty_passthrough(self) -> None:
+        self.assertIsNone(sf._parse_iso(""))
+
+    def test_garbage_returns_none(self) -> None:
+        self.assertIsNone(sf._parse_iso("yesterday"))
+        self.assertIsNone(sf._parse_iso("2026-13-99T99:99:99Z"))
+
+
+class TestFilterSinceCorrectness(unittest.TestCase):
+    """Blocker: previously _filter_since KEPT entries with unparseable ts
+    (predicate was `if ts is None or ts >= cutoff`). Now drops them, so
+    aggregates aren't skewed by hand-edited entries."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.env = {"SKILL_FEEDBACK_DIR": self.tmp.name}
+
+    def _write_jsonl(self, skill: str, lines: list[dict]) -> Path:
+        p = Path(self.tmp.name) / f"{skill}.jsonl"
+        with p.open("w", encoding="utf-8") as fh:
+            for ln in lines:
+                fh.write(json.dumps(ln) + "\n")
+        return p
+
+    def test_malformed_ts_dropped_by_since(self) -> None:
+        # Mix: one fresh-and-valid, one malformed-ts, one ancient.
+        self._write_jsonl("x", [
+            {"ts": sf._now_iso(), "skill": "x", "rating": 5, "outcome": "success"},
+            {"ts": "not-a-timestamp", "skill": "x", "rating": 3, "outcome": "partial"},
+            {"ts": "2000-01-01T00:00:00Z", "skill": "x", "rating": 1, "outcome": "failure"},
+        ])
+        rc, out, err = _run("show", "x", "--since", "1d", env=self.env)
+        self.assertEqual(rc, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["count"], 1, f"expected only the fresh entry: {data}")
+        self.assertEqual(data["entries"][0]["rating"], 5)
+
+    def test_naive_ts_does_not_crash_show(self) -> None:
+        # Blocker: naive ts vs aware cutoff used to raise TypeError.
+        self._write_jsonl("x", [
+            {"ts": sf._now_iso(), "skill": "x", "rating": 5, "outcome": "success"},
+            {"ts": "2030-01-01T00:00:00", "skill": "x", "rating": 4, "outcome": "success"},
+        ])
+        rc, out, err = _run("show", "x", "--since", "100y" if False else "365d", env=self.env)
+        # Above ternary is a no-op; --since 365d is the real arg.
+        self.assertEqual(rc, 0, err)
+        data = json.loads(out)
+        # Both fall inside a 365d window when "now" is naively coerced to UTC
+        # (the fresh one always; the 2030 one if test runs before 2031).
+        self.assertGreaterEqual(data["count"], 1)
+        # Crucially: no TypeError leaked through.
+        self.assertNotIn("TypeError", err)
+
+    def test_no_since_returns_all_including_malformed(self) -> None:
+        # Without --since, malformed ts is irrelevant — all entries are kept.
+        self._write_jsonl("x", [
+            {"ts": "garbage", "skill": "x", "rating": 5, "outcome": "success"},
+            {"ts": sf._now_iso(), "skill": "x", "rating": 3, "outcome": "partial"},
+        ])
+        rc, out, err = _run("show", "x", env=self.env)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["count"], 2)
+
+
+# ──────────────────────────── empty-submit guard (blocker 3) ────────────────────────────
+
+
+class TestSubmitEmptyGuard(unittest.TestCase):
+    """Blocker: --no-dry-run with 0 entries used to file a 'No entries…'
+    issue on the upstream repo. Now refuses with an explanatory error."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.env = {"SKILL_FEEDBACK_DIR": self.tmp.name}
+
+    def test_no_dry_run_with_zero_entries_does_not_call_gh(self) -> None:
+        # Pre-condition: storage root exists but has no entries for 'empty'.
+        # Use --no-dry-run + a resolvable repo. The guard must fire BEFORE gh.
+        rc, out, err = _run(
+            "submit", "empty", "--repo", "owner/name", "--no-dry-run",
+            env=self.env,
+        )
+        self.assertEqual(rc, 0, err)
+        data = json.loads(out)
+        self.assertEqual(data["entries_included"], 0)
+        self.assertIn("error", data, "guard should populate result['error']")
+        self.assertNotIn("issue_url", data,
+                         "must not have shelled to gh on empty submit")
+
+    def test_dry_run_with_zero_entries_still_prints_body(self) -> None:
+        rc, out, err = _run(
+            "submit", "empty", "--repo", "owner/name",
+            env=self.env,
+        )
+        self.assertEqual(rc, 0, err)
+        data = json.loads(out)
+        self.assertTrue(data["dry_run"])
+        self.assertIn("body", data)
+        # 'error' should NOT be set on the dry-run path — that's preview.
+        self.assertNotIn("error", data)
+
+
+# ──────────────────────────── tightened skill-name (trailing chars) ────────────────────────────
+
+
+class TestSkillNameTrailing(unittest.TestCase):
+    def test_trailing_dot_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            sf._validate_skill_name("foo.")
+
+    def test_trailing_hyphen_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            sf._validate_skill_name("foo-")
+
+    def test_trailing_underscore_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            sf._validate_skill_name("foo_")
+
+    def test_single_char_alphanumeric_allowed(self) -> None:
+        self.assertEqual(sf._validate_skill_name("a"), "a")
+        self.assertEqual(sf._validate_skill_name("5"), "5")
+
+    def test_dots_in_middle_still_allowed(self) -> None:
+        self.assertEqual(sf._validate_skill_name("foo.bar"), "foo.bar")
+        self.assertEqual(sf._validate_skill_name("a.b.c"), "a.b.c")
+
+
+# ──────────────────────────── repo resolution (homepage dropped) ────────────────────────────
+
+
+class TestRepoResolutionNoHomepageFallback(unittest.TestCase):
+    """The `homepage` field is not used as a fallback for `repository`.
+    A skill author who set `homepage` to their personal site shouldn't have
+    `submit` quietly file issues there."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_repository_field_resolves(self) -> None:
+        # Build a fake plugin tree under <tmp>/<skill>/.claude-plugin/plugin.json
+        # and point _resolve_repo_from_plugin at it via monkeypatching.
+        skill_dir = Path(self.tmp.name) / "myskill" / ".claude-plugin"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "plugin.json").write_text(json.dumps({
+            "name": "myskill",
+            "repository": "https://github.com/me/myskill",
+        }))
+        bin_path = Path(self.tmp.name) / "skill-feedback" / "bin" / "skill-feedback"
+        bin_path.parent.mkdir(parents=True)
+        bin_path.write_text("# stub")
+        with patch.object(sf, "__file__", str(bin_path)):
+            self.assertEqual(sf._resolve_repo_from_plugin("myskill"), "me/myskill")
+
+    def test_homepage_only_does_not_resolve(self) -> None:
+        # Only `homepage` is set — even if it's a github URL, we ignore it.
+        skill_dir = Path(self.tmp.name) / "myskill" / ".claude-plugin"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "plugin.json").write_text(json.dumps({
+            "name": "myskill",
+            "homepage": "https://github.com/wrongowner/wrongrepo",
+        }))
+        bin_path = Path(self.tmp.name) / "skill-feedback" / "bin" / "skill-feedback"
+        bin_path.parent.mkdir(parents=True)
+        bin_path.write_text("# stub")
+        # Also stub out the home-dir fallback path so we don't accidentally
+        # resolve from a real installed plugin.
+        fake_home = Path(self.tmp.name) / "fakehome"
+        fake_home.mkdir()
+        with patch.object(sf, "__file__", str(bin_path)), \
+             patch.object(sf.Path, "home", classmethod(lambda cls: fake_home)):
+            self.assertIsNone(sf._resolve_repo_from_plugin("myskill"))
+
+
+# ──────────────────────────── --limit semantics ────────────────────────────
+
+
+class TestLimitZeroSemantics(unittest.TestCase):
+    """--limit 0 means unbounded (documented in --help)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.env = {"SKILL_FEEDBACK_DIR": self.tmp.name}
+        for i in range(7):
+            _run("log", "x", "--rating", "5", "--outcome", "success",
+                 env=self.env)
+
+    def test_show_limit_zero_returns_all(self) -> None:
+        rc, out, err = _run("show", "x", "--limit", "0", env=self.env)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["count"], 7)
+
+    def test_show_default_limit(self) -> None:
+        rc, out, _ = _run("show", "x", env=self.env)
+        self.assertEqual(rc, 0)
+        # default 50 is well above 7
+        self.assertEqual(json.loads(out)["count"], 7)
 
 
 if __name__ == "__main__":

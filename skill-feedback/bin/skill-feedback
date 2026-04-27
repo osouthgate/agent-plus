@@ -76,10 +76,13 @@ def _with_tool_meta(payload: Any) -> Any:
 VALID_OUTCOMES = ("success", "partial", "failure")
 MAX_FREE_TEXT = 1000
 MAX_SKILL_NAME = 128
-# Skill names must start with an alphanumeric (no leading dots, hyphens, or
-# underscores — those produce hidden / option-like filenames). `..` anywhere
-# is rejected separately so 'foo..bar' fails too.
-SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Skill names must start AND end with an alphanumeric — no leading or
+# trailing dots/hyphens/underscores. Otherwise 'foo.' produces 'foo..jsonl',
+# which looks like a path-traversal artifact, and '-foo' looks like a CLI
+# flag. `..` anywhere is rejected separately so 'foo..bar' fails too.
+# A single-character all-alphanumeric name is allowed (the optional middle
+# group makes the trailing-alphanumeric requirement degenerate).
+SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
 
 def _git_toplevel() -> Path | None:
@@ -127,20 +130,43 @@ def _ensure_dir(path: Path) -> None:
 # ─── input scrubbing ──────────────────────────────────────────────────────────
 
 # Free-text from the agent could accidentally include tokens it had in
-# context; strip them before they hit disk. Pattern set is a superset of
-# what github-remote uses, plus Anthropic and Slack token formats since
-# this plugin's job is specifically "store text the agent passes in".
+# context; strip them before they hit disk. Pattern set covers the common
+# token formats agents work with — GitHub, AWS, Anthropic, OpenAI, Slack,
+# Stripe, Google, Supabase, Sentry, Discord, JWT, plus generic Bearer /
+# Authorization headers. Not exhaustive — exotic provider-specific formats
+# may slip through, which is why the README also tells users not to put
+# secret-shaped strings in --note in the first place.
 _SECRET_PATTERNS = [
+    # GitHub PATs / OAuth / app tokens (also matches gha_, ghu_, ghs_, ghr_)
     re.compile(r"ghp_[A-Za-z0-9]{20,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
     re.compile(r"gh[ousr]_[A-Za-z0-9]{20,}"),
+    # AWS access key id
     re.compile(r"AKIA[0-9A-Z]{16}"),
+    # Anthropic
     re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),
+    # Langfuse (specific prefix before generic sk- catch-all)
     re.compile(r"sk-lf-[A-Za-z0-9_-]{20,}"),
     re.compile(r"pk-lf-[A-Za-z0-9_-]{20,}"),
+    # Stripe — sk_live_, sk_test_, rk_live_, rk_test_, pk_live_, pk_test_
+    re.compile(r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{20,}"),
+    # OpenAI-style (catch-all sk- with hyphen; intentionally after sk-ant-/sk-lf- so those match first)
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    # Supabase service keys
+    re.compile(r"sbp_[A-Za-z0-9]{20,}"),
+    # Sentry user / org auth tokens
+    re.compile(r"sntrys_[A-Za-z0-9._-]{20,}"),
+    # Google API keys
+    re.compile(r"AIza[0-9A-Za-z_-]{35}"),
+    # Slack tokens
     re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
+    # Discord bot tokens (3-part, dot-separated, base64)
+    re.compile(r"[MN][A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,40}"),
+    # JWT (eyJ… header.payload.signature)
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    # Generic Bearer header
     re.compile(r"Bearer\s+[A-Za-z0-9._\-]{20,}", re.IGNORECASE),
+    # Generic Authorization header
     re.compile(r"Authorization:\s*\S+", re.IGNORECASE),
 ]
 
@@ -161,8 +187,9 @@ def _validate_skill_name(skill: str) -> str:
             or ".." in skill):
         raise SystemExit(
             f"skill-feedback: invalid skill name {skill!r}. "
-            "Must start with [A-Za-z0-9], contain only [A-Za-z0-9._-], "
-            f"have no '..' substring, and be at most {MAX_SKILL_NAME} chars."
+            "Must start AND end with [A-Za-z0-9], contain only [A-Za-z0-9._-] "
+            f"in the middle, have no '..' substring, and be at most "
+            f"{MAX_SKILL_NAME} chars."
         )
     return skill
 
@@ -202,13 +229,23 @@ def _now_iso() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _parse_iso(ts: str) -> _dt.datetime | None:
+def _parse_iso(ts: str | None) -> _dt.datetime | None:
+    """Parse an ISO-8601 timestamp into a tz-aware UTC datetime. Naive inputs
+    (no Z / offset) are coerced to UTC rather than returned naive — comparing
+    naive vs aware datetimes raises TypeError, and `_filter_since` would crash
+    on hand-edited entries that omitted the Z. Returns None on any parse error
+    or empty/None input."""
+    if not ts:
+        return None
     try:
         if ts.endswith("Z"):
             ts = ts[:-1] + "+00:00"
-        return _dt.datetime.fromisoformat(ts)
+        dt = _dt.datetime.fromisoformat(ts)
     except (ValueError, TypeError):
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_dt.timezone.utc)
+    return dt
 
 
 # ─── readers ──────────────────────────────────────────────────────────────────
@@ -239,7 +276,12 @@ def _filter_since(entries: Iterable[dict], since: _dt.timedelta | None) -> list[
     out = []
     for e in entries:
         ts = _parse_iso(e.get("ts", ""))
-        if ts is None or ts >= cutoff:
+        # Drop entries whose ts is missing or unparseable. The previous
+        # behaviour kept them, which silently skewed every since-windowed
+        # aggregate when a hand-edited entry slipped in.
+        if ts is None:
+            continue
+        if ts >= cutoff:
             out.append(e)
     return out
 
@@ -269,9 +311,13 @@ def cmd_log(args: argparse.Namespace) -> dict:
 
     path = _log_path(skill)
     _ensure_dir(path)
-    # POSIX append() is atomic for writes < PIPE_BUF (4096 on Linux);
-    # serialised entries here are well under that, so concurrent agents
-    # writing to the same JSONL won't interleave bytes.
+    # Writes use O_APPEND, which is atomic for small writes on local
+    # POSIX filesystems (Linux PIPE_BUF=4096; macOS APFS/HFS in practice).
+    # Atomicity is NOT guaranteed on NFS or other networked filesystems —
+    # concurrent agent writes there can interleave. With MAX_FREE_TEXT
+    # capped at 1000 chars per field, a worst-case JSON line is ~2.2KB
+    # (multibyte friction+note); fits in a single write() call but exceeds
+    # the POSIX 512-byte minimum guarantee. Treat as best-effort.
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
@@ -350,14 +396,18 @@ _REPO_URL_RE = re.compile(
 
 
 def _resolve_repo_from_plugin(skill: str) -> str | None:
-    """Look for the skill's plugin.json and read its repository URL.
+    """Look for the skill's plugin.json and read its `repository` field.
     Searches in this order:
       1. Sibling directory <skill>/.claude-plugin/plugin.json relative to this
          tool's grand-parent (development checkout case).
       2. ~/.claude/plugins/<skill>/.claude-plugin/plugin.json (installed case).
     Returns 'owner/name' if it can parse it, else None.
-    Repo names that contain dots (e.g. 'foo/some.lib') and URLs with
-    trailing '.git' are handled.
+
+    Only `repository` is honoured — `homepage` was a fallback in v0.1.0
+    but is risky: skill authors sometimes set it to a personal site, which
+    would silently route `submit` issues to the wrong repo. If a skill
+    needs explicit submit routing, use the `repository` field or pass
+    `--repo owner/name` to `submit`.
     """
     candidates = [
         Path(__file__).resolve().parent.parent.parent / skill / ".claude-plugin" / "plugin.json",
@@ -370,7 +420,7 @@ def _resolve_repo_from_plugin(skill: str) -> str | None:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        repo = data.get("repository") or data.get("homepage")
+        repo = data.get("repository")
         if not isinstance(repo, str):
             continue
         m = _REPO_URL_RE.search(repo)
@@ -468,6 +518,18 @@ def cmd_submit(args: argparse.Namespace) -> dict:
             )
         return result
 
+    # Refuse to file an empty issue. With --no-dry-run + a resolvable repo
+    # but no entries, the previous code would shell out to `gh issue create`
+    # with a "No skill-feedback entries…" body. That's noise on the upstream
+    # repo's tracker and not what the user asked for.
+    if not entries:
+        result["error"] = (
+            f"No entries for {skill!r} in window {args.since!r}; refusing to "
+            "file an empty issue. Run without --no-dry-run to preview, widen "
+            "--since, or check `skill-feedback show`."
+        )
+        return result
+
     # Live submission: shell out to `gh issue create` (inherits the user's
     # existing GitHub auth). If `gh` is missing, write the body to disk so
     # the user can paste it manually. We do NOT make raw GitHub API calls.
@@ -535,13 +597,21 @@ def _build_parser() -> argparse.ArgumentParser:
                             parents=[pretty_parent])
     s_show.add_argument("skill")
     s_show.add_argument("--since", help="e.g. 30m, 6h, 7d")
-    s_show.add_argument("--limit", type=int, default=50)
+    s_show.add_argument(
+        "--limit", type=int, default=50,
+        help="max entries to return (default 50; 0 = unbounded)",
+    )
 
     s_report = sub.add_parser("report", help="aggregate summary across skills",
                               parents=[pretty_parent])
     s_report.add_argument("--skill", help="restrict to one skill")
     s_report.add_argument("--since", help="e.g. 7d (default: all)")
-    s_report.add_argument("--limit", type=int, default=0, help="cap entries scanned")
+    s_report.add_argument(
+        "--limit", type=int, default=0,
+        help="cap raw entries scanned (default 0 = unbounded). Sliced after "
+             "concatenation across skills, so it doesn't bound per-skill "
+             "windows in multi-skill calls — use --skill to scope.",
+    )
 
     s_submit = sub.add_parser("submit", help="bundle entries into a GitHub issue body",
                               parents=[pretty_parent])

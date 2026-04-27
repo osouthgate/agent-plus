@@ -17,16 +17,16 @@
 #   }
 #
 # Behaviour:
-#   - Marker absent           → exit 0 silently. (Default. Shipping the
-#                               file in the repo never changes session
-#                               behaviour until the user opts in.)
-#   - Marker present + recent → exit 0 (a log entry was written this
-#     log entry under the    session; no nudge needed).
-#     storage root
-#   - Marker present + no     → exit 2 with a stderr nudge telling the
-#     recent log entry         agent to run `skill-feedback log <skill>
-#                              --rating ... --outcome ...` for whichever
-#                              skill it just used.
+#   - Marker absent              → exit 0 silently. (Default. Shipping the
+#                                  file in the repo never changes session
+#                                  behaviour until the user opts in.)
+#   - Marker present + recent    → exit 0. A log entry was appended under
+#     log entry under the          the storage root within the freshness
+#                                  window; no nudge needed.
+#   - Marker present + no recent → exit 2 with a stderr nudge telling the
+#     log entry                    agent to run `skill-feedback log <skill>
+#                                  --rating ... --outcome ...` for
+#                                  whichever skill it just used.
 #
 # The "recent" window is 10 minutes by default. Override via the env var
 # SKILL_FEEDBACK_FRESH_SECS (integer seconds).

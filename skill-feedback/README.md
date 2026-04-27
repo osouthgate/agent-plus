@@ -16,7 +16,7 @@ Skill authors are flying blind. You write a SKILL.md, ship it, and have no idea 
 - **JSONL on disk.** `.agent-plus/skill-feedback/<skill>.jsonl`. Trivially `jq`-able, trivially `grep`-able, trivially deletable. No DB, no migration, no auth dance.
 - **`report` aggregates server-side.** Average rating, outcome histogram, top friction strings — pattern #1, one blob, not 200 raw lines.
 - **`submit` is dry-run by default.** It prints a markdown issue body the user can review. Only `--no-dry-run` actually files an issue, and only via `gh` (or falls through to writing a `.md` file for manual paste). No raw GitHub API surface.
-- **Privacy by construction.** Free-text fields are capped at 1000 chars and regex-scrubbed for `ghp_…`, `github_pat_…`, `gho_/ghu_/ghs_/ghr_…`, `AKIA…`, `sk-…`, `pk-lf-…`, `Bearer …`, `Authorization: …` patterns before write. No transcript ingestion. Skill name is whitelisted to `[A-Za-z0-9._-]+`.
+- **Privacy by construction.** Free-text fields are capped at 1000 chars and regex-scrubbed for GitHub PATs (`ghp_…`, `github_pat_…`, `gho_/ghu_/ghs_/ghr_…`), AWS access keys (`AKIA…`), Anthropic (`sk-ant-…`), Langfuse (`pk-lf-…` / `sk-lf-…`), Stripe (`sk_live_/sk_test_/rk_/pk_…`), generic OpenAI-style `sk-…`, Supabase (`sbp_…`), Sentry (`sntrys_…`), Google API keys (`AIza…`), Slack (`xoxb-/xoxa-/xoxp-/xoxr-/xoxs-…`), Discord bot tokens, JWTs (`eyJ…`), `Bearer …`, and `Authorization: …` patterns before write. No transcript ingestion. Skill name is whitelisted to `[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?` (must start AND end with alphanumeric, no `..`).
 
 ## Install
 
@@ -143,7 +143,7 @@ leaves the machine unless the user runs `skill-feedback submit --no-dry-run`.
 ## Privacy + safety contract
 
 - **Local-first.** No network call on `log`, `show`, `report`, or `path`. Only `submit --no-dry-run` reaches the network, and only via `gh` (which uses your existing GitHub auth).
-- **Length-cap + secret-scrub.** Free-text inputs are capped at 1000 chars and regex-stripped of GitHub PATs (`ghp_…`, `github_pat_…`, `gho_/ghu_/ghs_/ghr_…`), AWS access keys (`AKIA…`), Anthropic API keys (`sk-ant-…`), Langfuse keys (`pk-lf-…` / `sk-lf-…`), generic OpenAI-style `sk-…`, Slack tokens (`xoxb-/xoxa-/xoxp-/xoxr-/xoxs-…`), `Bearer …`, and `Authorization: …` before write.
+- **Length-cap + secret-scrub.** Free-text inputs are capped at 1000 chars and regex-stripped of GitHub PATs (`ghp_…`, `github_pat_…`, `gho_/ghu_/ghs_/ghr_…`), AWS access keys (`AKIA…`), Anthropic (`sk-ant-…`), Langfuse (`pk-lf-…` / `sk-lf-…`), Stripe (`sk_live_/sk_test_/rk_/pk_…`), generic OpenAI-style `sk-…`, Supabase (`sbp_…`), Sentry (`sntrys_…`), Google API keys (`AIza…`), Slack (`xoxb-/xoxa-/xoxp-/xoxr-/xoxs-…`), Discord bot tokens, JWTs (`eyJ…`), `Bearer …`, and `Authorization: …` before write. Not exhaustive — exotic provider-specific formats may slip through; the SKILL.md tells the agent not to put secret-shaped strings in `--note` in the first place.
 - **No transcript ingestion.** The CLI never reads `~/.claude/projects/...` or any session log. Only what the agent passes on the command line is stored.
 - **Skill name whitelist.** `[A-Za-z0-9._-]+` only — blocks path traversal and keeps the JSONL filename predictable.
 
