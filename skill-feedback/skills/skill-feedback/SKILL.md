@@ -85,7 +85,29 @@ Run `skill-feedback path` to print the resolved root, or `skill-feedback path --
 
 - **Default is `--dry-run`.** It prints the title + body so the user can review before anything leaves the machine.
 - **`--no-dry-run`** requires either `gh` on PATH (uses `gh issue create`) or falls back to writing the body to `<root>/<skill>.submit.md` for manual paste. No raw GitHub API calls — auth is borrowed from `gh`.
-- **Free-text fields are scrubbed before write**, but ALWAYS preview a `submit --dry-run` body before flipping to `--no-dry-run`. The user owns the decision to publish.
+- **Free-text fields are regex-scrubbed before write**, but the regex only catches token shapes — not PII, customer names, internal hostnames, or contextual leaks. **You (the agent) are the final gate** before anything reaches a public tracker; see "Privacy review before submit" below. The user owns the decision to publish.
+
+## Privacy review before submit
+
+Regex scrubbing (in `log`) is the floor, not the ceiling. It catches `ghp_…`, `AKIA…`, `sk-ant-…`, etc., but it cannot recognise PII or context-sensitive content. **Before running `submit --no-dry-run`, you (the agent already executing this skill in the user's Claude Code session) must do a privacy review pass on the assembled body.** No extra API call, no SDK — your existing context is what does the work.
+
+Workflow:
+
+1. **Always run `submit --dry-run` first** (it's the default). Read the `body` field in the resulting JSON. The result also exposes `agent_review_required: true` plus an `agent_review_checklist` array as a built-in reminder.
+2. **Scan `body` against this checklist** for content the regex cannot pattern-match:
+   - PII: real names, email addresses, phone numbers, physical addresses
+   - Customer / employer / client / project names that aren't public
+   - Internal hostnames, private URLs, file paths revealing identity (e.g. `/Users/<name>/work/<client>/...`)
+   - Ticket IDs, repo names, or Slack channel names that aren't public
+   - Error messages or stack traces that quote internal data
+   - Anything you wouldn't paste into a public issue on an open-source repo
+3. **If anything in step 2 is present:** ABORT. Do not run `--no-dry-run`. Tell the user exactly what you found and let them decide:
+   - Edit `<root>/<skill>.jsonl` by hand and retry
+   - Use `--since` to scope a window that excludes the sensitive entries
+   - Skip the submit
+4. **Only run `--no-dry-run`** after step 2 returns clean.
+
+This is documentation, not enforcement — there is no flag to require the review and no flag to bypass it. You're trusted to do this correctly because you have the user's context and the regex doesn't.
 
 ## Privacy + safety contract
 

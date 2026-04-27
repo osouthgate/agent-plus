@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -562,6 +563,77 @@ class TestRepoResolutionNoHomepageFallback(unittest.TestCase):
 
 
 # ──────────────────────────── --limit semantics ────────────────────────────
+
+
+# ──────────────────────────── agent privacy-review fields ────────────────────────────
+
+
+class TestAgentReviewFieldsOnDryRun(unittest.TestCase):
+    """Regex scrubbing can't catch PII / customer names / internal identifiers.
+    The agent doing the submit is the final gate, and the dry-run JSON
+    surfaces that responsibility via agent_review_required + checklist
+    so the agent (which reads the JSON) can't miss it."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.env = {"SKILL_FEEDBACK_DIR": self.tmp.name}
+        _run("log", "x", "--rating", "5", "--outcome", "success",
+             "--note", "regular feedback note",
+             env=self.env)
+
+    def test_dry_run_exposes_review_fields(self) -> None:
+        rc, out, err = _run(
+            "submit", "x", "--repo", "owner/name",
+            env=self.env,
+        )
+        self.assertEqual(rc, 0, err)
+        data = json.loads(out)
+        self.assertTrue(data["dry_run"])
+        self.assertIs(data["agent_review_required"], True,
+                      "dry-run must flag the review responsibility")
+        self.assertIn("agent_review_instructions", data)
+        self.assertIn("ABORT", data["agent_review_instructions"],
+                      "instructions should be unambiguous about aborting")
+        self.assertIn("agent_review_checklist", data)
+        # The checklist must mention the categories the regex can't catch.
+        joined = " ".join(data["agent_review_checklist"]).lower()
+        for category in ("pii", "customer", "hostname", "ticket"):
+            self.assertIn(category, joined,
+                          f"checklist missing category: {category}")
+
+    def test_no_dry_run_with_zero_entries_does_not_expose_review_fields(self) -> None:
+        # Empty-submit guard fires BEFORE the live submit, so even with
+        # --no-dry-run + 0 entries we don't surface review fields (the
+        # body never reaches a tracker, so review is moot).
+        empty_env = {"SKILL_FEEDBACK_DIR": tempfile.mkdtemp()}
+        self.addCleanup(lambda: shutil.rmtree(empty_env["SKILL_FEEDBACK_DIR"], ignore_errors=True))
+        rc, out, _ = _run(
+            "submit", "empty", "--repo", "owner/name", "--no-dry-run",
+            env=empty_env,
+        )
+        self.assertEqual(rc, 0)
+        data = json.loads(out)
+        self.assertFalse(data["dry_run"])
+        self.assertNotIn("agent_review_required", data,
+                         "review fields should be dry-run-only")
+        self.assertNotIn("agent_review_checklist", data)
+
+    def test_dry_run_with_zero_entries_still_exposes_review_fields(self) -> None:
+        # Even with no entries, dry-run is a preview — the agent reading
+        # an empty body should still see the review-required flag, so it
+        # learns the habit. Doesn't cost anything; doesn't trigger gh.
+        empty_env = {"SKILL_FEEDBACK_DIR": tempfile.mkdtemp()}
+        self.addCleanup(lambda: shutil.rmtree(empty_env["SKILL_FEEDBACK_DIR"], ignore_errors=True))
+        rc, out, _ = _run(
+            "submit", "empty", "--repo", "owner/name",
+            env=empty_env,
+        )
+        self.assertEqual(rc, 0)
+        data = json.loads(out)
+        self.assertTrue(data["dry_run"])
+        self.assertEqual(data["entries_included"], 0)
+        self.assertIs(data["agent_review_required"], True)
 
 
 class TestLimitZeroSemantics(unittest.TestCase):

@@ -510,6 +510,30 @@ def cmd_submit(args: argparse.Namespace) -> dict:
         "dry_run": args.dry_run,
     }
 
+    # Defence-in-depth at submit time. Regex scrubbing (in cmd_log) only
+    # catches token shapes — it cannot catch PII, customer names, internal
+    # hostnames, or contextual leaks. The agent invoking submit is expected
+    # to do a privacy review of `body` before flipping to --no-dry-run. We
+    # surface the responsibility in dry-run output (which the agent reads as
+    # JSON) rather than enforcing it via a flag — the agent already has the
+    # context to do the review, and forcing it would be theatre. See SKILL.md
+    # ("Privacy review before submit") for the full checklist.
+    if args.dry_run:
+        result["agent_review_required"] = True
+        result["agent_review_instructions"] = (
+            "Before re-running with --no-dry-run, scan `body` for content the "
+            "regex scrub cannot catch. If any item in agent_review_checklist "
+            "is present, ABORT and tell the user — do not submit."
+        )
+        result["agent_review_checklist"] = [
+            "PII: real names, email addresses, phone numbers, physical addresses",
+            "customer / employer / client / project names that aren't public",
+            "internal hostnames, private URLs, file paths revealing identity (e.g. /Users/<name>/work/<client>/...)",
+            "ticket IDs, repo names, or Slack channel names that aren't public",
+            "error messages or stack traces that quote internal data",
+            "anything you wouldn't paste into a public issue on an open-source repo",
+        ]
+
     if args.dry_run or not repo:
         if not repo:
             result["note"] = (

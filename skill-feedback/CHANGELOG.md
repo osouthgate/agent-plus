@@ -6,6 +6,12 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+### Added (round 3 — defence-in-depth at submit)
+- **Agent privacy-review responsibility at `submit` time.** Regex scrub catches token shapes; it cannot catch PII, customer names, internal hostnames, or contextual leaks. SKILL.md now has a "Privacy review before submit" section telling the Claude agent already executing the skill to scan the dry-run body against an explicit checklist (real names, customer/employer identifiers, internal URLs, ticket IDs, error messages quoting internal data, etc.) and to ABORT `--no-dry-run` if anything is sensitive. No extra API call, no SDK dep — the existing Claude Code session does the review using its own context. [2026-04-27]
+- **`submit --dry-run` JSON now exposes `agent_review_required: true`** plus `agent_review_instructions` and a 6-item `agent_review_checklist` covering the categories regex can't pattern-match. The fields appear on dry-run only — once `--no-dry-run` runs, the review should already have happened. The agent reads the result as JSON, so the responsibility lands directly in the consuming surface; this is documentation, not enforcement (no flag to require, no flag to bypass). [2026-04-27]
+- **README "Privacy by construction" gained a sibling bullet** ("Defence-in-depth at submit time") describing the second layer so users evaluating the plugin see the full privacy story, not just the regex layer. [2026-04-27]
+- **Tests** for the new behaviour: `agent_review_required` is True on dry-run with entries, True on dry-run with zero entries (preview should still teach the habit), and absent on `--no-dry-run` paths. Suite: 41 → 44.
+
 ### Fixed (round 2 — external review)
 - **`_filter_since` no longer keeps malformed-timestamp entries.** Predicate was `if ts is None or ts >= cutoff`, which kept unparseable rows in EVERY since-window — silently skewing aggregates and `submit` bodies whenever a hand-edited line slipped in. Now drops them. [2026-04-27]
 - **`_parse_iso` coerces naive datetimes to UTC instead of returning naive.** Previously, an entry with `"ts":"2026-04-26T21:30:00"` (no `Z`/offset) parsed as a naive datetime; `_filter_since` then crashed with `TypeError: can't compare offset-naive and offset-aware datetimes`, and `report`/`show` were unusable until the user hand-edited the file. Naive inputs now get `tzinfo=UTC` attached. Also guards `None`/empty input. [2026-04-27]
