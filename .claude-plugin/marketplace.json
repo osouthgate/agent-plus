@@ -57,6 +57,11 @@
       "name": "linear-remote",
       "source": "./linear-remote",
       "description": "Read-first Linear GraphQL API wrapper — issues get/list/search/create/update/move/assign, project overviews with state-bucketed issues, name-resolved teams/states/labels/assignees, --from-markdown YAML frontmatter issue creation, zero API-key leakage."
+    },
+    {
+      "name": "skill-feedback",
+      "source": "./skill-feedback",
+      "description": "Local-first agent self-assessment for Claude Code skills. Agent appends a structured rating + friction note to .agent-plus/skill-feedback/<skill>.jsonl after each skill use. Skill authors aggregate locally with `report` or bundle entries into a GitHub issue body for the skill's source repo with `submit`. No SaaS, no SDK, scrub-on-write."
     }
   ]
 }
