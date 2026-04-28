@@ -2,7 +2,7 @@
 
 A framework for building deterministic CLI tools that [Claude Code](https://claude.com/claude-code) shells out to. Wraps the slow, multi-step API dances agents otherwise burn round-trips on into single-call structured output. Ships an envelope contract, a handful of universal primitives, and a marketplace convention that lets users publish their own plugin collections under a discoverable name.
 
-> **Status: pre-1.0, framework + reference marketplace shipped.** The framework lives here; the reference skills marketplace lives at `osouthgate/agent-plus-skills`.
+> **Status: pre-1.0.** This repo is the framework. A reference marketplace built using it lives at [`osouthgate/agent-plus-skills`](https://github.com/osouthgate/agent-plus-skills) — install it directly, fork it, or use it as a template. You can publish your own marketplace at `<your-handle>/agent-plus-skills` and your team or the public can install your skills the same way.
 
 ## What this is
 
