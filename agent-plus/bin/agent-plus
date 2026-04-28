@@ -1833,7 +1833,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.version:
-        print(_plugin_version())
+        print(f"{TOOL_NAME} {_plugin_version()}")
         return 0
 
     handlers = {

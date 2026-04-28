@@ -6,6 +6,13 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.8.0 - 2026-04-28
+
+`--version` output normalised to `<name> <semver>` shape across all framework plugins.
+
+### Changed
+- **`--version` shape:** now prints `agent-plus X.Y.Z` instead of bare `X.Y.Z`. Uniform with the rest of the framework + marketplace plugins, and lets a discovering reader identify the binary from the version line alone. Minor bump for the public-surface text change.
+
 ## 0.7.0 - 2026-04-28
 
 `refresh` discovers handlers from plugin manifests instead of a hardcoded dispatch table.
