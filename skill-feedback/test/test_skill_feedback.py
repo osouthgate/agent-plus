@@ -191,7 +191,8 @@ class TestStorageRoot(unittest.TestCase):
         # Use a fake HOME so we don't touch the user's real home dir.
         fake_home = Path(self.tmp.name) / "home"
         fake_home.mkdir()
-        env = {"HOME": str(fake_home)}
+        # HOME for POSIX, USERPROFILE for Windows (Path.home() reads USERPROFILE on win32).
+        env = {"HOME": str(fake_home), "USERPROFILE": str(fake_home)}
         # Run from a non-git, no-marker directory.
         proc = subprocess.run(
             [sys.executable, str(BIN), "path"],
