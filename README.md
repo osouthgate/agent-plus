@@ -2,7 +2,7 @@
 
 A framework for building deterministic CLI tools that [Claude Code](https://claude.com/claude-code) shells out to. Wraps the slow, multi-step API dances agents otherwise burn round-trips on into single-call structured output. Ships an envelope contract, a handful of universal primitives, and a marketplace convention that lets users publish their own plugin collections under a discoverable name.
 
-> **Status: pre-1.0, framework + reference marketplace shipped.** The framework lives here; the reference skills marketplace lives at `osouthgate/agent-plus-skills`.
+> **Status: pre-1.0.** This repo is the framework. A reference marketplace built using it lives at [`osouthgate/agent-plus-skills`](https://github.com/osouthgate/agent-plus-skills) — install it directly, fork it, or use it as a template. You can publish your own marketplace at `<your-handle>/agent-plus-skills` and your team or the public can install your skills the same way.
 
 ## What this is
 
@@ -33,7 +33,7 @@ The four plugins that apply to any Claude Code project:
 
 | Plugin | Purpose | Headline |
 | :--- | :--- | :--- |
-| [`agent-plus`](./agent-plus) | The meta plugin — workspace bootstrap, env-var readiness, identity cache, marketplace scaffolding. | `init`, `envcheck`, `refresh`, `list`, `extensions`, `marketplace init <user>/<name>` (shipped); `marketplace install/update/remove` (planned, Phase 2) |
+| [`agent-plus`](./agent-plus) | The meta plugin — workspace bootstrap, env-var readiness, identity cache, marketplace lifecycle. | `init`, `envcheck`, `refresh`, `list`, `extensions`, `marketplace init|install|list|update|remove` |
 | [`repo-analyze`](./repo-analyze) | Cold-start orientation in any unfamiliar repo. Replaces the ~67 grep + ~60 ls dance with one structured payload. | `repo-analyze [--max-tree-files] [--max-tree-depth] [--output] [--shape-depth] [--pretty]` |
 | [`diff-summary`](./diff-summary) | Per-file role + risk classification of a git diff. Replaces 5–20 Read calls with one structured triage. | `diff-summary [--staged \| --base BRANCH \| --range A..B] [--include-patches] [--public-api-only] [--risk MIN] [--output] [--pretty]` |
 | [`skill-feedback`](./skill-feedback) | Local-first agent self-assessment for any Claude Code skill. Append-only JSONL, optional bundle-into-GitHub-issue submit. | `log <skill> --rating --outcome [--friction]`, `show`, `report`, `submit` |
@@ -68,13 +68,17 @@ claude plugin install vercel-remote@agent-plus-skills
 
 # Scaffold your own skills marketplace
 agent-plus marketplace init <your-github-user>/agent-plus-skills
+
+# Install someone else's skills marketplace (commit-pinned, with first-run review)
+agent-plus marketplace install <user>/agent-plus-skills
+agent-plus marketplace list
+agent-plus marketplace update [<user>/<name>]
+agent-plus marketplace remove <user>/<name>
 ```
 
-> A native `agent-plus marketplace install / update / remove` flow (with commit pinning, opt-in update, first-run review prompt) is **planned for Phase 2** — for now, use `claude plugin marketplace add` for installs.
+Each marketplace declares a `marketplace.json` at its root with: skills it ships, minimum agent-plus version, optional commit pinning for verify-on-install, and a `surface` field (`claude-code` for now). Spec: [`plans/todo/2026-04-28-marketplace-convention.md`](./plans/todo/2026-04-28-marketplace-convention.md).
 
-Each marketplace declares a `marketplace.json` at its root with: skills it ships, minimum agent-plus version, optional commit pinning for verify-on-install, and a `surface` field (`claude-code` for now). Spec lives in [`plans/todo/2026-04-28-marketplace-convention.md`](./plans/todo/2026-04-28-marketplace-convention.md) (forthcoming).
-
-**Trust model (Phase 2):** install-time pinning to commit SHA, opt-in update flow, explicit first-run review prompt. The native `agent-plus marketplace install` command will not ship without these gates — supply-chain security is the difference between a thriving ecosystem and a single bad-actor incident. Until then, installs go through Claude Code's native `claude plugin marketplace add`.
+**Trust model — all five gates enforced.** Install pins the commit SHA; nothing in the cloned repo runs at install time; a first-run review prompt is shown once per install (and re-armed on every accepted update); updates are opt-in only (`--cron` is parsed only so it can be refused); when a marketplace declares `checksums`, install verifies them. Plugins from un-accepted marketplaces are **skipped** by `agent-plus refresh` and surfaced under `marketplaces_skipped_unaccepted[]` in the envelope.
 
 ## The seven patterns
 
@@ -142,7 +146,7 @@ claude plugin marketplace update agent-plus
 claude plugin update repo-analyze
 ```
 
-> An `agent-plus marketplace install/update/remove` flow with commit pinning is planned for Phase 2. Today, only `agent-plus marketplace init <user>/<name>` (scaffolder) ships.
+For user marketplaces published under the `<user>/agent-plus-skills` convention, prefer `agent-plus marketplace install <user>/agent-plus-skills` — it pins the commit SHA, prompts a first-run review, and respects the trust gates documented above.
 
 ### Session-only — from a local clone
 
@@ -170,7 +174,7 @@ Active design and migration plans:
 - [`2026-04-28-skill-plus-plugin.md`](./plans/todo/2026-04-28-skill-plus-plugin.md) — discovery + scaffolding + feedback aggregator. The framework's fifth universal primitive.
 - [`2026-04-28-existing-plugin-audit.md`](./plans/todo/2026-04-28-existing-plugin-audit.md) — quality + tier audit of the pre-extraction plugin set.
 - [`2026-04-28-framework-extraction.md`](./plans/todo/2026-04-28-framework-extraction.md) *(forthcoming)* — migration of the 10 service wrappers to `osouthgate/agent-plus-skills`.
-- [`2026-04-28-marketplace-convention.md`](./plans/todo/2026-04-28-marketplace-convention.md) *(forthcoming)* — `<user>/agent-plus-skills` convention, `marketplace.json` schema, install/update/trust protocol.
+- [`2026-04-28-marketplace-convention.md`](./plans/todo/2026-04-28-marketplace-convention.md) — `<user>/agent-plus-skills` convention, `marketplace.json` schema, install/update/trust protocol. Phases 1 + 2 shipped (April 2026); Phase 4 (`search`, collision-resolution `prefer`) remains future work.
 
 ## Contributing / development
 

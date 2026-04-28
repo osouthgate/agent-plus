@@ -655,6 +655,72 @@ def _discover_refresh_handlers(
     return handlers, errors
 
 
+def _discover_marketplace_refresh_handlers(
+    root: Optional[Path] = None,
+) -> tuple[dict, list, list]:
+    """Walk ~/.agent-plus/marketplaces/<owner-name>/ for refresh handlers.
+
+    Trust gate 2 enforced here: a marketplace whose `.agent-plus-meta.json`
+    has `accepted_first_run: false` (or whose meta is missing) is skipped
+    entirely. Its plugin names are returned in the third tuple slot so the
+    caller can warn the user.
+
+    Returns ({plugin_name: refresh_handler_block}, [load_errors],
+             [skipped_unaccepted_marketplaces]).
+    """
+    base = root if root is not None else _marketplaces_root()
+    handlers: dict = {}
+    errors: list = []
+    skipped: list = []
+    if not base.is_dir():
+        return handlers, errors, skipped
+
+    for mdir in sorted(p for p in base.iterdir() if p.is_dir()):
+        if not (mdir / MARKETPLACE_META_FILENAME).is_file():
+            continue
+        accepted = _marketplace_accepted(mdir)
+        mj = mdir / "marketplace.json"
+        if not mj.is_file():
+            continue
+        try:
+            mjd = json.loads(mj.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            errors.append(f"{mj}: {e}")
+            continue
+        skills = mjd.get("skills") if isinstance(mjd, dict) else None
+        if not isinstance(skills, list):
+            continue
+        for s in skills:
+            if not isinstance(s, dict):
+                continue
+            sname = s.get("name")
+            spath = s.get("path")
+            if not isinstance(sname, str) or not isinstance(spath, str):
+                continue
+            manifest = mdir / spath / ".claude-plugin" / "plugin.json"
+            if not manifest.is_file():
+                continue
+            try:
+                pm = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as e:
+                errors.append(f"{manifest}: {e}")
+                continue
+            if not isinstance(pm, dict):
+                continue
+            block = pm.get("refresh_handler")
+            if not block:
+                continue
+            if not accepted:
+                skipped.append(f"{mdir.name}/{sname}")
+                continue
+            normalized, err = _validate_refresh_handler_block(sname, block)
+            if err:
+                errors.append(err)
+                continue
+            handlers[sname] = normalized
+    return handlers, errors, skipped
+
+
 def _run_refresh_handler(
     name: str,
     block: dict,
@@ -1041,6 +1107,15 @@ def cmd_refresh(args: argparse.Namespace) -> dict:
     # Discover refresh handlers from installed plugin manifests.
     discovered, discovery_errors = _discover_refresh_handlers()
 
+    # Also walk installed marketplaces under ~/.agent-plus/marketplaces/.
+    # Trust gate 2: skip any marketplace whose first-run prompt has not been
+    # accepted, and surface the names so the agent can inform the user.
+    mp_handlers, mp_errors, mp_skipped = _discover_marketplace_refresh_handlers()
+    for k, v in mp_handlers.items():
+        # Don't shadow a Claude-Code-cached handler with the same name.
+        discovered.setdefault(k, v)
+    discovery_errors.extend(mp_errors)
+
     plugins_to_refresh: list[str]
     if args.plugin:
         if args.plugin not in discovered:
@@ -1103,6 +1178,8 @@ def cmd_refresh(args: argparse.Namespace) -> dict:
             payload["extension_errors"] = extension_errors
     if discovery_errors:
         payload["handler_discovery_errors"] = discovery_errors
+    if mp_skipped:
+        payload["marketplaces_skipped_unaccepted"] = mp_skipped
 
     # Merge into services.json if the workspace exists.
     services_path = workspace / "services.json"
@@ -1710,15 +1787,891 @@ def cmd_marketplace_init(args: argparse.Namespace) -> dict:
     return payload
 
 
+# ─── marketplace lifecycle (Phase 2) ─────────────────────────────────────────
+#
+# install / list / update / remove. Trust gates per
+# plans/todo/2026-04-28-marketplace-convention.md "Trust model":
+#   1. Pin to commit SHA at install.
+#   2. First-run review prompt — once per install, re-armed on update accept.
+#   3. No automatic updates (--cron explicitly refused).
+#   4. No execution at install time. Clone + parse JSON + filesystem move only.
+#   5. Optional checksum verification when marketplace.json declares them.
+
+MARKETPLACE_META_FILENAME = ".agent-plus-meta.json"
+MARKETPLACE_RESERVED_SURFACES = frozenset({"claude-ai", "universal"})
+
+
+def _marketplaces_root() -> Path:
+    """Return the user-state marketplaces directory.
+
+    Defaults to ~/.agent-plus/marketplaces/. The AGENT_PLUS_MARKETPLACES_ROOT
+    env var overrides for tests so the suite never touches a real install.
+    """
+    override = os.environ.get("AGENT_PLUS_MARKETPLACES_ROOT")
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / ".agent-plus" / "marketplaces").resolve()
+
+
+def _marketplace_state_dir(owner: str, name: str) -> Path:
+    return _marketplaces_root() / f"{owner}-{name}"
+
+
+def _read_marketplace_meta(state_dir: Path) -> Optional[dict]:
+    p = state_dir / MARKETPLACE_META_FILENAME
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_marketplace_meta(state_dir: Path, meta: dict) -> None:
+    p = state_dir / MARKETPLACE_META_FILENAME
+    p.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+
+def _marketplace_accepted(state_dir: Path) -> bool:
+    """Return True if the marketplace's first-run prompt has been accepted."""
+    meta = _read_marketplace_meta(state_dir)
+    return bool(meta and meta.get("accepted_first_run") is True)
+
+
+# ── semver-range checking (minimal, stdlib-only) ────────────────────────────
+
+_VERSION_RE = re.compile(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?")
+_RANGE_CLAUSE_RE = re.compile(
+    r"^\s*(>=|<=|>|<|==|=)?\s*([0-9][0-9A-Za-z\.\-+]*)\s*$"
+)
+
+
+def _parse_version_tuple(s: str) -> tuple[int, int, int]:
+    m = _VERSION_RE.match(s.strip().lstrip("v"))
+    if not m:
+        raise ValueError(f"unparseable version: {s!r}")
+    return (int(m.group(1)), int(m.group(2) or 0), int(m.group(3) or 0))
+
+
+def _validate_range_spec(range_spec: Any) -> bool:
+    if not isinstance(range_spec, str) or not range_spec.strip():
+        return False
+    for clause in range_spec.split(","):
+        if not _RANGE_CLAUSE_RE.match(clause.strip()):
+            return False
+    return True
+
+
+def _satisfies_range(version: str, range_spec: str) -> bool:
+    try:
+        v = _parse_version_tuple(version)
+    except ValueError:
+        return False
+    for clause in range_spec.split(","):
+        clause = clause.strip()
+        if not clause:
+            continue
+        m = _RANGE_CLAUSE_RE.match(clause)
+        if not m:
+            return False
+        op = m.group(1) or "=="
+        try:
+            target = _parse_version_tuple(m.group(2))
+        except ValueError:
+            return False
+        if op == ">=" and not (v >= target):
+            return False
+        if op == ">" and not (v > target):
+            return False
+        if op == "<=" and not (v <= target):
+            return False
+        if op == "<" and not (v < target):
+            return False
+        if op in ("==", "=") and not (v == target):
+            return False
+    return True
+
+
+# ── deterministic plugin-dir checksum ───────────────────────────────────────
+
+def _plugin_dir_checksum(plugin_dir: Path) -> str:
+    """SHA-256 of a deterministic tar of every regular file in the plugin
+    directory. Metadata zeroed out so the same tree always hashes the same.
+    """
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    files = sorted(p for p in plugin_dir.rglob("*") if p.is_file())
+    with tarfile.open(fileobj=buf, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        for path in files:
+            arcname = path.relative_to(plugin_dir).as_posix()
+            data = path.read_bytes()
+            ti = tarfile.TarInfo(name=arcname)
+            ti.size = len(data)
+            ti.mtime = 0
+            ti.uid = 0
+            ti.gid = 0
+            ti.uname = ""
+            ti.gname = ""
+            ti.mode = 0o644
+            tar.addfile(ti, io.BytesIO(data))
+    return hashlib.sha256(buf.getvalue()).hexdigest()
+
+
+# ── git helpers ─────────────────────────────────────────────────────────────
+
+def _git_clone_shallow(url: str, dest: Path) -> tuple[bool, Optional[str]]:
+    if shutil.which("git") is None:
+        return False, "git not found on PATH"
+    try:
+        # `--` separator is load-bearing: prevents a URL that starts with `--`
+        # from being parsed as a flag by git (CVE-2017-1000117 shape). The
+        # default URL is https://... and safe; the `--url` override is the
+        # exposure vector. Kept paranoid by design.
+        proc = subprocess.run(
+            ["git", "-c", "protocol.version=2", "clone", "--depth", "1",
+             "--", url, str(dest)],
+            capture_output=True, text=True, timeout=180, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"git clone spawn failed: {e}"
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout or "git clone failed").strip()
+        return False, msg[:400]
+    return True, None
+
+
+def _git_head_sha(repo: Path) -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(repo), check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    sha = proc.stdout.strip()
+    return sha or None
+
+
+def _git_show_at(repo: Path, sha: str, path: str) -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            ["git", "show", f"{sha}:{path}"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(repo), check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def _resolve_origin_default_branch(repo: Path) -> Optional[str]:
+    try:
+        proc = subprocess.run(
+            ["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(repo), check=False,
+        )
+        if proc.returncode == 0:
+            ref = proc.stdout.strip()
+            prefix = "refs/remotes/origin/"
+            if ref.startswith(prefix):
+                return ref[len(prefix):]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for guess in ("main", "master"):
+        try:
+            proc = subprocess.run(
+                ["git", "rev-parse", f"origin/{guess}"],
+                capture_output=True, text=True, timeout=5,
+                cwd=str(repo), check=False,
+            )
+            if proc.returncode == 0:
+                return guess
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return None
+
+
+# ── marketplace.json validation ─────────────────────────────────────────────
+
+def _validate_marketplace_json(
+    data: Any, owner: str, clone_root: Path,
+) -> tuple[bool, list[str], dict]:
+    """Pure validator: parses the cloned marketplace.json and the plugin
+    manifests it points at. Never executes anything from the clone."""
+    errs: list[str] = []
+    if not isinstance(data, dict):
+        return False, ["marketplace.json: not a JSON object"], {}
+
+    name = data.get("name")
+    if name != MARKETPLACE_REQUIRED_NAME:
+        errs.append(
+            f"marketplace.json: name must be {MARKETPLACE_REQUIRED_NAME!r}, "
+            f"got {name!r}"
+        )
+
+    declared_owner = data.get("owner")
+    if declared_owner != owner:
+        errs.append(
+            f"marketplace.json: owner {declared_owner!r} does not match URL "
+            f"slug owner {owner!r}"
+        )
+
+    apv = data.get("agent_plus_version")
+    if not _validate_range_spec(apv):
+        errs.append(
+            f"marketplace.json: agent_plus_version is malformed: {apv!r}"
+        )
+    else:
+        fw = _plugin_version()
+        if not _satisfies_range(fw, apv):
+            errs.append(
+                f"marketplace.json: framework version {fw} does not satisfy "
+                f"agent_plus_version={apv!r}"
+            )
+
+    surface = data.get("surface", MARKETPLACE_DEFAULT_SURFACE)
+    if surface in MARKETPLACE_RESERVED_SURFACES:
+        errs.append(
+            f"marketplace.json: surface {surface!r} is reserved for future use"
+        )
+    elif surface != MARKETPLACE_DEFAULT_SURFACE:
+        errs.append(
+            f"marketplace.json: unsupported surface {surface!r}"
+        )
+
+    skills = data.get("skills", [])
+    if not isinstance(skills, list):
+        errs.append("marketplace.json: skills must be a list")
+        skills = []
+
+    plugin_summaries: list[dict] = []
+    clone_root_resolved = clone_root.resolve()
+    for i, s in enumerate(skills):
+        if not isinstance(s, dict):
+            errs.append(f"skills[{i}]: not an object")
+            continue
+        sname = s.get("name")
+        sver = s.get("version")
+        spath = s.get("path")
+        if not isinstance(sname, str) or not sname:
+            errs.append(f"skills[{i}]: missing/invalid name")
+            continue
+        if not isinstance(sver, str) or not sver:
+            errs.append(f"skills[{i}].{sname}: missing/invalid version")
+        if not isinstance(spath, str) or not spath:
+            errs.append(f"skills[{i}].{sname}: missing/invalid path")
+            continue
+        plugin_dir = (clone_root / spath).resolve()
+        try:
+            plugin_dir.relative_to(clone_root_resolved)
+        except ValueError:
+            errs.append(
+                f"skills[{i}].{sname}: path escapes clone root: {spath!r}"
+            )
+            continue
+        if not plugin_dir.is_dir():
+            errs.append(
+                f"skills[{i}].{sname}: path does not exist in clone: {spath!r}"
+            )
+            continue
+        manifest = plugin_dir / ".claude-plugin" / "plugin.json"
+        if not manifest.is_file():
+            errs.append(
+                f"skills[{i}].{sname}: missing .claude-plugin/plugin.json "
+                f"under {spath!r}"
+            )
+            continue
+        try:
+            pm = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            errs.append(
+                f"skills[{i}].{sname}: plugin.json unreadable: {e}"
+            )
+            continue
+        if not isinstance(pm, dict):
+            errs.append(f"skills[{i}].{sname}: plugin.json not an object")
+            continue
+        if pm.get("name") != sname:
+            errs.append(
+                f"skills[{i}].{sname}: plugin.json name {pm.get('name')!r} "
+                f"!= marketplace.json name {sname!r}"
+            )
+        if pm.get("version") != sver:
+            errs.append(
+                f"skills[{i}].{sname}: plugin.json version "
+                f"{pm.get('version')!r} != marketplace.json version {sver!r}"
+            )
+        plugin_summaries.append({
+            "name": sname,
+            "version": sver,
+            "path": spath,
+            "obviates": (
+                s["obviates"] if isinstance(s.get("obviates"), list) else []
+            ),
+        })
+
+    checksums = data.get("checksums")
+    if checksums is not None:
+        if not isinstance(checksums, dict):
+            errs.append("marketplace.json: checksums must be an object")
+        else:
+            for ps in plugin_summaries:
+                expected = checksums.get(ps["name"])
+                if expected is None:
+                    continue  # partial checksums are allowed
+                if not isinstance(expected, str):
+                    errs.append(
+                        f"checksums.{ps['name']}: must be a string"
+                    )
+                    continue
+                exp = expected[7:] if expected.startswith("sha256:") else expected
+                actual = _plugin_dir_checksum(clone_root / ps["path"])
+                if actual != exp:
+                    errs.append(
+                        f"checksum mismatch for {ps['name']}: expected "
+                        f"{exp!r}, got {actual!r}"
+                    )
+
+    return (not errs), errs, {"plugins": plugin_summaries}
+
+
+# ── interactive y/n on stdin (default no on EOF) ────────────────────────────
+
+def _read_yes_no(prompt: str) -> bool:
+    sys.stderr.write(prompt)
+    sys.stderr.flush()
+    try:
+        line = sys.stdin.readline()
+    except (OSError, KeyboardInterrupt):
+        return False
+    if not line:
+        return False
+    return line.strip().lower() in ("y", "yes")
+
+
+def _format_first_run_prompt(
+    owner: str, name: str, sha: str, plugins: list[dict],
+) -> str:
+    lines = [
+        "",
+        f"=== agent-plus marketplace install: {owner}/{name} ===",
+        f"  pinned SHA: {sha}",
+        f"  plugins ({len(plugins)}):",
+    ]
+    obviates_union: set[str] = set()
+    for p in plugins:
+        lines.append(
+            f"    - {p['name']} {p.get('version', '?')}  ({p.get('path', '?')})"
+        )
+        for o in p.get("obviates") or []:
+            if isinstance(o, str):
+                obviates_union.add(o)
+    if obviates_union:
+        lines.append("  obviates (commands these plugins replace):")
+        for o in sorted(obviates_union):
+            lines.append(f"    - {o}")
+    lines.append("")
+    lines.append(
+        "Install only writes files; no code from the clone has executed."
+    )
+    lines.append(
+        "Plugins from this marketplace will refuse to load until you accept."
+    )
+    lines.append("")
+    lines.append("Accept? [y/N]: ")
+    return "\n".join(lines)
+
+
+# ── install / list / update / remove ────────────────────────────────────────
+
+def cmd_marketplace_install(args: argparse.Namespace) -> dict:
+    slug = args.slug
+    m = MARKETPLACE_SLUG_RE.match(slug)
+    if not m:
+        return {"error": f"invalid slug {slug!r}; expected `<user>/<name>`"}
+    owner, name = m.group(1), m.group(2)
+    if name != MARKETPLACE_REQUIRED_NAME:
+        return {
+            "error": (
+                f"v1 reserves the marketplace name "
+                f"`{MARKETPLACE_REQUIRED_NAME}`; got `{name}`"
+            ),
+            "slug": slug,
+        }
+
+    target = _marketplace_state_dir(owner, name)
+    if target.exists():
+        return {
+            "error": (
+                f"marketplace already installed at {target}; use "
+                f"`marketplace update` or `marketplace remove` first"
+            ),
+            "path": str(target),
+        }
+
+    url = args.url or f"https://github.com/{owner}/{name}.git"
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    # Clone into a sibling temp dir so the move stays on one filesystem.
+    with tempfile.TemporaryDirectory(prefix=".clone-", dir=str(target.parent)) as tmp:
+        tmp_clone = Path(tmp) / "clone"
+        ok, err = _git_clone_shallow(url, tmp_clone)
+        if not ok:
+            return {"error": f"git clone failed: {err}", "url": url}
+
+        mj_path = tmp_clone / "marketplace.json"
+        if not mj_path.is_file():
+            return {
+                "error": "clone missing marketplace.json at repo root",
+                "url": url,
+            }
+        try:
+            mj_data = json.loads(mj_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            return {"error": f"marketplace.json unreadable: {e}"}
+
+        valid, errs, normalized = _validate_marketplace_json(
+            mj_data, owner, tmp_clone,
+        )
+        if not valid:
+            return {
+                "error": "marketplace validation failed",
+                "validation_errors": errs,
+            }
+
+        sha = _git_head_sha(tmp_clone)
+        if not sha:
+            return {"error": "could not resolve HEAD SHA from clone"}
+
+        # Move the validated clone into place. shutil.move across the same
+        # filesystem is a rename; cross-fs falls back to copy+remove.
+        shutil.move(str(tmp_clone), str(target))
+
+    plugins = normalized["plugins"]
+    meta = {
+        "owner": owner,
+        "name": name,
+        "pinned_sha": sha,
+        "installed_at": _now_iso(),
+        "framework_version": _plugin_version(),
+        "accepted_first_run": False,
+    }
+    _write_marketplace_meta(target, meta)
+
+    # Trust gate 2: first-run review prompt. Stderr-only; stdout stays JSON.
+    accepted = _read_yes_no(
+        _format_first_run_prompt(owner, name, sha, plugins)
+    )
+    if accepted:
+        meta["accepted_first_run"] = True
+        _write_marketplace_meta(target, meta)
+    else:
+        sys.stderr.write(
+            f"\n[!] Marketplace installed but NOT accepted. Plugins from "
+            f"{owner}/{name} will refuse to load until accepted.\n"
+            f"    To accept, run `agent-plus marketplace remove "
+            f"{owner}/{name}` and re-install, or set "
+            f'`accepted_first_run: true` in '
+            f"{target / MARKETPLACE_META_FILENAME}.\n\n"
+        )
+
+    return {
+        "marketplace": {
+            "owner": owner,
+            "name": name,
+            "path": str(target),
+            "pinned_sha": sha,
+            "plugins_count": len(plugins),
+            "first_run_accepted": meta["accepted_first_run"],
+        },
+    }
+
+
+def cmd_marketplace_list(args: argparse.Namespace) -> dict:  # noqa: ARG001
+    root = _marketplaces_root()
+    entries: list[dict] = []
+    warnings: list[str] = []
+    if not root.is_dir():
+        return {"root": str(root), "marketplaces": []}
+    for child in sorted(root.iterdir()):
+        if not child.is_dir():
+            continue
+        meta = _read_marketplace_meta(child)
+        if meta is None:
+            warnings.append(
+                f"{child.name}: missing or unreadable "
+                f"{MARKETPLACE_META_FILENAME}"
+            )
+            continue
+        plugins_count = 0
+        plugins_summary: list[dict] = []
+        mj = child / "marketplace.json"
+        if mj.is_file():
+            try:
+                mjd = json.loads(mj.read_text(encoding="utf-8"))
+                skills = mjd.get("skills") if isinstance(mjd, dict) else None
+                if isinstance(skills, list):
+                    plugins_count = len(skills)
+                    for s in skills:
+                        if isinstance(s, dict) and isinstance(s.get("name"), str):
+                            plugins_summary.append({
+                                "name": s["name"],
+                                "version": s.get("version"),
+                            })
+            except (OSError, json.JSONDecodeError) as e:
+                warnings.append(
+                    f"{child.name}: marketplace.json unreadable: {e}"
+                )
+        entries.append({
+            "owner": meta.get("owner"),
+            "name": meta.get("name"),
+            "path": str(child),
+            "pinned_sha": meta.get("pinned_sha"),
+            "installed_at": meta.get("installed_at"),
+            "framework_version": meta.get("framework_version"),
+            "first_run_accepted": bool(meta.get("accepted_first_run")),
+            "plugins_count": plugins_count,
+            "plugins": plugins_summary,
+        })
+    out: dict = {"root": str(root), "marketplaces": entries}
+    if warnings:
+        out["warnings"] = warnings
+    return out
+
+
+def _diff_skill_lists(
+    old: list[dict], new: list[dict],
+) -> dict[str, list[str]]:
+    old_by_name = {
+        s.get("name"): s for s in old if isinstance(s.get("name"), str)
+    }
+    new_by_name = {
+        s.get("name"): s for s in new if isinstance(s.get("name"), str)
+    }
+    added = [
+        f"{n} {s.get('version', '?')}"
+        for n, s in new_by_name.items() if n not in old_by_name
+    ]
+    removed = [
+        f"{n} {s.get('version', '?')}"
+        for n, s in old_by_name.items() if n not in new_by_name
+    ]
+    bumped: list[str] = []
+    for n, s in new_by_name.items():
+        if n in old_by_name and old_by_name[n].get("version") != s.get("version"):
+            bumped.append(
+                f"{n} {old_by_name[n].get('version', '?')} → "
+                f"{s.get('version', '?')}"
+            )
+    return {"added": added, "removed": removed, "version-changed": bumped}
+
+
+def _skills_at_sha(repo: Path, sha: str) -> list[dict]:
+    raw = _git_show_at(repo, sha, "marketplace.json")
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    skills = data.get("skills") if isinstance(data, dict) else None
+    if not isinstance(skills, list):
+        return []
+    return [s for s in skills if isinstance(s, dict)]
+
+
+def _update_one(state_dir: Path) -> dict:
+    meta = _read_marketplace_meta(state_dir)
+    if meta is None:
+        return {"path": str(state_dir), "error": "missing meta"}
+    owner = meta.get("owner") or ""
+    name = meta.get("name") or ""
+    slug = f"{owner}/{name}"
+    old_sha = meta.get("pinned_sha")
+
+    # git fetch
+    try:
+        proc = subprocess.run(
+            ["git", "fetch", "--quiet", "origin"],
+            capture_output=True, text=True, timeout=120,
+            cwd=str(state_dir), check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"slug": slug, "error": f"git fetch failed: {e}"}
+    if proc.returncode != 0:
+        return {
+            "slug": slug,
+            "error": (
+                f"git fetch exited {proc.returncode}: "
+                f"{(proc.stderr or '').strip()[:200]}"
+            ),
+        }
+
+    branch = _resolve_origin_default_branch(state_dir)
+    if not branch:
+        return {"slug": slug, "error": "could not resolve origin default branch"}
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", f"origin/{branch}"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(state_dir), check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"slug": slug, "error": f"rev-parse failed: {e}"}
+    new_sha = proc.stdout.strip()
+    if not new_sha:
+        return {"slug": slug, "error": "could not resolve new SHA"}
+
+    if new_sha == old_sha:
+        return {
+            "slug": slug,
+            "status": "up-to-date",
+            "pinned_sha": old_sha,
+        }
+
+    # Diff stat (informational; used only for the human prompt)
+    try:
+        diff_proc = subprocess.run(
+            ["git", "diff", "--stat", f"{old_sha}..{new_sha}"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(state_dir), check=False,
+        )
+        diff_stat = diff_proc.stdout if diff_proc.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        diff_stat = ""
+
+    new_mj_raw = _git_show_at(state_dir, new_sha, "marketplace.json")
+    new_mj: Optional[dict] = None
+    if new_mj_raw:
+        try:
+            parsed = json.loads(new_mj_raw)
+            if isinstance(parsed, dict):
+                new_mj = parsed
+        except json.JSONDecodeError:
+            new_mj = None
+
+    apv_blocks = False
+    apv_msg = ""
+    if isinstance(new_mj, dict):
+        new_apv = new_mj.get("agent_plus_version")
+        if isinstance(new_apv, str) and _validate_range_spec(new_apv):
+            if not _satisfies_range(_plugin_version(), new_apv):
+                apv_blocks = True
+                apv_msg = (
+                    f"new agent_plus_version={new_apv!r} not satisfied by "
+                    f"framework {_plugin_version()}"
+                )
+
+    old_skills = _skills_at_sha(state_dir, old_sha) if old_sha else []
+    new_skills_list: list[dict] = []
+    if isinstance(new_mj, dict) and isinstance(new_mj.get("skills"), list):
+        new_skills_list = [
+            s for s in new_mj["skills"] if isinstance(s, dict)
+        ]
+    skills_diff = _diff_skill_lists(old_skills, new_skills_list)
+
+    sys.stderr.write(f"\n=== marketplace update: {slug} ===\n")
+    sys.stderr.write(
+        f"  {(old_sha or '?')[:8]} → {new_sha[:8]}\n\n"
+    )
+    if diff_stat.strip():
+        sys.stderr.write("Changed files:\n")
+        for line in diff_stat.splitlines():
+            sys.stderr.write(f"  {line}\n")
+        sys.stderr.write("\n")
+    if any(skills_diff.values()):
+        sys.stderr.write("Skills diff:\n")
+        for verb, items in skills_diff.items():
+            for it in items:
+                sys.stderr.write(f"  [{verb}] {it}\n")
+        sys.stderr.write("\n")
+
+    if apv_blocks:
+        sys.stderr.write(
+            f"[BLOCKED] {apv_msg}\n"
+            f"Upgrade agent-plus first, then re-run update.\n\n"
+        )
+        return {
+            "slug": slug,
+            "status": "blocked",
+            "old_sha": old_sha,
+            "new_sha": new_sha,
+            "reason": apv_msg,
+        }
+
+    if not _read_yes_no(
+        f"Accept update from {(old_sha or '?')[:8]} to {new_sha[:8]}? [y/N]: "
+    ):
+        return {
+            "slug": slug,
+            "status": "declined",
+            "old_sha": old_sha,
+            "new_sha": new_sha,
+        }
+
+    # Fast-forward to the new SHA.
+    try:
+        ff = subprocess.run(
+            ["git", "merge", "--ff-only", new_sha],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(state_dir), check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"slug": slug, "error": f"merge failed: {e}"}
+    if ff.returncode != 0:
+        return {
+            "slug": slug,
+            "error": (
+                f"git merge --ff-only failed: "
+                f"{(ff.stderr or '').strip()[:200]}"
+            ),
+        }
+
+    meta["pinned_sha"] = new_sha
+    meta["accepted_first_run"] = False  # re-arm: new code surface
+    meta["updated_at"] = _now_iso()
+    meta["framework_version"] = _plugin_version()
+    _write_marketplace_meta(state_dir, meta)
+
+    sys.stderr.write(
+        f"\n[i] {slug} updated. Re-arming first-run acceptance for the new "
+        f"surface.\n"
+    )
+    re_plugins: list[dict] = []
+    for s in new_skills_list:
+        re_plugins.append({
+            "name": s.get("name"),
+            "version": s.get("version"),
+            "path": s.get("path"),
+            "obviates": (
+                s["obviates"] if isinstance(s.get("obviates"), list) else []
+            ),
+        })
+    if _read_yes_no(_format_first_run_prompt(owner, name, new_sha, re_plugins)):
+        meta["accepted_first_run"] = True
+        _write_marketplace_meta(state_dir, meta)
+
+    return {
+        "slug": slug,
+        "status": "updated",
+        "old_sha": old_sha,
+        "new_sha": new_sha,
+        "first_run_accepted": meta["accepted_first_run"],
+    }
+
+
+def cmd_marketplace_update(args: argparse.Namespace) -> dict:
+    if getattr(args, "cron", False):
+        return {
+            "error": (
+                "marketplace update refuses --cron. Updates are interactive "
+                "only by trust-model design. Wire your own scheduler if you "
+                "want one — and own the failure mode."
+            ),
+        }
+
+    root = _marketplaces_root()
+    targets: list[Path] = []
+    if args.slug:
+        m = MARKETPLACE_SLUG_RE.match(args.slug)
+        if not m:
+            return {"error": f"invalid slug {args.slug!r}"}
+        owner, name = m.group(1), m.group(2)
+        d = _marketplace_state_dir(owner, name)
+        if not d.is_dir():
+            return {
+                "error": f"marketplace not installed: {owner}/{name}",
+                "path": str(d),
+            }
+        targets.append(d)
+    elif root.is_dir():
+        for c in sorted(root.iterdir()):
+            if c.is_dir() and (c / MARKETPLACE_META_FILENAME).is_file():
+                targets.append(c)
+
+    results = [_update_one(d) for d in targets]
+    return {"root": str(root), "updates": results}
+
+
+def cmd_marketplace_remove(args: argparse.Namespace) -> dict:
+    slug = args.slug
+    m = MARKETPLACE_SLUG_RE.match(slug)
+    if not m:
+        return {"error": f"invalid slug {slug!r}; expected `<user>/<name>`"}
+    owner, name = m.group(1), m.group(2)
+    target = _marketplace_state_dir(owner, name)
+    if not target.exists():
+        return {
+            "slug": f"{owner}/{name}",
+            "status": "not-installed",
+            "path": str(target),
+        }
+    if not _read_yes_no(
+        f"Remove marketplace {owner}/{name} at {target}? [y/N]: "
+    ):
+        return {
+            "slug": f"{owner}/{name}",
+            "status": "declined",
+            "path": str(target),
+        }
+    _rmtree_force(target)
+    return {
+        "slug": f"{owner}/{name}",
+        "status": "removed",
+        "path": str(target),
+    }
+
+
+def _rmtree_force(path: Path) -> None:
+    """rmtree that tolerates read-only files (Windows git packs).
+
+    git marks pack `.idx` and `.pack` files read-only on Windows; vanilla
+    `shutil.rmtree` raises PermissionError on them. The onexc/onerror callback
+    chmods writable and retries.
+    """
+    import stat
+
+    def _onerror(func, p, exc_info):  # noqa: ARG001 — signature fixed by stdlib
+        try:
+            os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
+        except OSError:
+            pass
+        try:
+            func(p)
+        except OSError:
+            pass
+
+    # Python 3.12 renamed `onerror` → `onexc`; 3.9–3.11 only have `onerror`.
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_onerror)  # type: ignore[call-arg]
+    else:
+        shutil.rmtree(path, onerror=_onerror)
+
+
 def cmd_marketplace(args: argparse.Namespace) -> dict:
     sub = getattr(args, "marketplace_cmd", None)
     if sub == "init":
         return cmd_marketplace_init(args)
+    if sub == "install":
+        return cmd_marketplace_install(args)
+    if sub == "list":
+        return cmd_marketplace_list(args)
+    if sub == "update":
+        return cmd_marketplace_update(args)
+    if sub == "remove":
+        return cmd_marketplace_remove(args)
     return {
-        "error": (
-            "marketplace subcommand required: init "
-            "(install/update/list/remove are Phase 2)"
-        ),
+        "error": "marketplace subcommand required: init|install|list|update|remove",
     }
 
 
@@ -1818,6 +2771,38 @@ def _build_parser() -> argparse.ArgumentParser:
     s_minit.add_argument("slug", help="`<user>/<name>` slug; name must be `agent-plus-skills` for v1")
     s_minit.add_argument("--path", help="override target directory (default: <cwd>/<name>/)")
 
+    s_minst = market_sub.add_parser(
+        "install",
+        help="clone + register a <user>/agent-plus-skills marketplace (interactive accept)",
+        parents=[pretty_parent],
+    )
+    s_minst.add_argument("slug", help="`<user>/agent-plus-skills` slug")
+    # --url is a test-only override; documented hint kept terse.
+    s_minst.add_argument("--url", help=argparse.SUPPRESS)
+
+    market_sub.add_parser(
+        "list",
+        help="list installed marketplaces",
+        parents=[pretty_parent],
+    )
+
+    s_mup = market_sub.add_parser(
+        "update",
+        help="update an installed marketplace (interactive; refuses --cron)",
+        parents=[pretty_parent],
+    )
+    s_mup.add_argument("slug", nargs="?",
+                       help="`<user>/<name>` slug (default: iterate all installed)")
+    s_mup.add_argument("--cron", action="store_true",
+                       help="explicitly refused by trust model — do not use")
+
+    s_mrm = market_sub.add_parser(
+        "remove",
+        help="remove an installed marketplace (interactive confirm)",
+        parents=[pretty_parent],
+    )
+    s_mrm.add_argument("slug", help="`<user>/<name>` slug")
+
     return p
 
 
@@ -1833,7 +2818,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.version:
-        print(_plugin_version())
+        print(f"{TOOL_NAME} {_plugin_version()}")
         return 0
 
     handlers = {

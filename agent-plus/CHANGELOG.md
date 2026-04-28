@@ -6,6 +6,46 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.9.0 - 2026-04-28
+
+`marketplace install / list / update / remove` + the trust model (Phase 2 of the marketplace convention).
+
+### Added
+
+- **`agent-plus marketplace install <user>/agent-plus-skills`** — clones the repo to a temp dir, validates `marketplace.json` against the schema (name, owner-vs-URL, `agent_plus_version` semver-range satisfaction, `surface`, every skill's path + plugin.json name/version match), optionally verifies SHA-256 plugin checksums when declared, resolves the pinned commit SHA, and moves the validated tree to `~/.agent-plus/marketplaces/<owner>-<name>/`. Records install state in `.agent-plus-meta.json` (`pinned_sha`, `installed_at`, `framework_version`, `accepted_first_run: false`). Then fires the **first-run review prompt** showing pinned SHA, plugins (name + version + path), and the union of every plugin's `obviates` list — interactive `[y/N]` on stderr, JSON envelope on stdout. Decline leaves the install in place but un-accepted; until accepted, marketplace plugins refuse to load.
+- **`agent-plus marketplace list`** — emits a `marketplaces[]` envelope keyed by owner/name with pinned SHA, install date, plugin count, and `first_run_accepted` flag. Stale or malformed install dirs are surfaced under `warnings[]` rather than failing the command.
+- **`agent-plus marketplace update [<user>/<name>]`** — `git fetch`, computes diff (changed files + per-skill added/removed/version-changed), prints to stderr, prompts `Accept update from <old[:8]> to <new[:8]>? [y/N]`. On accept: fast-forwards, updates `pinned_sha`, **re-arms `accepted_first_run: false`** (new code surface = new consent), then fires a re-armed first-run prompt. Without a slug, iterates every installed marketplace and prompts per-one. Refuses `--cron` explicitly with a trust-model message. Blocks (does not prompt) when the upstream `marketplace.json` raises `agent_plus_version` to a level the local framework doesn't satisfy — user upgrades agent-plus first.
+- **`agent-plus marketplace remove <user>/<name>`** — interactive confirm, `shutil.rmtree` (with chmod-on-error fallback for Windows git pack files which are read-only). Idempotent: removing a non-installed marketplace returns `status: not-installed` rather than an error.
+
+### Trust gates (all five enforced)
+
+1. **Pin to commit SHA** — recorded at install in `.agent-plus-meta.json:pinned_sha`. Updates are explicit fast-forwards.
+2. **First-run review prompt** — once per install, re-armed on update accept. Blocks plugin loading until accepted.
+3. **No automatic updates** — `--cron` flag is parsed only so it can be refused. No env-var bypass, no `--non-interactive` mode.
+4. **No execution at install time** — install is `git clone` + JSON parse + filesystem move. Nothing in the cloned repo runs. Verified by a test that drops `validate.py` / `post-install.sh` / `scripts/build.py` payloads in the upstream and asserts no marker file is written.
+5. **Optional checksum verification** — when `marketplace.json` declares `checksums: {<plugin>: sha256:...}`, install computes a deterministic SHA-256 over each plugin directory's USTAR tar (zeroed mtime/uid/gid/uname/gname, sorted entries). Mismatch aborts the install; the partial clone is discarded with the temp dir.
+
+### Refresh integration
+
+- **`agent-plus refresh` now also walks `~/.agent-plus/marketplaces/`.** Plugins from un-accepted marketplaces are **skipped** rather than executed; the skipped plugin names are surfaced under a new `marketplaces_skipped_unaccepted[]` field in the envelope so the agent can warn the user. Cache discovery (`~/.claude/plugins/cache/`) is unchanged and takes precedence on plugin-name collisions.
+
+### Configuration
+
+- **`AGENT_PLUS_MARKETPLACES_ROOT`** env var overrides the default `~/.agent-plus/marketplaces/` location. Intended for tests; the suite uses it so it never touches a real install.
+
+### Notes
+
+- Stdlib only. Semver-range parser handles `>=`, `>`, `<=`, `<`, `==`, `=`, comma-AND clauses against `MAJOR.MINOR.PATCH` versions. Sufficient for the convention's `agent_plus_version: ">=0.5"` style declarations.
+- All prompts read from stdin; EOF defaults to *no* (deny). Output to stderr, JSON envelope to stdout.
+- Phase 1 (`marketplace init`) and Phase 2 (this slice) are now both implemented. Phase 4 (`search`, collision-resolution `prefer`) remains future work.
+
+## 0.8.0 - 2026-04-28
+
+`--version` output normalised to `<name> <semver>` shape across all framework plugins.
+
+### Changed
+- **`--version` shape:** now prints `agent-plus X.Y.Z` instead of bare `X.Y.Z`. Uniform with the rest of the framework + marketplace plugins, and lets a discovering reader identify the binary from the version line alone. Minor bump for the public-surface text change.
+
 ## 0.7.0 - 2026-04-28
 
 `refresh` discovers handlers from plugin manifests instead of a hardcoded dispatch table.
