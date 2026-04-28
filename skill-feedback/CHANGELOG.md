@@ -6,6 +6,13 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.2.0 - 2026-04-28
+
+Coordinated framework-plugin envelope-contract bump (Track A slice A0).
+
+### Changed
+- **Envelope field rename: `savedTo` → `payloadPath`.** Coordinated rename across the four framework plugins (`agent-plus`, `repo-analyze`, `diff-summary`, `skill-feedback`) so the `--output` envelope field reads as a payload pointer rather than a transient verb. Pre-1.0 breaking surface change, hence the minor bump per the project README's stability clause. skill-feedback itself does not currently emit `savedTo`; this version bump keeps the framework plugins moving in lockstep on the shared envelope contract. [2026-04-28]
+
 ### Added (round 3 — defence-in-depth at submit)
 - **Agent privacy-review responsibility at `submit` time.** Regex scrub catches token shapes; it cannot catch PII, customer names, internal hostnames, or contextual leaks. SKILL.md now has a "Privacy review before submit" section telling the Claude agent already executing the skill to scan the dry-run body against an explicit checklist (real names, customer/employer identifiers, internal URLs, ticket IDs, error messages quoting internal data, etc.) and to ABORT `--no-dry-run` if anything is sensitive. No extra API call, no SDK dep — the existing Claude Code session does the review using its own context. [2026-04-27]
 - **`submit --dry-run` JSON now exposes `agent_review_required: true`** plus `agent_review_instructions` and a 6-item `agent_review_checklist` covering the categories regex can't pattern-match. The fields appear on dry-run only — once `--no-dry-run` runs, the review should already have happened. The agent reads the result as JSON, so the responsibility lands directly in the consuming surface; this is documentation, not enforcement (no flag to require, no flag to bypass). [2026-04-27]

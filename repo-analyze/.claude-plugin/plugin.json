@@ -1,0 +1,13 @@
+{
+  "name": "repo-analyze",
+  "description": "Cold-start codebase orientation in one call. Returns a structured map of a repo — file tree (capped), language mix, framework + build-tool detection, top-level deps, entrypoints, README highlights — so an agent doesn't burn 60+ Read/Glob/Grep calls re-mining the same facts on every fresh session.",
+  "version": "0.2.0",
+  "author": {
+    "name": "Oliver Southgate",
+    "url": "https://github.com/osouthgate"
+  },
+  "homepage": "https://github.com/osouthgate/agent-plus",
+  "repository": "https://github.com/osouthgate/agent-plus",
+  "license": "MIT",
+  "keywords": ["codebase", "analysis", "orientation", "cold-start", "agent-plus", "repo-overview"]
+}

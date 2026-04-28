@@ -1,0 +1,13 @@
+{
+  "name": "agent-plus",
+  "description": "Workspace bootstrap for the agent-plus collection. One call to `init` creates `.agent-plus/`; `envcheck` reports which sibling-plugin env vars are set (names only); `refresh` resolves project IDs and service handles into a per-workspace cache. Day-one context for free.",
+  "version": "0.5.0",
+  "author": {
+    "name": "Oliver Southgate",
+    "url": "https://github.com/osouthgate"
+  },
+  "homepage": "https://github.com/osouthgate/agent-plus",
+  "repository": "https://github.com/osouthgate/agent-plus",
+  "license": "MIT",
+  "keywords": ["bootstrap", "workspace", "init", "env", "agent-tooling", "meta"]
+}

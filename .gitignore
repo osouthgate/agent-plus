@@ -20,3 +20,6 @@ plans/*
 
 # gstack auto-creates CLAUDE.md with skill routing; we use AGENTS.md instead
 /CLAUDE.md
+
+# agent-plus workspace cache (per-repo, populated by `agent-plus init/refresh`)
+.agent-plus/
