@@ -66,14 +66,16 @@ Wrapper-related topic adds (`github-remote`, `vercel-remote`, etc.) are no longe
 
 | Slice | Private SHA | Plugin / change | Public-side notes |
 |---|---|---|---|
-| 1 | `6c65485` | `agent-plus` 0.1.0 + envelope contract docs + SessionStart hook | First time the meta plugin appears publicly |
-| 2 | `f936ff2` | `agent-plus` 0.2.0 (refresh rollout + list) | Bumps meta plugin |
-| 3 | `ed9cc3c` | `agent-plus` 0.3.0 (extensions) | Bumps meta plugin |
-| 4 | `a225151` | `repo-analyze` 0.1.0 | New plugin — needs topic add |
-| 5 | *pending* | `diff-summary` 0.1.0 | New plugin — needs topic add. Directory present in working tree (untracked at session start); not yet promoted on private `main`. |
-| 8 | *pending* | review fixes for slices 4–5 (envelope contract drift, Pattern 5 canary gaps, narrowed excepts, symlink skip, `--include-patches` secret-risk suppression) | Apply on top of slice 5 |
-| MP1 | `2b5686d` | `agent-plus` 0.5.0 — marketplace `init` subcommand (Phase 1 of the convention) | First marketplace surface. Public-side: same name slug rules, no new topic add. |
-| MP2 | `0fe51ba` | `agent-plus` 0.9.0 — marketplace `install / update / list / remove` + trust model (Phase 2 of the convention). Bundles all five trust gates (SHA pin, first-run review, no auto-update, no install-time exec, optional checksum verification). | First-class consumer surface. Makes `<user>/agent-plus-skills` installable without `claude plugin marketplace add`. If the full queue (slices 1–5 + 8 + MP1 + MP2) lands together, public jumps `0.2.0` → `0.9.0`; if MP2 alone, `<previous>` → `0.9.0`. No new topic add. |
+
+(Empty — promotion queue cleared 2026-04-28 evening. All previously-queued slices either landed on public via the v0.9.0 promotion (slices 1–5, 8, MP1, MP2 — all bundled into public commits up through `db7ff68`) or are private-only (slices 6 + 7). The next promotable slice will be the gate-2 papercut bundle in `plans/todo/2026-04-28-unified-plan.md`.)
+
+### Public release log
+
+| Tag | Public SHA | Released | Contents |
+|---|---|---|---|
+| v0.1.0 | (early) | pre-2026-04 | Initial framework split |
+| v0.2.0 | `c923160` | 2026-04-28 | Status README + framework-only restructure |
+| v0.9.0 | `db7ff68` | 2026-04-28 | Marketplace install/update/list/remove + trust model (Phase 2) |
 
 **Upcoming slices** (not yet shipped):
 
