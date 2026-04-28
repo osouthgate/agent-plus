@@ -3,9 +3,8 @@
 Walks every installed plugin under a plugin root and asserts the cross-plugin
 envelope contract:
 
-  1. `<bin> --version` exits 0 and emits a non-empty version string.
-     Accepts either `<name> <semver>` (argparse default) or bare `<semver>`
-     (existing public contract for some framework plugins).
+  1. `<bin> --version` exits 0 and emits `<name> <semver>` (uniform across
+     all plugins as of agent-plus 0.8.0 / skill-feedback 0.3.0).
   2. `<bin> --help` exits 0 (smoke).
   3. A read-only / version subcommand emits a JSON envelope with
      `tool.name` matching plugin.json and `tool.version` non-empty.
@@ -128,7 +127,7 @@ SUPPORTS_OUTPUT: set[str] = {"repo-analyze", "diff-summary"}
 # All other plugins fall back to `--version --json` if supported, else `--version`.
 # We assert the contract that `--version` always works without credentials.
 
-VERSION_RE = re.compile(r"^(?:[a-z0-9-]+ )?\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.]+)?$")
+VERSION_RE = re.compile(r"^[a-z0-9-]+ \d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.]+)?$")
 
 SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{20,}"),

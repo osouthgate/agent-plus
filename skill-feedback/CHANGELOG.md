@@ -6,6 +6,13 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.3.0 - 2026-04-28
+
+`--version` output normalised to `<name> <semver>` shape.
+
+### Changed
+- **`--version` shape:** now prints `skill-feedback X.Y.Z` instead of bare `X.Y.Z`. Aligns with the rest of the framework + marketplace plugins.
+
 ## 0.2.0 - 2026-04-28
 
 Coordinated framework-plugin envelope-contract bump (Track A slice A0).
