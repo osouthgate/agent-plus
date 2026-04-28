@@ -1,0 +1,693 @@
+#!/usr/bin/env python3
+"""
+skill-feedback — local-first agent self-assessment for Claude Code skills.
+
+After an agent uses a skill, it appends one structured entry to a JSONL
+log under .agent-plus/skill-feedback/<skill>.jsonl. Authors of the skill
+can then aggregate, inspect, and (optionally) bundle entries into a
+GitHub issue body for the skill's source repo. No SaaS, no SDK.
+
+Subcommands (all emit JSON; --pretty for indented):
+  log <skill> --rating 1-5 --outcome success|partial|failure
+              [--friction <one-liner>] [--note <text>] [--session-id <id>]
+              [--tool-version <ver>]
+  report [--skill <name>] [--since 7d] [--limit 200]
+  show <skill> [--since 1d] [--limit 50]
+  submit <skill> [--since 30d] [--repo owner/name] [--dry-run]
+  path [--skill <name>]
+
+Storage precedence (highest first):
+  1. SKILL_FEEDBACK_DIR env var (absolute path)
+  2. <git-toplevel>/.agent-plus/skill-feedback/  (if cwd is in a git repo)
+  3. <cwd>/.agent-plus/skill-feedback/           (project, no git)
+  4. ~/.agent-plus/skill-feedback/               (last-resort fallback)
+
+Hard rules:
+  - Free-text fields (friction, note) are length-capped and regex-scrubbed
+    for known secret patterns before write. No transcript content goes in.
+  - log appends only; never edits past entries.
+  - submit is dry-run by default; opening an issue requires explicit
+    --no-dry-run AND a resolvable repo (--repo or plugin.json).
+
+Python 3.9+, stdlib only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import functools
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+from typing import Any, Iterable
+
+# ─── tool identity ────────────────────────────────────────────────────────────
+
+TOOL_NAME = "skill-feedback"
+
+
+@functools.lru_cache(maxsize=1)
+def _plugin_version() -> str:
+    try:
+        manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        return str(json.loads(manifest.read_text(encoding="utf-8")).get("version", "unknown"))
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+
+
+def _tool_meta() -> dict[str, str]:
+    return {"name": TOOL_NAME, "version": _plugin_version()}
+
+
+def _with_tool_meta(payload: Any) -> Any:
+    if isinstance(payload, dict) and "tool" not in payload:
+        return {"tool": _tool_meta(), **payload}
+    return payload
+
+
+# ─── storage resolution ───────────────────────────────────────────────────────
+
+VALID_OUTCOMES = ("success", "partial", "failure")
+MAX_FREE_TEXT = 1000
+MAX_SKILL_NAME = 128
+# Skill names must start AND end with an alphanumeric — no leading or
+# trailing dots/hyphens/underscores. Otherwise 'foo.' produces 'foo..jsonl',
+# which looks like a path-traversal artifact, and '-foo' looks like a CLI
+# flag. `..` anywhere is rejected separately so 'foo..bar' fails too.
+# A single-character all-alphanumeric name is allowed (the optional middle
+# group makes the trailing-alphanumeric requirement degenerate).
+SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
+
+
+def _git_toplevel() -> Path | None:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    line = out.stdout.strip()
+    return Path(line) if line else None
+
+
+def _storage_root_with_source() -> tuple[Path, str]:
+    """Return (root, source) where source is one of: env, git, cwd, home.
+    Lets `path` surface which precedence rule fired so users aren't surprised
+    by feedback landing in an unrelated repo's .agent-plus/."""
+    override = os.environ.get("SKILL_FEEDBACK_DIR")
+    if override:
+        return Path(override).expanduser().resolve(), "env"
+    top = _git_toplevel()
+    if top is not None:
+        return (top / ".agent-plus" / "skill-feedback").resolve(), "git"
+    cwd = Path.cwd()
+    if (cwd / ".agent-plus").is_dir():
+        return (cwd / ".agent-plus" / "skill-feedback").resolve(), "cwd"
+    return (Path.home() / ".agent-plus" / "skill-feedback").resolve(), "home"
+
+
+def _storage_root() -> Path:
+    return _storage_root_with_source()[0]
+
+
+def _log_path(skill: str) -> Path:
+    return _storage_root() / f"{skill}.jsonl"
+
+
+def _ensure_dir(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+# ─── input scrubbing ──────────────────────────────────────────────────────────
+
+# Free-text from the agent could accidentally include tokens it had in
+# context; strip them before they hit disk. Pattern set covers the common
+# token formats agents work with — GitHub, AWS, Anthropic, OpenAI, Slack,
+# Stripe, Google, Supabase, Sentry, Discord, JWT, plus generic Bearer /
+# Authorization headers. Not exhaustive — exotic provider-specific formats
+# may slip through, which is why the README also tells users not to put
+# secret-shaped strings in --note in the first place.
+_SECRET_PATTERNS = [
+    # GitHub PATs / OAuth / app tokens (also matches gha_, ghu_, ghs_, ghr_)
+    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"gh[ousr]_[A-Za-z0-9]{20,}"),
+    # AWS access key id
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    # Anthropic
+    re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),
+    # Langfuse (specific prefix before generic sk- catch-all)
+    re.compile(r"sk-lf-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"pk-lf-[A-Za-z0-9_-]{20,}"),
+    # Stripe — sk_live_, sk_test_, rk_live_, rk_test_, pk_live_, pk_test_
+    re.compile(r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{20,}"),
+    # OpenAI-style (catch-all sk- with hyphen; intentionally after sk-ant-/sk-lf- so those match first)
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    # Supabase service keys
+    re.compile(r"sbp_[A-Za-z0-9]{20,}"),
+    # Sentry user / org auth tokens
+    re.compile(r"sntrys_[A-Za-z0-9._-]{20,}"),
+    # Google API keys
+    re.compile(r"AIza[0-9A-Za-z_-]{35}"),
+    # Slack tokens
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
+    # Discord bot tokens (3-part, dot-separated, base64)
+    re.compile(r"[MN][A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,40}"),
+    # JWT (eyJ… header.payload.signature)
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    # Generic Bearer header
+    re.compile(r"Bearer\s+[A-Za-z0-9._\-]{20,}", re.IGNORECASE),
+    # Generic Authorization header
+    re.compile(r"Authorization:\s*\S+", re.IGNORECASE),
+]
+
+
+def _scrub_text(s: str | None) -> str | None:
+    if s is None:
+        return None
+    out = s
+    for pat in _SECRET_PATTERNS:
+        out = pat.sub("[REDACTED]", out)
+    return out
+
+
+def _validate_skill_name(skill: str) -> str:
+    if (not skill
+            or len(skill) > MAX_SKILL_NAME
+            or not SKILL_NAME_RE.match(skill)
+            or ".." in skill):
+        raise SystemExit(
+            f"skill-feedback: invalid skill name {skill!r}. "
+            "Must start AND end with [A-Za-z0-9], contain only [A-Za-z0-9._-] "
+            f"in the middle, have no '..' substring, and be at most "
+            f"{MAX_SKILL_NAME} chars."
+        )
+    return skill
+
+
+def _cap(s: str | None) -> str | None:
+    if s is None:
+        return None
+    s = s.strip()
+    if not s:
+        return None
+    if len(s) > MAX_FREE_TEXT:
+        s = s[:MAX_FREE_TEXT] + "…[truncated]"
+    return s
+
+
+# ─── time utilities ───────────────────────────────────────────────────────────
+
+_DURATION_RE = re.compile(r"^(\d+)([smhd])$")
+
+
+def _parse_since(spec: str) -> _dt.timedelta:
+    m = _DURATION_RE.match(spec.strip())
+    if not m:
+        raise SystemExit(
+            f"skill-feedback: bad --since {spec!r}. Use forms like 30s, 15m, 6h, 7d."
+        )
+    n, unit = int(m.group(1)), m.group(2)
+    return {
+        "s": _dt.timedelta(seconds=n),
+        "m": _dt.timedelta(minutes=n),
+        "h": _dt.timedelta(hours=n),
+        "d": _dt.timedelta(days=n),
+    }[unit]
+
+
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_iso(ts: str | None) -> _dt.datetime | None:
+    """Parse an ISO-8601 timestamp into a tz-aware UTC datetime. Naive inputs
+    (no Z / offset) are coerced to UTC rather than returned naive — comparing
+    naive vs aware datetimes raises TypeError, and `_filter_since` would crash
+    on hand-edited entries that omitted the Z. Returns None on any parse error
+    or empty/None input."""
+    if not ts:
+        return None
+    try:
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        dt = _dt.datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_dt.timezone.utc)
+    return dt
+
+
+# ─── readers ──────────────────────────────────────────────────────────────────
+
+def _iter_entries(skill: str | None = None) -> Iterable[dict]:
+    root = _storage_root()
+    if not root.is_dir():
+        return
+    files = [root / f"{skill}.jsonl"] if skill else sorted(root.glob("*.jsonl"))
+    for f in files:
+        if not f.is_file():
+            continue
+        with f.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+
+def _filter_since(entries: Iterable[dict], since: _dt.timedelta | None) -> list[dict]:
+    if since is None:
+        return list(entries)
+    cutoff = _dt.datetime.now(_dt.timezone.utc) - since
+    out = []
+    for e in entries:
+        ts = _parse_iso(e.get("ts", ""))
+        # Drop entries whose ts is missing or unparseable. The previous
+        # behaviour kept them, which silently skewed every since-windowed
+        # aggregate when a hand-edited entry slipped in.
+        if ts is None:
+            continue
+        if ts >= cutoff:
+            out.append(e)
+    return out
+
+
+# ─── commands ─────────────────────────────────────────────────────────────────
+
+def cmd_log(args: argparse.Namespace) -> dict:
+    skill = _validate_skill_name(args.skill)
+    if not 1 <= args.rating <= 5:
+        raise SystemExit("skill-feedback: --rating must be 1-5.")
+    # outcome is enforced by argparse choices=VALID_OUTCOMES.
+
+    session_id = args.session_id or os.environ.get("CLAUDE_SESSION_ID") or None
+
+    entry = {
+        "ts": _now_iso(),
+        "skill": skill,
+        "rating": args.rating,
+        "outcome": args.outcome,
+        "friction": _scrub_text(_cap(args.friction)),
+        "note": _scrub_text(_cap(args.note)),
+        "session_id": session_id,
+        "tool_version": args.tool_version,
+        "schema": 1,
+    }
+    entry = {k: v for k, v in entry.items() if v is not None}
+
+    path = _log_path(skill)
+    _ensure_dir(path)
+    # Writes use O_APPEND, which is atomic for small writes on local
+    # POSIX filesystems (Linux PIPE_BUF=4096; macOS APFS/HFS in practice).
+    # Atomicity is NOT guaranteed on NFS or other networked filesystems —
+    # concurrent agent writes there can interleave. With MAX_FREE_TEXT
+    # capped at 1000 chars per field, a worst-case JSON line is ~2.2KB
+    # (multibyte friction+note); fits in a single write() call but exceeds
+    # the POSIX 512-byte minimum guarantee. Treat as best-effort.
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    return {"logged": entry, "path": str(path)}
+
+
+def cmd_show(args: argparse.Namespace) -> dict:
+    skill = _validate_skill_name(args.skill)
+    since = _parse_since(args.since) if args.since else None
+    entries = _filter_since(_iter_entries(skill), since)
+    entries.sort(key=lambda e: e.get("ts", ""), reverse=True)
+    if args.limit > 0:
+        entries = entries[: args.limit]
+    return {"skill": skill, "count": len(entries), "entries": entries}
+
+
+def cmd_report(args: argparse.Namespace) -> dict:
+    since = _parse_since(args.since) if args.since else None
+    entries = _filter_since(
+        _iter_entries(args.skill if args.skill else None), since
+    )
+    if args.limit > 0:
+        entries = entries[-args.limit :]
+
+    by_skill: dict[str, list[dict]] = {}
+    for e in entries:
+        by_skill.setdefault(e.get("skill", "?"), []).append(e)
+
+    summaries = []
+    for name, items in sorted(by_skill.items()):
+        ratings = [e.get("rating") for e in items if isinstance(e.get("rating"), int)]
+        outcomes = Counter()
+        for e in items:
+            o = e.get("outcome")
+            if o in VALID_OUTCOMES:
+                outcomes[o] += 1
+        friction_counter: Counter = Counter()
+        for e in items:
+            f = e.get("friction")
+            if f:
+                friction_counter[f] += 1
+        rating_counter = Counter(ratings)
+        summaries.append({
+            "skill": name,
+            "count": len(items),
+            "avg_rating": round(sum(ratings) / len(ratings), 2) if ratings else None,
+            "rating_histogram": {str(r): rating_counter[r] for r in (1, 2, 3, 4, 5) if rating_counter[r]},
+            "outcomes": {o: outcomes.get(o, 0) for o in VALID_OUTCOMES},
+            "top_friction": [{"text": t, "count": c} for t, c in friction_counter.most_common(5)],
+        })
+
+    return {
+        "since": args.since,
+        "skill_filter": args.skill,
+        "total_entries": len(entries),
+        "skills": summaries,
+        "storage_root": str(_storage_root()),
+    }
+
+
+def cmd_path(args: argparse.Namespace) -> dict:
+    root, source = _storage_root_with_source()
+    out: dict[str, Any] = {"storage_root": str(root), "source": source}
+    if args.skill:
+        skill = _validate_skill_name(args.skill)
+        out["skill"] = skill
+        out["path"] = str(_log_path(skill))
+    return out
+
+
+# ─── submit ───────────────────────────────────────────────────────────────────
+
+_REPO_URL_RE = re.compile(
+    r"github\.com[:/]([^/\s]+)/([^/\s?#]+?)(?:\.git)?(?:[/?#]|$)"
+)
+
+
+def _resolve_repo_from_plugin(skill: str) -> str | None:
+    """Look for the skill's plugin.json and read its `repository` field.
+    Searches in this order:
+      1. Sibling directory <skill>/.claude-plugin/plugin.json relative to this
+         tool's grand-parent (development checkout case).
+      2. ~/.claude/plugins/<skill>/.claude-plugin/plugin.json (installed case).
+    Returns 'owner/name' if it can parse it, else None.
+
+    Only `repository` is honoured — `homepage` was a fallback in v0.1.0
+    but is risky: skill authors sometimes set it to a personal site, which
+    would silently route `submit` issues to the wrong repo. If a skill
+    needs explicit submit routing, use the `repository` field or pass
+    `--repo owner/name` to `submit`.
+    """
+    candidates = [
+        Path(__file__).resolve().parent.parent.parent / skill / ".claude-plugin" / "plugin.json",
+        Path.home() / ".claude" / "plugins" / skill / ".claude-plugin" / "plugin.json",
+    ]
+    for p in candidates:
+        if not p.is_file():
+            continue
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        repo = data.get("repository")
+        if not isinstance(repo, str):
+            continue
+        m = _REPO_URL_RE.search(repo)
+        if m:
+            return f"{m.group(1)}/{m.group(2)}"
+    return None
+
+
+def _format_issue_body(skill: str, entries: list[dict], since: str | None) -> str:
+    if not entries:
+        return f"No skill-feedback entries for `{skill}` in the requested window."
+
+    ratings = [e.get("rating") for e in entries if isinstance(e.get("rating"), int)]
+    avg = round(sum(ratings) / len(ratings), 2) if ratings else None
+    outcomes = {o: 0 for o in VALID_OUTCOMES}
+    for e in entries:
+        o = e.get("outcome")
+        if o in outcomes:
+            outcomes[o] += 1
+
+    lines = []
+    lines.append(f"# skill-feedback report for `{skill}`")
+    lines.append("")
+    lines.append("Auto-generated by [skill-feedback](https://github.com/osouthgate/agent-plus/tree/main/skill-feedback). "
+                 "Every entry was logged by an agent immediately after using this skill.")
+    lines.append("")
+    lines.append("## Summary")
+    lines.append("")
+    lines.append(f"- Window: {since or 'all-time'}")
+    lines.append(f"- Entries: {len(entries)}")
+    if avg is not None:
+        lines.append(f"- Average rating: **{avg} / 5**")
+    lines.append(
+        f"- Outcomes: {outcomes['success']} success, "
+        f"{outcomes['partial']} partial, {outcomes['failure']} failure"
+    )
+    lines.append("")
+
+    friction_counts: dict[str, int] = {}
+    for e in entries:
+        f = e.get("friction")
+        if f:
+            friction_counts[f] = friction_counts.get(f, 0) + 1
+    if friction_counts:
+        lines.append("## Top friction")
+        lines.append("")
+        for text, count in sorted(friction_counts.items(), key=lambda kv: kv[1], reverse=True)[:10]:
+            lines.append(f"- ({count}×) {text}")
+        lines.append("")
+
+    notes = [e for e in entries if e.get("note")]
+    if notes:
+        lines.append("## Recent notes")
+        lines.append("")
+        for e in notes[-10:]:
+            ts = e.get("ts", "?")
+            rating = e.get("rating", "?")
+            outcome = e.get("outcome", "?")
+            lines.append(f"- `{ts}` rating={rating} outcome={outcome}")
+            lines.append(f"  > {e['note']}")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append("*Submitted via `skill-feedback submit`. Free-text fields are "
+                 "regex-scrubbed for token patterns before write; no transcript "
+                 "content is included.*")
+    return "\n".join(lines)
+
+
+def cmd_submit(args: argparse.Namespace) -> dict:
+    skill = _validate_skill_name(args.skill)
+    since = _parse_since(args.since) if args.since else None
+    entries = _filter_since(_iter_entries(skill), since)
+
+    repo = args.repo or _resolve_repo_from_plugin(skill)
+    body = _format_issue_body(skill, entries, args.since)
+    title = f"skill-feedback: {len(entries)} entr{'y' if len(entries) == 1 else 'ies'} for {skill}"
+
+    result: dict[str, Any] = {
+        "skill": skill,
+        "entries_included": len(entries),
+        "since": args.since,
+        "repo": repo,
+        "title": title,
+        "body": body,
+        "dry_run": args.dry_run,
+    }
+
+    # Defence-in-depth at submit time. Regex scrubbing (in cmd_log) only
+    # catches token shapes — it cannot catch PII, customer names, internal
+    # hostnames, or contextual leaks. The agent invoking submit is expected
+    # to do a privacy review of `body` before flipping to --no-dry-run. We
+    # surface the responsibility in dry-run output (which the agent reads as
+    # JSON) rather than enforcing it via a flag — the agent already has the
+    # context to do the review, and forcing it would be theatre. See SKILL.md
+    # ("Privacy review before submit") for the full checklist.
+    if args.dry_run:
+        result["agent_review_required"] = True
+        result["agent_review_instructions"] = (
+            "Before re-running with --no-dry-run, scan `body` for content the "
+            "regex scrub cannot catch. If any item in agent_review_checklist "
+            "is present, ABORT and tell the user — do not submit."
+        )
+        result["agent_review_checklist"] = [
+            "PII: real names, email addresses, phone numbers, physical addresses",
+            "customer / employer / client / project names that aren't public",
+            "internal hostnames, private URLs, file paths revealing identity (e.g. /Users/<name>/work/<client>/...)",
+            "ticket IDs, repo names, or Slack channel names that aren't public",
+            "error messages or stack traces that quote internal data",
+            "anything you wouldn't paste into a public issue on an open-source repo",
+        ]
+
+    if args.dry_run or not repo:
+        if not repo:
+            result["note"] = (
+                "No repo resolved. Pass --repo owner/name, set 'repository' in "
+                f"the skill's plugin.json, or run with --dry-run to print only."
+            )
+        return result
+
+    # Refuse to file an empty issue. With --no-dry-run + a resolvable repo
+    # but no entries, the previous code would shell out to `gh issue create`
+    # with a "No skill-feedback entries…" body. That's noise on the upstream
+    # repo's tracker and not what the user asked for.
+    if not entries:
+        result["error"] = (
+            f"No entries for {skill!r} in window {args.since!r}; refusing to "
+            "file an empty issue. Run without --no-dry-run to preview, widen "
+            "--since, or check `skill-feedback show`."
+        )
+        return result
+
+    # Live submission: shell out to `gh issue create` (inherits the user's
+    # existing GitHub auth). If `gh` is missing, write the body to disk so
+    # the user can paste it manually. We do NOT make raw GitHub API calls.
+    gh_cli = shutil.which("gh")
+
+    if gh_cli:
+        try:
+            proc = subprocess.run(
+                [gh_cli, "issue", "create", "--repo", repo,
+                 "--title", title, "--body", body],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            result["error"] = f"gh issue create failed to launch: {e}"
+            return result
+        if proc.returncode == 0:
+            result["issue_url"] = proc.stdout.strip()
+            return result
+        result["error"] = f"gh exited {proc.returncode}: {proc.stderr.strip()}"
+        return result
+
+    # No `gh` available — write the body to disk so the user can paste it.
+    out = _storage_root() / f"{skill}.submit.md"
+    _ensure_dir(out)
+    out.write_text(body, encoding="utf-8")
+    result["wrote_to"] = str(out)
+    result["note"] = (
+        "'gh' is not on PATH. Body written to disk; open an issue manually "
+        f"at https://github.com/{repo}/issues/new and paste it."
+    )
+    return result
+
+
+# ─── argparse ─────────────────────────────────────────────────────────────────
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="skill-feedback",
+        description="Local-first agent self-assessment for Claude Code skills.",
+    )
+    p.add_argument("--version", action="store_true", help="print plugin version and exit")
+    p.add_argument("--pretty", action="store_true", help="pretty-print JSON output")
+    sub = p.add_subparsers(dest="cmd")
+
+    # Shared --pretty so it can also appear after the subcommand (matches the
+    # docs: `skill-feedback log foo --rating 5 --outcome success --pretty`).
+    pretty_parent = argparse.ArgumentParser(add_help=False)
+    pretty_parent.add_argument("--pretty", action="store_true",
+                               help="pretty-print JSON output")
+
+    s_log = sub.add_parser("log", help="append a self-assessment entry",
+                           parents=[pretty_parent])
+    s_log.add_argument("skill", help="skill name (matches the SKILL.md `name`)")
+    s_log.add_argument("--rating", type=int, required=True, help="1-5; 5 = skill perfectly fit the task")
+    s_log.add_argument(
+        "--outcome", required=True, choices=VALID_OUTCOMES,
+        help="success: task done; partial: partial; failure: skill didn't fit",
+    )
+    s_log.add_argument("--friction", help="one-line friction label (capped, scrubbed)")
+    s_log.add_argument("--note", help="longer note (capped, scrubbed)")
+    s_log.add_argument("--session-id", help="override CLAUDE_SESSION_ID env")
+    s_log.add_argument("--tool-version", help="version of the skill that was used")
+
+    s_show = sub.add_parser("show", help="show recent entries for a skill",
+                            parents=[pretty_parent])
+    s_show.add_argument("skill")
+    s_show.add_argument("--since", help="e.g. 30m, 6h, 7d")
+    s_show.add_argument(
+        "--limit", type=int, default=50,
+        help="max entries to return (default 50; 0 = unbounded)",
+    )
+
+    s_report = sub.add_parser("report", help="aggregate summary across skills",
+                              parents=[pretty_parent])
+    s_report.add_argument("--skill", help="restrict to one skill")
+    s_report.add_argument("--since", help="e.g. 7d (default: all)")
+    s_report.add_argument(
+        "--limit", type=int, default=0,
+        help="cap raw entries scanned (default 0 = unbounded). Sliced after "
+             "concatenation across skills, so it doesn't bound per-skill "
+             "windows in multi-skill calls — use --skill to scope.",
+    )
+
+    s_submit = sub.add_parser("submit", help="bundle entries into a GitHub issue body",
+                              parents=[pretty_parent])
+    s_submit.add_argument("skill")
+    s_submit.add_argument("--since", default="30d")
+    s_submit.add_argument("--repo", help="owner/name; falls back to plugin.json#repository")
+    g = s_submit.add_mutually_exclusive_group()
+    g.add_argument("--dry-run", dest="dry_run", action="store_true", default=True,
+                   help="print body only (default)")
+    g.add_argument("--no-dry-run", dest="dry_run", action="store_false",
+                   help="actually open a GitHub issue (needs gh on PATH)")
+
+    s_path = sub.add_parser("path", help="print storage paths",
+                            parents=[pretty_parent])
+    s_path.add_argument("--skill", help="show the per-skill jsonl path")
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if args.version:
+        print(_plugin_version())
+        return 0
+
+    handlers = {
+        "log": cmd_log,
+        "show": cmd_show,
+        "report": cmd_report,
+        "submit": cmd_submit,
+        "path": cmd_path,
+    }
+    if args.cmd not in handlers:
+        parser.print_help()
+        return 2
+
+    # SystemExit propagates naturally — it inherits BaseException, not
+    # Exception, so the broad handler below never swallows it.
+    try:
+        payload = handlers[args.cmd](args)
+    except Exception as e:  # never crash with a stack trace
+        err = {"tool": _tool_meta(), "error": str(e), "cmd": args.cmd}
+        print(json.dumps(err), file=sys.stderr)
+        return 1
+
+    out = _with_tool_meta(payload)
+    indent = 2 if args.pretty else None
+    print(json.dumps(out, ensure_ascii=False, indent=indent))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

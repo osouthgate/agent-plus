@@ -1,0 +1,885 @@
+#!/usr/bin/env python3
+"""
+diff-summary — one-call structured triage of a git diff.
+
+Replaces the 5-20 Read tool calls an agent burns reading each modified file
+in a PR to figure out "what kind of change is this, how risky is it, were
+tests updated alongside, was the public API touched?"
+
+Usage:
+  diff-summary                              # working tree diff
+  diff-summary --staged                     # staged diff
+  diff-summary --base main                  # branch comparison (BASE..HEAD, 3-dot)
+  diff-summary --range A..B                 # explicit range, passed verbatim
+
+Refinement:
+  --max-files N           cap reported files (default 200)
+  --include-patches       include raw unified diff per file (off by default)
+  --public-api-only       filter files[] to publicApiTouched only
+  --risk MIN              filter to risk >= MIN  (low|medium|high)
+
+Output:
+  --json (default) | --pretty
+  --output PATH    offload full payload to disk; stdout returns shape envelope
+  --shape-depth N  recursion depth for envelope payloadShape (1|2|3, default 3)
+  --version
+
+Stdlib only. No network. Reads only `git diff` output — never opens working-tree
+files (deliberately — Pattern 5: an .env file in the diff has its path flagged
+in `secretsRiskFiles` but its CONTENTS are not separately scanned).
+"""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import functools
+import json
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+
+# ──────────────────────────── tool identity ────────────────────────────
+
+TOOL_NAME = "diff-summary"
+
+
+@functools.lru_cache(maxsize=1)
+def _plugin_version() -> str:
+    try:
+        manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return str(data.get("version", "unknown"))
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+
+
+def _tool_meta() -> dict[str, str]:
+    return {"name": TOOL_NAME, "version": _plugin_version()}
+
+
+def _with_tool_meta(payload: Any) -> Any:
+    if isinstance(payload, dict) and "tool" not in payload:
+        return {"tool": _tool_meta(), **payload}
+    return payload
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ──────────────────────────── constants ────────────────────────────
+
+# Reused (verbatim) from repo-analyze. Stdlib-only single-file rule means each
+# plugin is independent — duplication is intentional.
+LANG_BY_EXT: dict[str, str] = {
+    ".py": "python", ".pyi": "python",
+    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".ts": "typescript", ".tsx": "typescript",
+    ".rs": "rust",
+    ".go": "go",
+    ".java": "java", ".kt": "kotlin", ".kts": "kotlin",
+    ".rb": "ruby",
+    ".php": "php",
+    ".c": "c", ".h": "c",
+    ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".hh": "cpp",
+    ".cs": "csharp",
+    ".swift": "swift",
+    ".m": "objective-c", ".mm": "objective-c",
+    ".sh": "shell", ".bash": "shell", ".zsh": "shell",
+    ".ps1": "powershell",
+    ".lua": "lua",
+    ".r": "r", ".R": "r",
+    ".scala": "scala",
+    ".clj": "clojure", ".cljs": "clojure",
+    ".ex": "elixir", ".exs": "elixir",
+    ".erl": "erlang",
+    ".dart": "dart",
+    ".sql": "sql",
+    ".html": "html", ".htm": "html",
+    ".css": "css", ".scss": "css", ".sass": "css", ".less": "css",
+    ".vue": "vue",
+    ".svelte": "svelte",
+    ".md": "markdown",
+    ".yaml": "yaml", ".yml": "yaml",
+    ".toml": "toml",
+    ".json": "json",
+    ".tf": "terraform",
+}
+
+DEFAULT_MAX_FILES = 200
+LARGE_CHANGE_LINES = 200  # source change > this without test → HIGH
+
+RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
+
+SECRET_RISK_GLOBS = ["*.pem", "*.key", "id_rsa*", "secrets.*"]
+# .env handled separately (basename startswith)
+
+WELL_KNOWN_ENTRYPOINTS = {
+    "index.ts", "index.tsx", "index.js", "index.jsx",
+    "mod.rs", "lib.rs", "__init__.py", "main.go",
+}
+
+
+# ──────────────────────────── errors ────────────────────────────
+
+
+def die(msg: str, *, code: int = 1) -> None:
+    sys.stderr.write(f"{TOOL_NAME}: {msg}\n")
+    # Also emit a JSON error envelope on stdout.
+    err = _with_tool_meta({"error": msg, "summarizedAt": _now_iso()})
+    print(json.dumps(err))
+    sys.exit(code)
+
+
+# ──────────────────────────── git ────────────────────────────
+
+
+def _git(args: list[str], *, cwd: Optional[Path] = None) -> tuple[int, str, str]:
+    try:
+        proc = subprocess.run(
+            ["git", *args],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(cwd) if cwd else None, check=False,
+        )
+    except FileNotFoundError:
+        return 127, "", "git executable not found on PATH"
+    except subprocess.TimeoutExpired:
+        return 124, "", "git command timed out"
+    return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+def _git_or_die(args: list[str], *, cwd: Optional[Path] = None) -> str:
+    code, out, err = _git(args, cwd=cwd)
+    if code != 0:
+        die(f"git {' '.join(args)} failed: {err.strip() or 'exit ' + str(code)}")
+    return out
+
+
+def _is_git_repo(cwd: Path) -> bool:
+    code, out, _ = _git(["rev-parse", "--is-inside-work-tree"], cwd=cwd)
+    return code == 0 and out.strip() == "true"
+
+
+def _current_branch(cwd: Path) -> Optional[str]:
+    code, out, _ = _git(["branch", "--show-current"], cwd=cwd)
+    if code != 0:
+        return None
+    return out.strip() or None
+
+
+def _short_head(cwd: Path) -> Optional[str]:
+    code, out, _ = _git(["rev-parse", "--short", "HEAD"], cwd=cwd)
+    if code != 0:
+        return None
+    return out.strip() or None
+
+
+def _verify_ref(ref: str, cwd: Path) -> bool:
+    code, _, _ = _git(["rev-parse", "--verify", ref], cwd=cwd)
+    return code == 0
+
+
+# ──────────────────────────── role classification ────────────────────────────
+
+
+def _path_has_segment(p: str, segment: str) -> bool:
+    """True if any path segment (between '/' separators) equals segment."""
+    return segment in p.split("/")
+
+
+def _path_contains_subseq(p: str, *segments: str) -> bool:
+    """True if path contains the given segments in consecutive order."""
+    parts = p.split("/")
+    n = len(segments)
+    for i in range(len(parts) - n + 1):
+        if tuple(parts[i:i + n]) == tuple(segments):
+            return True
+    return False
+
+
+def _classify_role(path: str) -> str:
+    p = path.replace("\\", "/")
+    base = p.rsplit("/", 1)[-1]
+
+    # 1. test
+    test_segments = ["test", "tests", "__tests__", "spec"]
+    if any(_path_has_segment(p, s) for s in test_segments):
+        return "test"
+    if (fnmatch.fnmatch(base, "*.test.*") or fnmatch.fnmatch(base, "*.spec.*")
+            or re.match(r".*_test\.(py|go|rs)$", base)
+            or re.match(r".*_spec\.(rb|js|ts)$", base)
+            or re.match(r"test_.*\.py$", base)
+            or fnmatch.fnmatch(base, "*Test.java")):
+        return "test"
+
+    # 2. migration
+    if (_path_has_segment(p, "migrations")
+            or _path_contains_subseq(p, "db", "migrate")
+            or "alembic" in p.lower()
+            or re.match(r"V\d+__.*\.sql$", base)):
+        return "migration"
+
+    # 3. generated
+    generated_segments = ["dist", "build", ".next", ".turbo", "target", "__pycache__"]
+    if any(_path_has_segment(p, s) for s in generated_segments):
+        return "generated"
+    if fnmatch.fnmatch(base, "*.pyc"):
+        return "generated"
+    lockfiles = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock",
+                 "poetry.lock", "uv.lock", "Gemfile.lock", "composer.lock",
+                 "bun.lockb", "go.sum"}
+    if base in lockfiles:
+        return "generated"
+
+    # 4. build
+    build_basenames = {"Dockerfile", "Makefile", "CMakeLists.txt",
+                       "build.gradle", "pom.xml", "setup.py"}
+    if base in build_basenames:
+        return "build"
+    if _path_contains_subseq(p, ".github", "workflows"):
+        return "build"
+    if fnmatch.fnmatch(base, "Dockerfile.*"):
+        return "build"
+
+    # 5. config
+    config_exts = {".json", ".yaml", ".yml", ".toml", ".ini", ".conf", ".cfg"}
+    ext = "." + base.rsplit(".", 1)[-1].lower() if "." in base else ""
+    if ext in config_exts:
+        return "config"
+    if base.startswith(".env"):
+        return "config"
+    if fnmatch.fnmatch(base, "*.config.*"):
+        return "config"
+    config_basenames = {"tsconfig.json"}
+    if base in config_basenames:
+        return "config"
+    for prefix in ("jest.config.", "vitest.config.", "eslint.config.",
+                   ".prettierrc.", "tailwind.config."):
+        if base.startswith(prefix):
+            return "config"
+
+    # 6. doc
+    doc_exts = {".md", ".rst", ".txt", ".adoc"}
+    if ext in doc_exts:
+        return "doc"
+    doc_basenames = {"LICENSE", "CHANGELOG", "AUTHORS", "NOTICE", "CONTRIBUTING", "README"}
+    if base in doc_basenames:
+        return "doc"
+    if _path_has_segment(p, "docs"):
+        return "doc"
+
+    # 7. fixture
+    if _path_has_segment(p, "fixtures") or _path_has_segment(p, "seeds"):
+        return "fixture"
+    if base.startswith("seed_"):
+        return "fixture"
+
+    # 8. source
+    return "source"
+
+
+def _language_for_path(path: str) -> Optional[str]:
+    base = path.rsplit("/", 1)[-1]
+    if "." not in base:
+        return None
+    ext = "." + base.rsplit(".", 1)[-1].lower()
+    return LANG_BY_EXT.get(ext)
+
+
+# ──────────────────────────── secret-risk paths ────────────────────────────
+
+
+def _is_secret_risk_path(path: str) -> bool:
+    base = path.replace("\\", "/").rsplit("/", 1)[-1]
+    if base.startswith(".env"):
+        return True
+    for pat in SECRET_RISK_GLOBS:
+        if fnmatch.fnmatch(base, pat):
+            return True
+    return False
+
+
+# ──────────────────────────── numstat parsing ────────────────────────────
+
+
+def _parse_numstat(text: str) -> list[dict[str, Any]]:
+    """Each line: <ins>\\t<del>\\t<path>  (or  <ins>\\t<del>\\t<old> => <new>)
+    or rename quoted form: <ins>\\t<del>\\t<prefix>{<old> => <new>}<suffix>
+    Binary: -\\t-\\t<path>. Returns one entry per file with raw fields."""
+    entries: list[dict[str, Any]] = []
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
+        parts = raw.split("\t")
+        if len(parts) < 3:
+            continue
+        ins_s, del_s = parts[0], parts[1]
+        path_field = "\t".join(parts[2:])
+        binary = (ins_s == "-" and del_s == "-")
+        ins = 0 if binary else int(ins_s) if ins_s.isdigit() else 0
+        delete = 0 if binary else int(del_s) if del_s.isdigit() else 0
+
+        renamed_from: Optional[str] = None
+        path = path_field
+        # Form 1: "old => new"
+        m = re.match(r"^(.*?)\{(.*?) => (.*?)\}(.*)$", path_field)
+        if m:
+            prefix, old_mid, new_mid, suffix = m.groups()
+            renamed_from = (prefix + old_mid + suffix).replace("//", "/")
+            path = (prefix + new_mid + suffix).replace("//", "/")
+        elif " => " in path_field:
+            old_p, new_p = path_field.split(" => ", 1)
+            renamed_from = old_p.strip()
+            path = new_p.strip()
+
+        entries.append({
+            "path": path,
+            "renamedFrom": renamed_from,
+            "insertions": ins,
+            "deletions": delete,
+            "binary": binary,
+        })
+    return entries
+
+
+# ──────────────────────────── unified-diff parsing ────────────────────────────
+
+
+def _split_patches(unified: str) -> dict[str, dict[str, Any]]:
+    """Split a `git diff` unified output into per-file blocks. Returns
+    {final_path: {"patch": str, "status": str, "renamedFrom": Optional[str],
+                  "addedLines": [str...], "removedLines": [str...]}}."""
+    out: dict[str, dict[str, Any]] = {}
+    if not unified.strip():
+        return out
+
+    # Split by "diff --git " markers, keeping each block.
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in unified.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            if current:
+                blocks.append("".join(current))
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        blocks.append("".join(current))
+
+    for block in blocks:
+        head = block.splitlines()[:8]
+        # "diff --git a/<old> b/<new>"
+        m = re.match(r'^diff --git "?a/(.+?)"? "?b/(.+?)"?$', head[0])
+        if not m:
+            continue
+        old_path, new_path = m.group(1), m.group(2)
+
+        status = "modified"
+        renamed_from: Optional[str] = None
+        for h in head:
+            if h.startswith("new file mode"):
+                status = "added"
+            elif h.startswith("deleted file mode"):
+                status = "deleted"
+            elif h.startswith("rename from "):
+                renamed_from = h[len("rename from "):].strip()
+                status = "renamed"
+            elif h.startswith("copy from "):
+                status = "copied"
+
+        # For deleted files, "new_path" in `diff --git` is still the same path.
+        # For renames, new_path is the post-rename name.
+        path = new_path if status != "deleted" else old_path
+
+        added: list[str] = []
+        removed: list[str] = []
+        in_hunk = False
+        for line in block.splitlines():
+            if line.startswith("@@"):
+                in_hunk = True
+                continue
+            if not in_hunk:
+                continue
+            if line.startswith("+++") or line.startswith("---"):
+                continue
+            if line.startswith("+"):
+                added.append(line[1:])
+            elif line.startswith("-"):
+                removed.append(line[1:])
+
+        out[path] = {
+            "patch": block,
+            "status": status,
+            "renamedFrom": renamed_from,
+            "addedLines": added,
+            "removedLines": removed,
+        }
+    return out
+
+
+# ──────────────────────────── public-API detection ────────────────────────────
+
+
+PUBLIC_API_PATTERNS = [
+    re.compile(r"^export\s+"),                       # TS/JS
+    re.compile(r"^pub\s+(fn|struct|mod|enum|trait|const|static)\s+"),  # Rust
+    re.compile(r"^func\s+[A-Z]"),                    # Go (capitalized = exported)
+    re.compile(r"^def\s+[a-z_][a-zA-Z0-9_]*\s*\("),  # Python top-level def
+    re.compile(r"^class\s+[A-Za-z_]"),               # Python/TS class
+]
+
+
+def _detect_public_api(path: str, added_lines: list[str]) -> bool:
+    base = path.rsplit("/", 1)[-1]
+    if base in WELL_KNOWN_ENTRYPOINTS:
+        return True
+    # cmd/<name>/main.go
+    if fnmatch.fnmatch(path, "cmd/*/main.go"):
+        return True
+    for line in added_lines:
+        for pat in PUBLIC_API_PATTERNS:
+            if pat.match(line):
+                return True
+    return False
+
+
+# ──────────────────────────── moved-lines estimate ────────────────────────────
+
+
+def _moved_lines_estimate(patches: dict[str, dict[str, Any]]) -> int:
+    """Count (whitespace-trimmed, non-trivial) lines that appear as both
+    added in one file and removed in another. Naive but cheap."""
+    added_by_path: dict[str, set[str]] = {}
+    removed_by_path: dict[str, set[str]] = {}
+    for path, info in patches.items():
+        added_by_path[path] = {ln.strip() for ln in info["addedLines"] if len(ln.strip()) > 3}
+        removed_by_path[path] = {ln.strip() for ln in info["removedLines"] if len(ln.strip()) > 3}
+
+    moved = 0
+    paths = list(patches.keys())
+    for i, p1 in enumerate(paths):
+        for p2 in paths[i + 1:]:
+            # added in p1 ∩ removed in p2
+            moved += len(added_by_path.get(p1, set()) & removed_by_path.get(p2, set()))
+            # added in p2 ∩ removed in p1
+            moved += len(added_by_path.get(p2, set()) & removed_by_path.get(p1, set()))
+    return moved
+
+
+# ──────────────────────────── co-changed test detection ────────────────────────────
+
+
+def _source_stem(path: str) -> str:
+    """Last directory + basename without ext, lowercased, trimmed of common
+    test prefixes/suffixes for matching."""
+    p = path.replace("\\", "/")
+    base = p.rsplit("/", 1)[-1]
+    stem = base.rsplit(".", 1)[0] if "." in base else base
+    stem = stem.lower()
+    # Strip test-y prefixes/suffixes.
+    for pre in ("test_",):
+        if stem.startswith(pre):
+            stem = stem[len(pre):]
+    for suf in ("_test", ".test", ".spec", "test"):
+        if stem.endswith(suf) and stem != suf:
+            stem = stem[: -len(suf)]
+    return stem
+
+
+def _has_co_changed_test(source_path: str, all_files: list[dict[str, Any]]) -> bool:
+    """Return True if any test file in the diff plausibly covers source_path."""
+    src_stem = _source_stem(source_path)
+    src_dir = source_path.rsplit("/", 1)[0] if "/" in source_path else ""
+    for f in all_files:
+        if f["role"] != "test":
+            continue
+        t_stem = _source_stem(f["path"])
+        if t_stem == src_stem:
+            return True
+        # Also match if same directory.
+        t_dir = f["path"].rsplit("/", 1)[0] if "/" in f["path"] else ""
+        if t_dir and src_dir and t_dir == src_dir:
+            return True
+        # Or if test file's stem contains the source stem (or vice versa).
+        if src_stem and (src_stem in t_stem or t_stem in src_stem):
+            return True
+    return False
+
+
+# ──────────────────────────── risk classification ────────────────────────────
+
+
+def _classify_risk(file_entry: dict[str, Any], all_files: list[dict[str, Any]]) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    role = file_entry["role"]
+    path = file_entry["path"]
+    base = path.rsplit("/", 1)[-1]
+    status = file_entry["status"]
+    public_api = file_entry.get("publicApiTouched", False)
+    total_change = file_entry["insertions"] + file_entry["deletions"]
+    has_test = _has_co_changed_test(path, all_files) if role == "source" else True
+
+    high = False
+    medium = False
+
+    # HIGH triggers
+    if role == "migration":
+        reasons.append("migration")
+        high = True
+    if _is_secret_risk_path(path):
+        reasons.append("secret-risk-path")
+        high = True
+    if _path_contains_subseq(path.replace("\\", "/"), ".github", "workflows"):
+        reasons.append("ci-workflow-change")
+        high = True
+    if role == "source" and total_change > LARGE_CHANGE_LINES and not has_test:
+        reasons.append("large-change")
+        reasons.append("no-test-changes")
+        high = True
+    if public_api and not has_test:
+        reasons.append("touches-public-api")
+        if "no-test-changes" not in reasons:
+            reasons.append("no-test-changes")
+        high = True
+    if status == "deleted" and role == "source":
+        reasons.append("source-deletion")
+        high = True
+
+    if high:
+        return "high", reasons
+
+    # MEDIUM triggers
+    if role == "source" and not has_test:
+        reasons.append("no-test-changes")
+        medium = True
+    if role == "config":
+        reasons.append("config-change")
+        medium = True
+    if status == "renamed" and role == "source":
+        reasons.append("source-rename")
+        medium = True
+
+    if medium:
+        return "medium", reasons
+
+    return "low", reasons
+
+
+# ──────────────────────────── git diff invocation ────────────────────────────
+
+
+def _diff_args_for_mode(mode: str, base: Optional[str], rng: Optional[str]) -> tuple[list[str], list[str]]:
+    """Return (numstat_args, patch_args) tail (after `git diff -M`)."""
+    if mode == "working":
+        return [], []
+    if mode == "staged":
+        return ["--cached"], ["--cached"]
+    if mode == "base":
+        # 3-dot merge-base diff.
+        return [f"{base}...HEAD"], [f"{base}...HEAD"]
+    if mode == "range":
+        return [rng or ""], [rng or ""]
+    raise ValueError(f"unknown mode: {mode}")
+
+
+def _run_diff(mode: str, base: Optional[str], rng: Optional[str],
+              cwd: Path) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    numstat_tail, patch_tail = _diff_args_for_mode(mode, base, rng)
+    code, numstat, err = _git(["diff", "-M", "--numstat", *numstat_tail], cwd=cwd)
+    if code != 0:
+        die(f"git diff (numstat) failed: {err.strip() or 'exit ' + str(code)}")
+    code, patch, err = _git(["diff", "-M", "--no-color", *patch_tail], cwd=cwd)
+    if code != 0:
+        die(f"git diff (patch) failed: {err.strip() or 'exit ' + str(code)}")
+    return _parse_numstat(numstat), _split_patches(patch)
+
+
+# ──────────────────────────── summarize ────────────────────────────
+
+
+def summarize(*, mode: str, base: Optional[str], rng: Optional[str],
+              cwd: Path, max_files: int, include_patches: bool,
+              public_api_only: bool, risk_min: str) -> dict[str, Any]:
+    if not _is_git_repo(cwd):
+        die(f"not a git repository: {cwd}")
+    # Reject option-shaped values for --base / --range so they cannot smuggle
+    # extra `git diff` flags through argv (e.g. `--base=--output=/etc/passwd`).
+    # shell=False prevents shell injection, but `git diff` itself parses any
+    # leading-dash string as an option.
+    if base is not None and base.startswith("-"):
+        die(f"--base value must not start with '-': {base!r}")
+    if rng is not None and rng.startswith("-"):
+        die(f"--range value must not start with '-': {rng!r}")
+
+    if mode == "base":
+        assert base is not None
+        if not _verify_ref(base, cwd):
+            die(f"base ref not found locally: {base}. "
+                f"Run `git fetch origin {base}` first.")
+
+    numstat_entries, patches = _run_diff(mode, base, rng, cwd)
+
+    # Build files[] — merge numstat + patch info.
+    files: list[dict[str, Any]] = []
+    for n in numstat_entries:
+        path = n["path"]
+        patch_info = patches.get(path, {})
+        status = patch_info.get("status", "modified")
+        renamed_from = n.get("renamedFrom") or patch_info.get("renamedFrom")
+        added_lines = patch_info.get("addedLines", [])
+
+        role = _classify_role(path)
+        language = _language_for_path(path)
+        public_api = _detect_public_api(path, added_lines) if role == "source" else False
+
+        entry: dict[str, Any] = {
+            "path": path,
+            "status": status,
+            "role": role,
+            "language": language,
+            "insertions": n["insertions"],
+            "deletions": n["deletions"],
+            "binary": n["binary"],
+            "publicApiTouched": public_api,
+        }
+        if renamed_from:
+            entry["renamedFrom"] = renamed_from
+        if include_patches and "patch" in patch_info:
+            # Even when the user opts into raw patch echoing, suppress patches
+            # for secret-risk paths (.env, *.pem, *.key, etc.) so the canary
+            # values never reach the agent transcript by accident. The path is
+            # still surfaced under summary.secretsRiskFiles.
+            if _is_secret_risk_path(path):
+                entry["patchOmitted"] = "secretsRiskFiles"
+            else:
+                entry["patch"] = patch_info["patch"]
+        files.append(entry)
+
+    # Risk pass — needs full files list for co-changed-test lookup.
+    for f in files:
+        risk, reasons = _classify_risk(f, files)
+        f["risk"] = risk
+        f["riskReasons"] = reasons
+
+    # Filtering.
+    filtered = files
+    if public_api_only:
+        filtered = [f for f in filtered if f.get("publicApiTouched")]
+    if risk_min != "low":
+        threshold = RISK_ORDER[risk_min]
+        filtered = [f for f in filtered if RISK_ORDER[f["risk"]] >= threshold]
+
+    truncated = False
+    if len(filtered) > max_files:
+        filtered = filtered[:max_files]
+        truncated = True
+
+    # Aggregate stats — based on UNFILTERED files for honesty.
+    total_ins = sum(f["insertions"] for f in files)
+    total_del = sum(f["deletions"] for f in files)
+    moved = _moved_lines_estimate(patches)
+
+    by_role: dict[str, int] = {}
+    for f in files:
+        by_role[f["role"]] = by_role.get(f["role"], 0) + 1
+
+    high_risk_files = [f["path"] for f in files if f["risk"] == "high"]
+    test_files_touched = sum(1 for f in files if f["role"] == "test")
+    source_without_tests = [f["path"] for f in files
+                            if f["role"] == "source" and "no-test-changes" in f["riskReasons"]]
+    public_api_touches = [f["path"] for f in files if f.get("publicApiTouched")]
+    migrations_touched = [f["path"] for f in files if f["role"] == "migration"]
+    secrets_risk = [f["path"] for f in files if _is_secret_risk_path(f["path"])]
+
+    # Resolve metadata.
+    branch = _current_branch(cwd)
+    head = _short_head(cwd)
+    base_label: Optional[str] = base if mode == "base" else (rng if mode == "range" else None)
+
+    payload: dict[str, Any] = {
+        "mode": mode,
+        "base": base_label,
+        "head": head,
+        "branch": branch,
+        "summarizedAt": _now_iso(),
+        "stats": {
+            "files": len(files),
+            "insertions": total_ins,
+            "deletions": total_del,
+            "movedLinesEstimate": moved,
+        },
+        "files": filtered,
+        "truncated": truncated,
+        "summary": {
+            "byRole": by_role,
+            "highRiskFiles": high_risk_files,
+            "testFilesTouched": test_files_touched,
+            "sourceFilesWithoutTestChanges": source_without_tests,
+            "publicApiTouches": public_api_touches,
+            "migrationsTouched": migrations_touched,
+            "secretsRiskFiles": secrets_risk,
+        },
+    }
+    return payload
+
+
+# ──────────────────────────── envelope offload (mirrors railway-ops) ────────────────────────────
+
+
+def _payload_shape(payload: dict, depth: int = 3) -> dict[str, dict[str, Any]]:
+    if depth < 1 or not isinstance(payload, dict):
+        return {}
+    return {k: _shape_value(v, depth) for k, v in payload.items() if k != "tool"}
+
+
+def _shape_value(v: Any, depth: int) -> dict[str, Any]:
+    if isinstance(v, str):
+        return {"type": "string", "length": len(v)}
+    if isinstance(v, bool):
+        return {"type": "boolean"}
+    if isinstance(v, (int, float)):
+        return {"type": "number"}
+    if isinstance(v, list):
+        out: dict[str, Any] = {"type": "list", "length": len(v)}
+        if depth > 1 and v:
+            out["sample"] = _shape_value(v[0], depth - 1)
+        return out
+    if isinstance(v, dict):
+        out = {"type": "dict", "keys": len(v)}
+        if depth > 1:
+            out["shape"] = {k: _shape_value(val, depth - 1) for k, val in v.items()}
+        return out
+    if v is None:
+        return {"type": "null"}
+    return {"type": type(v).__name__}
+
+
+def _write_output_file(payload: Any, output_path: str, *, shape_depth: int = 3) -> dict[str, Any]:
+    path = Path(output_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2, default=str)
+    path.write_text(text, encoding="utf-8")
+    tool = payload.get("tool") if isinstance(payload, dict) else None
+    summary: dict[str, Any] = {
+        "tool": tool or _tool_meta(),
+        "savedTo": str(path),
+        "bytes": len(text.encode("utf-8")),
+        "fileLineCount": text.count("\n") + 1,
+    }
+    if isinstance(payload, dict):
+        summary["payloadKeys"] = [k for k in payload.keys() if k != "tool"]
+        summary["payloadShape"] = _payload_shape(payload, depth=shape_depth)
+    return summary
+
+
+def emit(data: Any, *, pretty: bool, output: Optional[str], shape_depth: int) -> None:
+    wrapped = _with_tool_meta(data)
+    if output and isinstance(wrapped, (dict, list)):
+        wrapped = _write_output_file(wrapped, output, shape_depth=shape_depth)
+    if pretty:
+        print(json.dumps(wrapped, indent=2, default=str))
+    else:
+        print(json.dumps(wrapped, default=str))
+
+
+# ──────────────────────────── CLI ────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog=TOOL_NAME,
+        description="One-call structured triage of a git diff.",
+    )
+    p.add_argument("--version", action="version",
+                   version=f"{TOOL_NAME} {_plugin_version()}")
+    p.add_argument("--path", default=".",
+                   help="git working tree to inspect (default: cwd)")
+
+    mode_group = p.add_mutually_exclusive_group()
+    mode_group.add_argument("--staged", action="store_true",
+                            help="diff the staged index (`git diff --cached`)")
+    mode_group.add_argument("--base", metavar="BRANCH",
+                            help="diff <base>...HEAD (3-dot merge-base diff)")
+    mode_group.add_argument("--range", dest="rng", metavar="A..B",
+                            help="explicit range, passed verbatim to `git diff`")
+
+    p.add_argument("--max-files", type=int, default=DEFAULT_MAX_FILES,
+                   dest="max_files",
+                   help=f"cap files in files[] (default: {DEFAULT_MAX_FILES})")
+
+    patch_group = p.add_mutually_exclusive_group()
+    patch_group.add_argument("--include-patches", dest="include_patches",
+                             action="store_true", default=False,
+                             help="include raw unified diff per file (off by default; "
+                                  "patches blow up payload size)")
+    patch_group.add_argument("--no-patches", dest="include_patches",
+                             action="store_false",
+                             help="omit patches (default)")
+
+    p.add_argument("--public-api-only", dest="public_api_only", action="store_true",
+                   help="filter files[] to publicApiTouched only")
+    p.add_argument("--risk", choices=["low", "medium", "high"], default="low",
+                   help="filter files[] to risk >= MIN (default: low — show all)")
+
+    p.add_argument("--output", metavar="PATH", default=None,
+                   help="write the full JSON payload to PATH and print a compact "
+                        "summary (savedTo, bytes, payloadKeys, payloadShape).")
+    p.add_argument("--shape-depth", type=int, choices=[1, 2, 3], default=3,
+                   dest="shape_depth",
+                   help="how deep payloadShape recurses (default 3).")
+
+    fmt = p.add_mutually_exclusive_group()
+    fmt.add_argument("--json", dest="pretty", action="store_false", default=False,
+                     help="compact JSON output (default)")
+    fmt.add_argument("--pretty", dest="pretty", action="store_true",
+                     help="pretty-print JSON output")
+    return p
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    args = build_parser().parse_args(argv)
+    cwd = Path(args.path).expanduser().resolve()
+    if not cwd.exists():
+        die(f"--path not found: {args.path}")
+    if not cwd.is_dir():
+        die(f"--path is not a directory: {args.path}")
+    if args.max_files < 1:
+        die("--max-files must be >= 1")
+
+    if args.staged:
+        mode = "staged"
+        base = None
+        rng = None
+    elif args.base:
+        mode = "base"
+        base = args.base
+        rng = None
+    elif args.rng:
+        mode = "range"
+        base = None
+        rng = args.rng
+    else:
+        mode = "working"
+        base = None
+        rng = None
+
+    data = summarize(
+        mode=mode, base=base, rng=rng, cwd=cwd,
+        max_files=args.max_files,
+        include_patches=args.include_patches,
+        public_api_only=args.public_api_only,
+        risk_min=args.risk,
+    )
+    emit(data, pretty=args.pretty, output=args.output, shape_depth=args.shape_depth)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)

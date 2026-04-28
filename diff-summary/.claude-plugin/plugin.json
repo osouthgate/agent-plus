@@ -1,0 +1,13 @@
+{
+  "name": "diff-summary",
+  "description": "One-call structured triage of a git diff — file-by-file role classification (source/test/config/doc/generated/build/fixture/migration), risk tier (low/medium/high) with reasons, public-API touch detection, co-changed-test detection, secret-risk path flagging, and aggregate stats. Replaces the 5–20 Read calls an agent burns reading each modified file to figure out 'what kind of change is this'.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Oliver Southgate",
+    "url": "https://github.com/osouthgate"
+  },
+  "homepage": "https://github.com/osouthgate/agent-plus",
+  "repository": "https://github.com/osouthgate/agent-plus",
+  "license": "MIT",
+  "keywords": ["diff", "triage", "pr-review", "code-review", "git", "agent-plus"]
+}
