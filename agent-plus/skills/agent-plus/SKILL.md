@@ -36,7 +36,11 @@ agent-plus refresh    [--dir PATH] [--env-file PATH] [--plugin <name>]
                       [--no-extensions | --extensions-only] [--pretty]
 agent-plus list       [--dir PATH] [--names-only] [--pretty]
 agent-plus extensions list|validate|add|remove [--dir PATH] [--pretty]
-agent-plus marketplace init <user>/<name> [--path PATH] [--pretty]
+agent-plus marketplace init    <user>/<name> [--path PATH] [--pretty]
+agent-plus marketplace install <user>/agent-plus-skills [--pretty]
+agent-plus marketplace list    [--pretty]
+agent-plus marketplace update  [<user>/<name>] [--pretty]
+agent-plus marketplace remove  <user>/<name> [--pretty]
 agent-plus --version
 ```
 
@@ -91,18 +95,53 @@ Cheapest identity probe per built-in plugin, NAMES + IDs + URLs only. User exten
 
 Plugins still out of scope for refresh (envcheck still reports them): coolify-remote, hcloud-remote, hermes-remote, openrouter-remote, skill-feedback.
 
-## `marketplace` (Phase 1 — `init` only)
+## `marketplace` — full lifecycle
 
-`agent-plus marketplace init <user>/agent-plus-skills` scaffolds a new marketplace repo following the `<user>/agent-plus-skills` GitHub naming convention. Writes `marketplace.json` (empty `skills: []`, `agent_plus_version: ">=0.5"`, `surface: "claude-code"`), `README.md`, MIT `LICENSE`, `.gitignore`, `CHANGELOG.md`. Runs `git init` if available. Prints — does NOT execute — `gh repo create` and `gh repo edit --add-topic` follow-up invocations.
+The `<user>/agent-plus-skills` convention. Five subcommands.
+
+### `init` — scaffold a new marketplace repo
+
+`agent-plus marketplace init <user>/agent-plus-skills` writes `marketplace.json` (empty `skills: []`, `agent_plus_version: ">=0.5"`, `surface: "claude-code"`), `README.md`, MIT `LICENSE`, `.gitignore`, `CHANGELOG.md`. Runs `git init` if available. Prints — does NOT execute — `gh repo create` and `gh repo edit --add-topic` follow-up invocations.
 
 ```bash
-agent-plus marketplace init osouthgate/agent-plus-skills            # scaffolds ./agent-plus-skills/
+agent-plus marketplace init osouthgate/agent-plus-skills            # ./agent-plus-skills/
 agent-plus marketplace init osouthgate/agent-plus-skills --path /tmp/myrepo
 ```
 
-The `name` portion of the slug must be `agent-plus-skills` for v1; anything else is rejected. Target directory must not exist or must be empty.
+The `name` portion of the slug must be `agent-plus-skills` for v1.
 
-**When NOT to use:** use this for scaffolding a NEW marketplace repo; not for installing one (Phase 2). The `install`, `update`, `list`, `remove` subcommands are not yet implemented.
+### `install` — clone + register a marketplace
+
+```bash
+agent-plus marketplace install osouthgate/agent-plus-skills
+```
+
+Clones to a temp dir, validates `marketplace.json` (name, owner-vs-URL, semver-range against the framework, `surface`, every skill's path + plugin.json name/version match, optional SHA-256 checksums), pins the commit SHA, moves to `~/.agent-plus/marketplaces/<owner>-<name>/`, writes `.agent-plus-meta.json`, fires the **first-run review prompt**. Decline = installed but un-accepted; plugins refuse to load until accepted.
+
+### `list`, `update`, `remove`
+
+```bash
+agent-plus marketplace list                              # what's installed locally
+agent-plus marketplace update                            # iterate every install, prompt per one
+agent-plus marketplace update osouthgate/agent-plus-skills
+agent-plus marketplace remove  osouthgate/agent-plus-skills
+```
+
+`update` prompts `Accept update from <old[:8]> to <new[:8]>? [y/N]`, fast-forwards, **re-arms `accepted_first_run`**. Refuses `--cron`. Blocks (does not prompt) when the upstream raises `agent_plus_version` past what the local framework supports.
+
+### Trust gates (all five enforced)
+
+1. Pin to commit SHA at install — recorded in `.agent-plus-meta.json:pinned_sha`. Updates are explicit fast-forwards.
+2. First-run review prompt — once per install, re-armed on update accept.
+3. No automatic updates — `--cron` is parsed only so it can be refused.
+4. No execution at install time — clone + JSON parse + filesystem move only. Nothing in the cloned repo runs.
+5. Optional checksum verification — when `marketplace.json` declares `checksums`, install computes deterministic SHA-256 over each plugin tar; mismatch aborts.
+
+`agent-plus refresh` walks `~/.agent-plus/marketplaces/` and **skips plugins from un-accepted marketplaces**, surfacing them under `marketplaces_skipped_unaccepted[]` in the envelope.
+
+`AGENT_PLUS_MARKETPLACES_ROOT` env var overrides the default location (intended for tests).
+
+**When NOT to use:** use `init` for scaffolding a NEW marketplace; use `install` to consume someone else's. Don't use either for plugins shipped through Claude Code's normal `marketplace add` flow.
 
 ## When NOT to use this — fall back to the underlying plugin
 

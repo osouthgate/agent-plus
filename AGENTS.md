@@ -4,21 +4,32 @@ Durable instructions for any coding agent (Claude Code, Codex, Cursor, Aider) wo
 
 ## What this repo is
 
-`agent-plus` is a collection of Claude Code plugins. Each plugin is a single-file stdlib Python 3 CLI that wraps a third-party API (Coolify, Langfuse, Hermes Agent, OpenRouter, Hetzner Cloud, Railway, Supabase) with one goal: **cut the tool-call and token cost of driving that API from an AI agent.**
+`agent-plus` is a **framework** for Claude Code plugins. As of the 2026-04-28 framework extraction, it ships only the four universal primitives:
 
-Every plugin exists because doing the same thing via `curl` + `jq` + raw CLI burned either tokens, tool calls, or human time that this repo measured and got tired of.
+- `agent-plus` — the meta plugin (workspace bootstrap, env-var readiness, identity cache, marketplace lifecycle)
+- `repo-analyze` — cold-start orientation in any unfamiliar repo
+- `diff-summary` — per-file role + risk classification of a git diff
+- `skill-feedback` — local-first agent self-assessment for any Claude Code skill
 
-## The five design patterns
+A fifth (`skill-plus`, session-mining-driven skill discovery + scaffolding + feedback aggregation) is in design.
 
-Any change you make — new plugin, new command, README rewrite — should reinforce one of these. If it doesn't, justify it.
+Service wrappers (`github-remote`, `vercel-remote`, `supabase-remote`, `railway-ops`, `linear-remote`, `openrouter-remote`, `langfuse-remote`, `hermes-remote`, `coolify-remote`, `hcloud-remote`) previously shipped here. They moved to a separate marketplace at `osouthgate/agent-plus-skills` and now iterate independently.
 
-1. **Aggregate server-side, return one blob.** Don't make the agent fetch `/a`, `/b`, `/c` and stitch them. Hit all three inside the CLI and return one structured payload. Example: `railway-ops overview` (services + deploy status + errors + env names in one call); `langfuse monitor-user` (daily metrics + sessions + latest traces in one call).
-2. **Resolve by name, not ID.** Never require the agent to copy a UUID, hash, or 20-char project ref between calls. Look it up internally. Example: `coolify-remote deploy hermes` instead of `coolify-remote deploy b1c6e2f0-...`.
-3. **`--wait` on every async mutation.** If a command returns an action ID, bundle the poll loop. The agent should never hand-roll `until curl ... | jq ...` — that breaks on the Windows bash shim and burns tool calls on poll tick.
-4. **`--json` on every list/show.** Piping to `jq` is the happy path. Never format output that only humans can parse.
-5. **Strip values the agent shouldn't see.** Env var values leak into transcripts if you let them. Parse them server-side, keep names, drop the dict. Example: `railway-ops overview` and the canary no-leak test.
+Every plugin in either repo exists because doing the same thing via `curl` + `jq` + raw CLI burned either tokens, tool calls, or human time that the framework measured and got tired of.
 
-The root README sells these patterns. Each plugin README should show at least one in action with a concrete win.
+## The seven design patterns
+
+Any change you make — new plugin, new command, README rewrite — should reinforce one of these. If it doesn't, justify it. The full list is canonical in the [root README](./README.md#the-seven-patterns) — paraphrased here:
+
+1. **Aggregate server-side, return one blob.** N endpoints in parallel under the hood, one structured payload back to the agent.
+2. **Resolve by name, not ID.** UUIDs never touch the agent's context.
+3. **`--wait` on every async mutation.** No hand-rolled `until` loops in the agent's session.
+4. **`--json` on every list / show.** Structured output into `jq` is the default.
+5. **Strip values the agent shouldn't see.** Env-var values, secrets, large blobs — names and IDs only.
+6. **Self-diagnosing output.** Every JSON payload carries a top-level `tool: {name, version}` field read from the plugin manifest at runtime.
+7. **Stay in your lane.** Each plugin's SKILL.md explicitly lists when the agent should drop to the raw CLI / API instead of looping on a rejection.
+
+The root README sells these patterns; each plugin README should show at least one in action with a concrete win.
 
 ## Keeping the docs honest (READ THIS)
 
@@ -36,11 +47,13 @@ This is the single biggest source of drift in this repo. If you skipped these st
 
 ## Adding a new plugin (checklist)
 
-When scaffolding a whole new plugin, do these in the same PR — the `Stop` hook enforces the first two, but none catches #4 automatically:
+This applies to **framework plugins** added to this repo (rare — the framework is intentionally small). Service-wrapper plugins go in `osouthgate/agent-plus-skills` and follow that repo's `marketplace.json` schema instead.
+
+When scaffolding a whole new framework plugin, do these in the same PR — the `Stop` hook enforces the first two, but none catches #4 automatically:
 
 1. **Copy the shape of an existing plugin.** Write `bin/<name>` (stdlib Python 3 only), `skills/<name>/SKILL.md`, `README.md`, `CHANGELOG.md`, `.claude-plugin/plugin.json`.
 2. **Add the entry to `.claude-plugin/marketplace.json`** so `claude plugin install <name>@agent-plus` works.
-3. **Add a row to the root `README.md`** — both the time-savings table and the Plugins table. Orphaned plugins are invisible.
+3. **Add a row to the root `README.md`** — Plugins table at minimum.
 4. **Remind the user to run** `gh repo edit osouthgate/agent-plus --add-topic <name>` so the plugin shows up in GitHub's topic search. You cannot do this yourself without auth; flag it explicitly in your completion summary.
 5. **Validate** with `claude plugin validate <plugin>` and `claude plugin validate .claude-plugin/marketplace.json` before committing.
 
@@ -61,8 +74,8 @@ Every plugin directory has the same shape — preserve it:
 ```
 
 - **Stdlib only.** No pip installs. No venvs. If you reach for `requests`, stop and use `urllib.request`.
-- **Layered `.env` autoload**, highest precedence first: `--env-file` → project `.env.local` / `.env` (walked up from cwd) → shell env. Project `.env` wins over shell — this is deliberate, don't flip it.
-- **Scoped env prefixes.** Each plugin only picks up its own prefix (`HERMES_*`, `COOLIFY_*`, `LANGFUSE_*`, etc.) to avoid cross-pollution.
+- **Layered `.env` autoload**, highest precedence first: `--env-file` → project `.env.local` / `.env` (walked up from cwd) → `~/.agent-plus/.env` → shell env. Project `.env` wins over shell — this is deliberate, don't flip it.
+- **Scoped env prefixes** (where applicable). The framework primitives don't take service-specific env vars, but if you add one that does, only pick up its own prefix to avoid cross-pollution.
 - **Missing-config errors point to both `.env` and `~/.claude/settings.json`** so the user knows where to put the value.
 
 ## Writing style for READMEs
