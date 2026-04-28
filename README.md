@@ -173,7 +173,7 @@ Active design and migration plans:
 
 - [`2026-04-28-skill-plus-plugin.md`](./plans/todo/2026-04-28-skill-plus-plugin.md) — discovery + scaffolding + feedback aggregator. The framework's fifth universal primitive.
 - [`2026-04-28-existing-plugin-audit.md`](./plans/todo/2026-04-28-existing-plugin-audit.md) — quality + tier audit of the pre-extraction plugin set.
-- [`2026-04-28-framework-extraction.md`](./plans/todo/2026-04-28-framework-extraction.md) *(forthcoming)* — migration of the 10 service wrappers to `osouthgate/agent-plus-skills`.
+- [`2026-04-28-framework-extraction.md`](./plans/todo/2026-04-28-framework-extraction.md) — migration of the 10 service wrappers to `osouthgate/agent-plus-skills` (in progress).
 - [`2026-04-28-marketplace-convention.md`](./plans/todo/2026-04-28-marketplace-convention.md) — `<user>/agent-plus-skills` convention, `marketplace.json` schema, install/update/trust protocol. Phases 1 + 2 shipped (April 2026); Phase 4 (`search`, collision-resolution `prefer`) remains future work.
 
 ## Contributing / development

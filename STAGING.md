@@ -4,7 +4,7 @@ This file lives only in the **private** `osouthgate/plans-agent-plus` clone. It 
 
 ## What this repo is
 
-`plans-agent-plus` is the **private staging clone** of [`osouthgate/agent-plus`](https://github.com/osouthgate/agent-plus) — the framework-only repo. As of the 2026-04-28 framework extraction, agent-plus ships only the four universal primitives (`agent-plus` meta, `repo-analyze`, `diff-summary`, `skill-feedback`) plus `skill-plus` (in design). The 10 service wrappers have moved to a separate marketplace at `osouthgate/agent-plus-skills` (forthcoming) and no longer stage through this repo.
+`plans-agent-plus` is the **private staging clone** of [`osouthgate/agent-plus`](https://github.com/osouthgate/agent-plus) — the framework-only repo. As of the 2026-04-28 framework extraction, agent-plus ships only the four universal primitives (`agent-plus` meta, `repo-analyze`, `diff-summary`, `skill-feedback`) plus `skill-plus` (in design). The 10 service wrappers have moved to a separate marketplace at `osouthgate/agent-plus-skills` (live, v0.2.0) and no longer stage through this repo.
 
 All new framework work — primitive plugins, envelope-contract changes, doc rewrites, the marketplace install command — is built and tested here first. Once a slice is solid (tests green, drift hook clean, dogfooded for at least one session), it gets promoted to the public repo.
 
@@ -72,23 +72,24 @@ Wrapper-related topic adds (`github-remote`, `vercel-remote`, etc.) are no longe
 | 4 | `a225151` | `repo-analyze` 0.1.0 | New plugin — needs topic add |
 | 5 | *pending* | `diff-summary` 0.1.0 | New plugin — needs topic add. Directory present in working tree (untracked at session start); not yet promoted on private `main`. |
 | 8 | *pending* | review fixes for slices 4–5 (envelope contract drift, Pattern 5 canary gaps, narrowed excepts, symlink skip, `--include-patches` secret-risk suppression) | Apply on top of slice 5 |
+| MP1 | `2b5686d` | `agent-plus` 0.5.0 — marketplace `init` subcommand (Phase 1 of the convention) | First marketplace surface. Public-side: same name slug rules, no new topic add. |
+| MP2 | `0fe51ba` | `agent-plus` 0.9.0 — marketplace `install / update / list / remove` + trust model (Phase 2 of the convention). Bundles all five trust gates (SHA pin, first-run review, no auto-update, no install-time exec, optional checksum verification). | First-class consumer surface. Makes `<user>/agent-plus-skills` installable without `claude plugin marketplace add`. If the full queue (slices 1–5 + 8 + MP1 + MP2) lands together, public jumps `0.2.0` → `0.9.0`; if MP2 alone, `<previous>` → `0.9.0`. No new topic add. |
 
-**Upcoming slices** (numbered to follow the framework-extraction plan, not the original session log):
+**Upcoming slices** (not yet shipped):
 
 | Slice | Topic | Notes |
 |---|---|---|
-| A0 | `savedTo` → `payloadPath` rename across the four framework plugins | Coordinated major-version bump. Narrower scope than pre-extraction (wrappers no longer in this repo). |
 | A | `skill-plus` 0.1.0 — scan + propose | Per [`plans/todo/2026-04-28-skill-plus-plugin.md`](./plans/todo/2026-04-28-skill-plus-plugin.md). Triggers the `skill-plus` topic add. |
+| MP4 | marketplace `search` + collision-resolution `prefer` (Phase 4 of the convention) | Future. Phase 4 is ergonomics, not a trust-model gate — safe to ship later. |
 
 Note: slice 6 (`d9ce987`) is `STAGING.md` + staging banner — **PRIVATE ONLY, never cherry-pick**. Slice 7 (`1758144`) is `plans/todo/2026-04-28-backlog-status.md` — also private (the public repo doesn't track `plans/todo/`).
 
 ### Doc follow-ups noted but not yet shipped
 
-- `savedTo` → `payloadPath` rename — now scoped as **slice A0**, covering only the four framework plugins (`agent-plus`, `repo-analyze`, `diff-summary`, `skill-feedback`). The wrappers' rename happens on `osouthgate/agent-plus-skills` independently.
 - Stale `services.json` entries linger after `agent-plus extensions remove` (papercut).
-- `marketplace.json` schema documentation — needs to land alongside the `agent-plus marketplace install`/`list` command surface (currently planned, not implemented). See [`plans/todo/2026-04-28-marketplace-convention.md`](./plans/todo/2026-04-28-marketplace-convention.md) (forthcoming).
 - Coverage gaps deferred from slice 8 review: explicit LOW-tier risk test in diff-summary, Python public-API heuristic test, framework confidence-level coverage in repo-analyze, `core.autocrlf=false` in test_init_repo for Windows safety. Not blockers; worth adding eventually.
 - `_walk` in repo-analyze uses `list.pop(0)` for BFS — `collections.deque` would be cleaner. Minor perf only.
+- `skill-feedback` envelope contract test fails (the `--version` regex now requires `<name> <semver>` shape; `skill-feedback` still emits bare `<semver>`). The change to `test_envelope_contract.py` and the partial `bin/skill-feedback` modification have been sitting uncommitted across multiple sessions. Either complete the rename to make `skill-feedback --version` match the contract, or revert the contract tightening — currently neither.
 
 ## What's intentionally NOT in this file
 
