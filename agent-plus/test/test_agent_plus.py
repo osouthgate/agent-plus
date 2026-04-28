@@ -293,12 +293,166 @@ class TestCanaryNoLeak(unittest.TestCase):
         self.assertIn("LINEAR_API_KEY", text_on_disk)
 
 
-# ─── refresh (no network) ────────────────────────────────────────────────────
+# ─── refresh handler discovery + execution (no network) ─────────────
 
 
-class TestRefreshUnconfigured(unittest.TestCase):
-    """When tokens are missing, refresh should record `unconfigured` /
-    `partial` rather than crash or prompt."""
+class TestRefreshHandlerDiscovery(unittest.TestCase):
+    """`_discover_refresh_handlers` walks ~/.claude/plugins/cache/<marketplace>/
+    <plugin>/<version>/.claude-plugin/plugin.json and returns the
+    refresh_handler block declared by each plugin."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cache = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _write(self, marketplace: str, plugin: str, version: str, manifest: dict) -> None:
+        d = self.cache / marketplace / plugin / version / ".claude-plugin"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def test_missing_cache_dir_returns_empty(self) -> None:
+        bogus = self.cache / "does-not-exist"
+        handlers, errors = ap._discover_refresh_handlers(bogus)
+        self.assertEqual(handlers, {})
+        self.assertEqual(errors, [])
+
+    def test_plugin_without_refresh_handler_silently_skipped(self) -> None:
+        self._write("mk", "no-handler", "0.1.0", {
+            "name": "no-handler", "version": "0.1.0",
+        })
+        handlers, errors = ap._discover_refresh_handlers(self.cache)
+        self.assertEqual(handlers, {})
+        self.assertEqual(errors, [])
+
+    def test_plugin_with_handler_collected(self) -> None:
+        self._write("mk", "vercel-remote", "0.4.0", {
+            "name": "vercel-remote",
+            "version": "0.4.0",
+            "refresh_handler": {
+                "command": "vercel-remote whoami --json",
+                "timeout_seconds": 5,
+                "identity_keys": ["projects"],
+                "failure_mode": "soft",
+            },
+        })
+        handlers, errors = ap._discover_refresh_handlers(self.cache)
+        self.assertEqual(errors, [])
+        self.assertIn("vercel-remote", handlers)
+        self.assertEqual(handlers["vercel-remote"]["command"], "vercel-remote whoami --json")
+        self.assertEqual(handlers["vercel-remote"]["timeout_seconds"], 5)
+        self.assertEqual(handlers["vercel-remote"]["identity_keys"], ["projects"])
+        self.assertEqual(handlers["vercel-remote"]["failure_mode"], "soft")
+
+    def test_highest_version_wins(self) -> None:
+        self._write("mk", "x", "0.9.0", {
+            "name": "x", "refresh_handler": {"command": "old --json"},
+        })
+        self._write("mk", "x", "0.10.0", {
+            "name": "x", "refresh_handler": {"command": "new --json"},
+        })
+        handlers, _ = ap._discover_refresh_handlers(self.cache)
+        # Natural version sort: 0.10.0 > 0.9.0.
+        self.assertEqual(handlers["x"]["command"], "new --json")
+
+    def test_defaults_applied(self) -> None:
+        self._write("mk", "x", "0.1.0", {
+            "name": "x", "refresh_handler": {"command": "x --json"},
+        })
+        handlers, _ = ap._discover_refresh_handlers(self.cache)
+        h = handlers["x"]
+        self.assertEqual(h["timeout_seconds"], 10)
+        self.assertEqual(h["failure_mode"], "soft")
+        self.assertEqual(h["identity_keys"], [])
+
+    def test_malformed_block_records_error_does_not_crash(self) -> None:
+        self._write("mk", "bad", "0.1.0", {
+            "name": "bad", "refresh_handler": {"command": ""},
+        })
+        handlers, errors = ap._discover_refresh_handlers(self.cache)
+        self.assertNotIn("bad", handlers)
+        self.assertTrue(any("bad" in e for e in errors))
+
+    def test_malformed_plugin_json_recorded(self) -> None:
+        d = self.cache / "mk" / "plugin" / "0.1.0" / ".claude-plugin"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "plugin.json").write_text("{not valid json", encoding="utf-8")
+        handlers, errors = ap._discover_refresh_handlers(self.cache)
+        self.assertEqual(handlers, {})
+        self.assertEqual(len(errors), 1)
+
+
+class TestRunRefreshHandler(unittest.TestCase):
+    """`_run_refresh_handler` runs the declared command, parses JSON, extracts
+    `identity_keys`, and respects `failure_mode`."""
+
+    def _block(self, **overrides) -> dict:
+        block = {
+            "command": "echo {}",
+            "timeout_seconds": 10,
+            "identity_keys": [],
+            "failure_mode": "soft",
+        }
+        block.update(overrides)
+        return block
+
+    def test_ok_extracts_identity_keys(self) -> None:
+        fake = type("P", (), {"returncode": 0,
+                              "stdout": json.dumps({"login": "olive", "default_org": "acme",
+                                                    "extra": "ignored"}),
+                              "stderr": ""})()
+        with patch.object(ap.subprocess, "run", return_value=fake):
+            out = ap._run_refresh_handler(
+                "github-remote",
+                self._block(command="github-remote whoami --json",
+                            identity_keys=["login", "default_org"]),
+                {},
+            )
+        self.assertEqual(out["status"], "ok")
+        self.assertEqual(out["plugin"], "github-remote")
+        self.assertEqual(out["source"], "plugin-manifest")
+        self.assertEqual(out["identity"], {"login": "olive", "default_org": "acme"})
+        # Non-identity keys passed through.
+        self.assertEqual(out["extra"], "ignored")
+
+    def test_timeout_soft_does_not_raise(self) -> None:
+        with patch.object(ap.subprocess, "run",
+                          side_effect=ap.subprocess.TimeoutExpired("x", 1)):
+            out = ap._run_refresh_handler("p", self._block(failure_mode="soft"), {})
+        self.assertEqual(out["status"], "error")
+        self.assertEqual(out["reason"], "timeout")
+
+    def test_timeout_hard_raises(self) -> None:
+        with patch.object(ap.subprocess, "run",
+                          side_effect=ap.subprocess.TimeoutExpired("x", 1)):
+            with self.assertRaises(RuntimeError):
+                ap._run_refresh_handler("p", self._block(failure_mode="hard"), {})
+
+    def test_command_not_found_soft(self) -> None:
+        with patch.object(ap.subprocess, "run", side_effect=FileNotFoundError("nope")):
+            out = ap._run_refresh_handler("p", self._block(), {})
+        self.assertEqual(out["status"], "unconfigured")
+        self.assertIn("not found", out["reason"])
+
+    def test_nonzero_exit_soft(self) -> None:
+        fake = type("P", (), {"returncode": 1, "stdout": "", "stderr": "boom"})()
+        with patch.object(ap.subprocess, "run", return_value=fake):
+            out = ap._run_refresh_handler("p", self._block(), {})
+        self.assertEqual(out["status"], "error")
+        self.assertEqual(out["stderr_tail"], "boom")
+
+    def test_invalid_json_soft(self) -> None:
+        fake = type("P", (), {"returncode": 0, "stdout": "not json", "stderr": ""})()
+        with patch.object(ap.subprocess, "run", return_value=fake):
+            out = ap._run_refresh_handler("p", self._block(), {})
+        self.assertEqual(out["status"], "error")
+        self.assertIn("not valid JSON", out["reason"])
+
+
+class TestRefreshSubcommandWithDiscovery(unittest.TestCase):
+    """End-to-end: cmd_refresh consults `_discover_refresh_handlers`."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -308,28 +462,25 @@ class TestRefreshUnconfigured(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def test_refresh_vercel_unconfigured_without_token(self) -> None:
-        # Strip VERCEL_TOKEN from env.
-        clean = {k: v for k, v in os.environ.items()
-                 if not k.startswith("VERCEL_")}
-        rc, out, err = _run(
-            "refresh", "--plugin", "vercel-remote", "--dir", str(self.dir),
-            env=clean, cwd=str(self.dir),
-        )
-        self.assertEqual(rc, 0, msg=err)
-        result = json.loads(out)
-        vercel = result["services"]["vercel-remote"]
-        self.assertEqual(vercel["status"], "unconfigured")
+    def test_unknown_plugin_reports_clear_error(self) -> None:
+        with patch.object(ap, "_discover_refresh_handlers", return_value=({}, [])):
+            args = ap.argparse.Namespace(
+                dir=str(self.dir), env_file=None, plugin="nonexistent-plugin",
+                no_extensions=False, extensions_only=False,
+            )
+            payload = ap.cmd_refresh(args)
+        self.assertIn("error", payload)
+        self.assertIn("nonexistent-plugin", payload["error"])
 
-    def test_refresh_writes_services_json(self) -> None:
-        clean = {k: v for k, v in os.environ.items()
-                 if not k.startswith("VERCEL_")}
-        _run("refresh", "--plugin", "vercel-remote", "--dir", str(self.dir),
-             env=clean, cwd=str(self.dir))
-        svc_path = self.dir / ".agent-plus" / "services.json"
-        svc = json.loads(svc_path.read_text())
-        self.assertIn("vercel-remote", svc["services"])
-        self.assertIn("refreshedAt", svc)
+    def test_no_handlers_no_extensions_returns_empty_services(self) -> None:
+        with patch.object(ap, "_discover_refresh_handlers", return_value=({}, [])):
+            args = ap.argparse.Namespace(
+                dir=str(self.dir), env_file=None, plugin=None,
+                no_extensions=True, extensions_only=False,
+            )
+            payload = ap.cmd_refresh(args)
+        self.assertEqual(payload["services"], {})
+        self.assertIn("refreshedAt", payload)
 
 
 # ─── workspace resolution ────────────────────────────────────────────────────
@@ -380,221 +531,6 @@ class TestPluginSpec(unittest.TestCase):
             self.assertIn("optional", spec, f"{name} missing optional")
             self.assertIsInstance(spec["required"], list)
             self.assertIsInstance(spec["optional"], list)
-
-
-# ─── new refresh handlers (mocked endpoints, no network) ────────────────────
-
-
-class _FakeProc:
-    """Minimal stand-in for subprocess.CompletedProcess used by railway tests."""
-
-    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-
-class TestRefreshSupabase(unittest.TestCase):
-    def test_ok_with_token(self) -> None:
-        body = [
-            {"name": "proj-a", "id": "abc123", "region": "us-east-1",
-             "organization_id": "org_1"},
-            {"name": "proj-b", "id": "def456", "region": "eu-west-1",
-             "organization_id": "org_2"},
-        ]
-        with patch.object(ap, "_http_get_json", return_value=(200, body)):
-            out = ap._refresh_supabase({"SUPABASE_ACCESS_TOKEN": "sbp_abc"})
-        self.assertEqual(out["status"], "ok")
-        self.assertEqual(out["count"], 2)
-        self.assertEqual(out["projects"][0]["name"], "proj-a")
-        self.assertEqual(out["projects"][0]["region"], "us-east-1")
-
-    def test_unconfigured_without_token(self) -> None:
-        out = ap._refresh_supabase({})
-        self.assertEqual(out["status"], "unconfigured")
-        self.assertIn("SUPABASE_ACCESS_TOKEN", out["reason"])
-
-    def test_canary_no_leak(self) -> None:
-        canary = "CANARY-12345-SUPABASE-DO-NOT-LEAK"
-        body = [{"name": "p", "id": "x", "region": "r", "organization_id": "o"}]
-        with patch.object(ap, "_http_get_json", return_value=(200, body)):
-            out = ap._refresh_supabase({"SUPABASE_ACCESS_TOKEN": canary})
-        self.assertNotIn(canary, json.dumps(out))
-
-
-class TestRefreshRailway(unittest.TestCase):
-    def test_ok(self) -> None:
-        fake_out = json.dumps([
-            {"name": "alpha", "id": "p1"},
-            {"name": "beta", "id": "p2"},
-        ])
-        with patch.object(ap.shutil, "which", return_value="C:/fake/railway.exe"):
-            with patch.object(ap.subprocess, "run", return_value=_FakeProc(0, fake_out, "")):
-                out = ap._refresh_railway({})
-        self.assertEqual(out["status"], "ok")
-        self.assertEqual(out["count"], 2)
-        self.assertEqual(out["projects"][0]["name"], "alpha")
-
-    def test_unconfigured_when_railway_missing(self) -> None:
-        with patch.object(ap.shutil, "which", return_value=None):
-            out = ap._refresh_railway({})
-        self.assertEqual(out["status"], "unconfigured")
-        self.assertIn("railway", out["reason"].lower())
-
-    def test_unconfigured_when_railway_unauthed(self) -> None:
-        with patch.object(ap.shutil, "which", return_value="C:/fake/railway.exe"):
-            with patch.object(ap.subprocess, "run",
-                              return_value=_FakeProc(1, "", "Unauthorized: please log in")):
-                out = ap._refresh_railway({})
-        self.assertEqual(out["status"], "unconfigured")
-
-
-class TestRefreshLinear(unittest.TestCase):
-    def test_ok_with_key(self) -> None:
-        body = {
-            "data": {
-                "viewer": {"id": "u1", "name": "Olive", "email": "o@example.com"},
-                "teams": {"nodes": [
-                    {"id": "t1", "key": "ENG", "name": "Engineering"},
-                    {"id": "t2", "key": "OPS", "name": "Ops"},
-                ]},
-            },
-        }
-        with patch.object(ap, "_http_request_json", return_value=(200, body)):
-            out = ap._refresh_linear({"LINEAR_API_KEY": "lin_test"})
-        self.assertEqual(out["status"], "ok")
-        self.assertEqual(out["viewer"]["name"], "Olive")
-        self.assertEqual(out["count"], 2)
-        self.assertEqual(out["teams"][0]["key"], "ENG")
-
-    def test_unconfigured_without_key(self) -> None:
-        out = ap._refresh_linear({})
-        self.assertEqual(out["status"], "unconfigured")
-        self.assertIn("LINEAR_API_KEY", out["reason"])
-
-    def test_canary_no_leak(self) -> None:
-        canary = "CANARY-12345-LINEAR-DO-NOT-LEAK"
-        body = {"data": {"viewer": {"id": "u", "name": "n", "email": "e"},
-                          "teams": {"nodes": []}}}
-        with patch.object(ap, "_http_request_json", return_value=(200, body)):
-            out = ap._refresh_linear({"LINEAR_API_KEY": canary})
-        self.assertNotIn(canary, json.dumps(out))
-
-    def test_canary_no_leak_on_error_path(self) -> None:
-        canary = "CANARY-12345-LINEAR-ERR-DO-NOT-LEAK"
-        with patch.object(ap, "_http_request_json",
-                          return_value=(401, {"errors": [{"message": "Unauthorized"}]})):
-            out = ap._refresh_linear({"LINEAR_API_KEY": canary})
-        self.assertEqual(out["status"], "error")
-        self.assertNotIn(canary, json.dumps(out))
-
-
-class TestRefreshLangfuse(unittest.TestCase):
-    def test_ok_with_keys_default_base(self) -> None:
-        with patch.object(ap, "_http_get_json",
-                          return_value=(200, {"status": "OK", "version": "3.10.0"})):
-            out = ap._refresh_langfuse({
-                "LANGFUSE_PUBLIC_KEY": "pk-lf-x",
-                "LANGFUSE_SECRET_KEY": "sk-lf-y",
-            })
-        self.assertEqual(out["status"], "ok")
-        self.assertEqual(out["base_url"], "https://cloud.langfuse.com")
-        self.assertEqual(out["health_status"], "OK")
-
-    def test_base_url_precedence_uses_explicit_base(self) -> None:
-        with patch.object(ap, "_http_get_json",
-                          return_value=(200, {"status": "OK"})):
-            out = ap._refresh_langfuse({
-                "LANGFUSE_PUBLIC_KEY": "pk",
-                "LANGFUSE_SECRET_KEY": "sk",
-                "LANGFUSE_BASE_URL": "https://lf.example.com/",
-                "LANGFUSE_HOST": "https://other.example.com",
-            })
-        self.assertEqual(out["base_url"], "https://lf.example.com")
-
-    def test_unconfigured_without_keys(self) -> None:
-        out = ap._refresh_langfuse({})
-        self.assertEqual(out["status"], "unconfigured")
-
-    def test_canary_no_leak(self) -> None:
-        canary = "CANARY-12345-LANGFUSE-DO-NOT-LEAK"
-        with patch.object(ap, "_http_get_json", return_value=(200, {"status": "OK"})):
-            out = ap._refresh_langfuse({
-                "LANGFUSE_PUBLIC_KEY": "pk-not-secret",
-                "LANGFUSE_SECRET_KEY": canary,
-            })
-        self.assertNotIn(canary, json.dumps(out))
-
-
-# ─── canary on all four new handlers via subprocess ─────────────────────────
-
-
-class TestRefreshCanaryAcrossAllNewHandlers(unittest.TestCase):
-    """Pattern 5 across the wider stack: even when refresh fails (no network /
-    no railway CLI / etc.), no token value should ever appear in stdout,
-    stderr, or services.json."""
-
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.dir = Path(self.tmp.name)
-        _run("init", "--dir", str(self.dir))
-
-    def tearDown(self) -> None:
-        self.tmp.cleanup()
-
-    def _run_clean(self, plugin: str, env_extra: dict[str, str]) -> tuple[str, str, str]:
-        clean: dict[str, str] = {}
-        for k, v in os.environ.items():
-            if any(k.startswith(prefix) for prefix in (
-                "GITHUB_", "VERCEL_", "COOLIFY_", "HCLOUD_", "HERMES_",
-                "LANGFUSE_", "OPENROUTER_", "SUPABASE_", "LINEAR_",
-            )):
-                continue
-            clean[k] = v
-        clean.update(env_extra)
-        rc, out, err = _run(
-            "refresh", "--plugin", plugin, "--dir", str(self.dir),
-            env=clean, cwd=str(self.dir),
-        )
-        self.assertEqual(rc, 0, msg=f"refresh {plugin} crashed: {err!r}")
-        return out, err, (self.dir / ".agent-plus" / "services.json").read_text()
-
-    def test_canary_supabase_subprocess(self) -> None:
-        canary = "CANARY-12345-SUPABASE-DO-NOT-LEAK"
-        out, err, disk = self._run_clean(
-            "supabase-remote", {"SUPABASE_ACCESS_TOKEN": canary},
-        )
-        for blob, label in ((out, "stdout"), (err, "stderr"), (disk, "services.json")):
-            self.assertNotIn(canary, blob, f"canary leaked into {label}")
-
-    def test_canary_linear_subprocess(self) -> None:
-        canary = "CANARY-12345-LINEAR-DO-NOT-LEAK"
-        out, err, disk = self._run_clean(
-            "linear-remote", {"LINEAR_API_KEY": canary},
-        )
-        for blob, label in ((out, "stdout"), (err, "stderr"), (disk, "services.json")):
-            self.assertNotIn(canary, blob, f"canary leaked into {label}")
-
-    def test_canary_langfuse_subprocess(self) -> None:
-        canary = "CANARY-12345-LANGFUSE-DO-NOT-LEAK"
-        out, err, disk = self._run_clean(
-            "langfuse-remote", {
-                "LANGFUSE_PUBLIC_KEY": "pk-not-secret",
-                "LANGFUSE_SECRET_KEY": canary,
-                # Point at an unroutable URL so we never actually hit cloud.
-                "LANGFUSE_BASE_URL": "http://127.0.0.1:1/",
-            },
-        )
-        for blob, label in ((out, "stdout"), (err, "stderr"), (disk, "services.json")):
-            self.assertNotIn(canary, blob, f"canary leaked into {label}")
-
-    def test_railway_unconfigured_does_not_crash(self) -> None:
-        # Just check the subprocess form doesn't crash when railway might be
-        # absent or unauthed in CI.
-        out, err, _disk = self._run_clean("railway-ops", {})
-        result = json.loads(out)
-        railway = result["services"]["railway-ops"]
-        self.assertIn(railway["status"], ("ok", "unconfigured", "error"))
 
 
 # ─── list ─────────────────────────────────────────────────────────────────────
@@ -684,19 +620,6 @@ class TestList(unittest.TestCase):
             # At least one plugin should have a `ready` field now.
             with_ready = [p for p in result["plugins"] if "ready" in p]
             self.assertGreaterEqual(len(with_ready), 1)
-
-
-# ─── refresh handler registry ────────────────────────────────────────────────
-
-
-class TestRefreshHandlerRegistry(unittest.TestCase):
-    def test_all_six_handlers_registered(self) -> None:
-        expected = {
-            "github-remote", "vercel-remote",
-            "supabase-remote", "railway-ops",
-            "linear-remote", "langfuse-remote",
-        }
-        self.assertEqual(set(ap.REFRESH_HANDLERS), expected)
 
 
 # ─── extensions ─────────────────────────────────────────────────────────────
@@ -928,19 +851,21 @@ class TestExtensionsRefreshIntegration(unittest.TestCase):
         self.assertIn("ext1", result["extensions_ran"])
 
     def test_no_extensions_flag_skips(self) -> None:
+        # `--no-extensions` alone (no --plugin filter) — plugin handlers may
+        # be empty in this test env, but the extension must NOT run.
         script = _write_ext_script(self.root, "ext1.py",
             "import json; print(json.dumps({'status':'ok'}))")
         _write_extensions_json(self.workspace, [
             {"name": "skipme", "command": [sys.executable, str(script)]},
         ])
         rc, out, err = _run(
-            "refresh", "--no-extensions", "--plugin", "vercel-remote",
+            "refresh", "--no-extensions",
             "--dir", str(self.root),
             env=self._clean_env(), cwd=str(self.root),
         )
         self.assertEqual(rc, 0, msg=err)
         result = json.loads(out)
-        self.assertNotIn("skipme", result["services"])
+        self.assertNotIn("skipme", result.get("services", {}))
 
     def test_extensions_only_skips_builtins(self) -> None:
         script = _write_ext_script(self.root, "ext1.py",
@@ -989,8 +914,9 @@ class TestExtensionsRefreshIntegration(unittest.TestCase):
         result = json.loads(out)
         self.assertIn("default-ext", result["services"])
         self.assertEqual(result["services"]["default-ext"]["tag"], "default-run")
-        # And built-ins also ran.
-        self.assertIn("vercel-remote", result["services"])
+        # Plugin-manifest handlers may or may not be present in the test env
+        # depending on whether ~/.claude/plugins/cache is populated. The
+        # default-on extension surface is what this test guards.
 
     def test_canary_no_env_leak_into_extension_output(self) -> None:
         """Pattern 5 canary: even when the host env has a token, that value
