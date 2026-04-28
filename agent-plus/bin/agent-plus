@@ -263,6 +263,122 @@ def _initial_files() -> dict[str, dict]:
     }
 
 
+def _detect_project_root(workspace: Path) -> Path:
+    """Project root is the parent of the .agent-plus workspace."""
+    # workspace path ends in WORKSPACE_DIRNAME
+    if workspace.name == WORKSPACE_DIRNAME:
+        return workspace.parent
+    return workspace
+
+
+def _read_package_json(root: Path) -> dict:
+    """Return parsed package.json or empty dict on any failure."""
+    p = root / "package.json"
+    if not p.is_file():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _pkg_dep_names(pkg: dict) -> set[str]:
+    names: set[str] = set()
+    for key in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+        section = pkg.get(key)
+        if isinstance(section, dict):
+            names.update(section.keys())
+    return names
+
+
+def _has_next_config(root: Path) -> bool:
+    for ext in ("js", "mjs", "cjs", "ts"):
+        if (root / f"next.config.{ext}").is_file():
+            return True
+    return False
+
+
+# Marketplace identity, kept in one place to avoid drift.
+SUGGESTIONS_MARKETPLACE = "osouthgate/agent-plus-skills"
+
+
+def _install_hint(skill: str) -> str:
+    return (
+        f"claude plugin marketplace add {SUGGESTIONS_MARKETPLACE} && "
+        f"claude plugin install {skill}@agent-plus-skills"
+    )
+
+
+def detect_suggested_skills(root: Path, env: Optional[dict[str, str]] = None) -> list[dict]:
+    """Hardcoded stack-marker → skill-suggestion mapping.
+
+    Pure filesystem + env reads. No network, no LLM. Deterministic.
+    Looks ONLY at repo root + a handful of known subdirs.
+    Returns each match at most once. Privacy: env var NAMES only — never values.
+    """
+    env = env if env is not None else dict(os.environ)
+    suggestions: list[dict] = []
+
+    pkg = _read_package_json(root)
+    deps = _pkg_dep_names(pkg)
+
+    def add(name: str, reason: str) -> None:
+        suggestions.append({
+            "name": name,
+            "marketplace": SUGGESTIONS_MARKETPLACE,
+            "reason": reason,
+            "install_hint": _install_hint(name),
+        })
+
+    # vercel-remote
+    if (root / "vercel.json").is_file() or (root / ".vercel").is_dir():
+        add("vercel-remote", "Vercel project detected (vercel.json or .vercel/)")
+    elif _has_next_config(root) and any("vercel" in d for d in deps):
+        add("vercel-remote", "Vercel project detected (vercel.json or .vercel/)")
+
+    # supabase-remote
+    if (root / "supabase" / "config.toml").is_file() or (root / "supabase").is_dir():
+        add("supabase-remote", "Supabase project detected (supabase/ config)")
+
+    # railway-ops
+    if (root / "railway.json").is_file() or (root / ".railway").is_dir():
+        add("railway-ops", "Railway project detected (railway.json or .railway/)")
+
+    # github-remote
+    if (root / ".github" / "workflows").is_dir():
+        add("github-remote", "GitHub Actions in use (.github/workflows/)")
+
+    # langfuse-remote
+    if (
+        (root / "langfuse.yaml").is_file()
+        or "LANGFUSE_PUBLIC_KEY" in env
+        or any("langfuse" in d for d in deps)
+    ):
+        add("langfuse-remote", "Langfuse SDK or config detected")
+
+    # openrouter-remote
+    if any("openrouter" in d for d in deps) or "OPENROUTER_API_KEY" in env:
+        add("openrouter-remote", "OpenRouter integration detected")
+
+    return suggestions
+
+
+def _render_suggestions_section(suggestions: list[dict]) -> str:
+    """Human-readable rendering for --pretty. Empty string if no matches
+    (silence beats a 'No skills detected' line)."""
+    if not suggestions:
+        return ""
+    lines = ["", "Suggested skills based on what we detected:", ""]
+    width = max(len(s["name"]) for s in suggestions)
+    for s in suggestions:
+        lines.append(f"  {s['name'].ljust(width)}  {s['reason']}")
+    lines.append("")
+    lines.append(f"Install: claude plugin marketplace add {SUGGESTIONS_MARKETPLACE}")
+    lines.append("         claude plugin install <skill>@agent-plus-skills")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def cmd_init(args: argparse.Namespace) -> dict:
     workspace, source = resolve_workspace(args.dir)
     workspace.mkdir(parents=True, exist_ok=True)
@@ -278,11 +394,15 @@ def cmd_init(args: argparse.Namespace) -> dict:
         path.write_text(json.dumps(default, indent=2) + "\n", encoding="utf-8")
         created.append(fname)
 
+    project_root = _detect_project_root(workspace)
+    suggested = detect_suggested_skills(project_root)
+
     return {
         "workspace": str(workspace),
         "source": source,
         "created": created,
         "skipped": skipped,
+        "suggested_skills": suggested,
     }
 
 
@@ -1877,6 +1997,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     out = _with_tool_meta(payload)
     indent = 2 if args.pretty else None
     print(json.dumps(out, ensure_ascii=False, indent=indent))
+
+    # init --pretty: append a human-readable "Suggested skills" section to
+    # stderr so it doesn't pollute the JSON on stdout. Silent if no matches.
+    if args.cmd == "init" and getattr(args, "pretty", False) and isinstance(out, dict):
+        section = _render_suggestions_section(out.get("suggested_skills") or [])
+        if section:
+            sys.stderr.write(section + "\n")
     return 0
 
 
