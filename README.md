@@ -98,7 +98,7 @@ Every plugin's `--json` output uses the same outer shape so an agent can parse, 
 - `payloadPath` — absolute path of the written file.
 - `payloadShape` — recursive shape descriptor (keys + types + sizes, no values), so the agent can decide whether to read the file. Recursion depth controlled by `--shape-depth N` (default 3, valid 1–3).
 
-> **Note:** the `payloadPath` field was renamed from `savedTo` during the framework extraction. Plugins still emitting `savedTo` are being migrated; per [`plans/todo/2026-04-28-skill-plus-plugin.md`](./plans/todo/2026-04-28-skill-plus-plugin.md) slice A0, the rename is a coordinated bump across all framework plugins.
+> **Note:** the `payloadPath` field was renamed from the earlier `savedTo` during the framework extraction (slice A0, 2026-04-28 — coordinated minor bump across `agent-plus`, `repo-analyze`, `diff-summary`, `skill-feedback`). Wrapper plugins on `osouthgate/agent-plus-skills` migrate independently.
 
 **Universal flags.**
 

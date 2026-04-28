@@ -4,6 +4,13 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.2.0 - 2026-04-28
+
+Coordinated framework-plugin envelope-contract bump (Track A slice A0).
+
+### Changed
+- **Envelope field rename: `savedTo` → `payloadPath`.** The `--output` envelope now returns `payloadPath` instead of `savedTo` — same semantics (absolute path of the written JSON file), clearer name. Pre-1.0 breaking surface change, hence the minor bump per the project README's stability clause. CLI help text and tests updated to match. [2026-04-28]
+
 ## 0.1.0 - 2026-04-28
 
 Initial release. Universal-primitive plugin (B-PLUGIN-3). Replaces the per-file Read sweep an agent does to triage a PR ("test or source? config or migration? did the public API change? were tests updated alongside?") with one structured JSON call.
@@ -18,7 +25,7 @@ Initial release. Universal-primitive plugin (B-PLUGIN-3). Replaces the per-file 
 - **Secret-risk paths.** `.env*`, `*.pem`, `*.key`, `id_rsa*`, `secrets.*` flagged in `summary.secretsRiskFiles`. Pattern 5: paths only — file content never read.
 - **Aggregate summary.** `byRole` counts, `highRiskFiles`, `testFilesTouched`, `sourceFilesWithoutTestChanges`, `publicApiTouches`, `migrationsTouched`, `secretsRiskFiles`.
 - **Renames + binary files.** `git diff -M` rename detection populates `status: "renamed"` + `renamedFrom`. Binary files surface as `binary: true`, `insertions: 0`, `deletions: 0`.
-- **Envelope contract.** Top-level `tool.{name, version}` injected on every payload. `--output PATH` writes the full JSON to disk and returns a compact envelope (`savedTo`, `bytes`, `fileLineCount`, `payloadKeys`, `payloadShape`). `--shape-depth 1|2|3` controls payload-shape recursion (default 3). Matches the `railway-ops` / `vercel-remote` / `repo-analyze` shape exactly.
+- **Envelope contract.** Top-level `tool.{name, version}` injected on every payload. `--output PATH` writes the full JSON to disk and returns a compact envelope (`payloadPath`, `bytes`, `fileLineCount`, `payloadKeys`, `payloadShape`). `--shape-depth 1|2|3` controls payload-shape recursion (default 3). Matches the `railway-ops` / `vercel-remote` / `repo-analyze` shape exactly.
 - **Pattern 5 canary.** `.env` paths in the diff appear in `summary.secretsRiskFiles` but content is not echoed when `--include-patches` is off (default). Tested.
 - **27 unit tests** covering envelope contract, mode flags (working/staged/base/range), role classification across all eight categories, risk-tier logic for each trigger, public-API detection, co-changed-test detection, moved-lines estimate, renames, binary files, `--max-files` truncation, `--include-patches`, `--public-api-only`, `--risk` filtering, `--output` offload, `--version`, Pattern 5 no-leakage, and non-git-directory error handling.
 

@@ -934,7 +934,7 @@ def _write_output_file(payload: Any, output_path: str, *, shape_depth: int = 3) 
     tool = payload.get("tool") if isinstance(payload, dict) else None
     summary: dict[str, Any] = {
         "tool": tool or _tool_meta(),
-        "savedTo": str(path),
+        "payloadPath": str(path),
         "bytes": len(text.encode("utf-8")),
         "fileLineCount": text.count("\n") + 1,
     }
@@ -981,7 +981,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--output", metavar="PATH", default=None,
                    help=("write the full JSON payload to PATH and print a compact "
-                         "summary (savedTo, bytes, payloadKeys, payloadShape). Use "
+                         "summary (payloadPath, bytes, payloadKeys, payloadShape). Use "
                          "this when the response is large enough that routing it "
                          "through the model's context is wasteful."))
     p.add_argument("--shape-depth", type=int, choices=[1, 2, 3], default=3,

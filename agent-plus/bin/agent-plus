@@ -1500,6 +1500,246 @@ def cmd_extensions(args: argparse.Namespace) -> dict:
     return {"error": "extensions subcommand required: list | validate | add | remove"}
 
 
+# ─── marketplace ─────────────────────────────────────────────────────────────
+#
+# Phase 1 (slice 1): `agent-plus marketplace init <user>/<name>` only.
+# Scaffolds a new `<user>/agent-plus-skills` repo's local files. Does NOT
+# run `gh repo create`; prints suggested follow-up invocations instead.
+# Install / update / list / remove are Phase 2 and live in a separate slice.
+
+MARKETPLACE_REQUIRED_NAME = "agent-plus-skills"
+MARKETPLACE_SLUG_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)/([A-Za-z0-9][A-Za-z0-9._-]*)$")
+MARKETPLACE_SCHEMA_VERSION = "0.1.0"
+MARKETPLACE_AGENT_PLUS_RANGE = ">=0.5"
+MARKETPLACE_DEFAULT_SURFACE = "claude-code"
+
+
+def _mit_license_text(year: int, owner: str) -> str:
+    return (
+        f"MIT License\n\n"
+        f"Copyright (c) {year} {owner}\n\n"
+        "Permission is hereby granted, free of charge, to any person obtaining a copy\n"
+        "of this software and associated documentation files (the \"Software\"), to deal\n"
+        "in the Software without restriction, including without limitation the rights\n"
+        "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n"
+        "copies of the Software, and to permit persons to whom the Software is\n"
+        "furnished to do so, subject to the following conditions:\n\n"
+        "The above copyright notice and this permission notice shall be included in all\n"
+        "copies or substantial portions of the Software.\n\n"
+        "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n"
+        "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n"
+        "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n"
+        "AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n"
+        "LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n"
+        "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n"
+        "SOFTWARE.\n"
+    )
+
+
+def _marketplace_readme(owner: str, name: str) -> str:
+    return (
+        f"# {name}\n\n"
+        f"An [agent-plus](https://github.com/osouthgate/agent-plus) marketplace published by **{owner}**.\n\n"
+        "This repo follows the `<user>/agent-plus-skills` convention: every skill it ships\n"
+        "is declared in [`marketplace.json`](./marketplace.json) at the repo root.\n\n"
+        "## Install\n\n"
+        "```bash\n"
+        f"agent-plus marketplace install {owner}/{name}\n"
+        "```\n\n"
+        "(Phase 2 — install is not implemented yet. For now, clone manually:)\n\n"
+        "```bash\n"
+        f"git clone https://github.com/{owner}/{name}.git ~/.agent-plus/marketplaces/{owner}-{name}\n"
+        "```\n\n"
+        "## Discovery\n\n"
+        "This repo is tagged with the `agent-plus-skills` GitHub topic so it surfaces in:\n\n"
+        "```bash\n"
+        "gh search repos topic:agent-plus-skills\n"
+        "```\n\n"
+        "## Schema\n\n"
+        "See the [marketplace convention](https://github.com/osouthgate/agent-plus) for the full\n"
+        "`marketplace.json` schema. This repo declares `agent_plus_version: \""
+        + MARKETPLACE_AGENT_PLUS_RANGE
+        + "\"` and `surface: \"claude-code\"`.\n\n"
+        "## License\n\n"
+        "MIT — see [LICENSE](./LICENSE).\n"
+    )
+
+
+_MARKETPLACE_GITIGNORE = (
+    "# agent-plus marketplace\n"
+    ".DS_Store\n"
+    "Thumbs.db\n"
+    "*.swp\n"
+    "*.bak\n"
+    ".idea/\n"
+    ".vscode/\n"
+    "__pycache__/\n"
+    "*.py[cod]\n"
+    "node_modules/\n"
+    ".env\n"
+    ".env.local\n"
+)
+
+
+def _marketplace_changelog(owner: str, name: str) -> str:
+    today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+    return (
+        f"# {name} — changelog\n\n"
+        "All notable changes to this marketplace.\n\n"
+        "Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.\n\n"
+        "## Unreleased\n\n"
+        f"## 0.1.0 - {today}\n\n"
+        f"Initial scaffold via `agent-plus marketplace init {owner}/{name}`.\n\n"
+        "### Added\n\n"
+        "- `marketplace.json` with empty `skills: []` and `agent_plus_version: \""
+        + MARKETPLACE_AGENT_PLUS_RANGE
+        + "\"`.\n"
+        "- README, MIT LICENSE, .gitignore.\n"
+    )
+
+
+def _marketplace_json(owner: str, name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "owner": owner,
+        "version": MARKETPLACE_SCHEMA_VERSION,
+        "agent_plus_version": MARKETPLACE_AGENT_PLUS_RANGE,
+        "surface": MARKETPLACE_DEFAULT_SURFACE,
+        "skills": [],
+        "homepage": f"https://github.com/{owner}/{name}",
+        "license": "MIT",
+    }
+
+
+def _marketplace_dir_is_empty(path: Path) -> bool:
+    """A directory is 'empty' if it doesn't exist OR it exists with no children."""
+    if not path.exists():
+        return True
+    if not path.is_dir():
+        return False
+    try:
+        next(path.iterdir())
+    except StopIteration:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _git_init_in(path: Path) -> tuple[bool, Optional[str]]:
+    """Run `git init` in path. Returns (initialized, note).
+    note is set if git is missing or init failed; not a hard error."""
+    if shutil.which("git") is None:
+        return False, "git not found on PATH; skipped `git init`"
+    try:
+        proc = subprocess.run(
+            ["git", "init", "--quiet"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(path), check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"git init failed to spawn: {e}"
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout or "").strip()
+        return False, f"git init exited {proc.returncode}: {msg[:160]}"
+    return True, None
+
+
+def cmd_marketplace_init(args: argparse.Namespace) -> dict:
+    slug = args.slug
+    m = MARKETPLACE_SLUG_RE.match(slug)
+    if not m:
+        return {"error": f"invalid slug {slug!r}; expected `<user>/<name>`"}
+    owner, name = m.group(1), m.group(2)
+
+    if name != MARKETPLACE_REQUIRED_NAME:
+        return {
+            "error": (
+                f"v1 reserves the marketplace name `{MARKETPLACE_REQUIRED_NAME}`; "
+                f"got `{name}`"
+            ),
+            "slug": slug,
+        }
+
+    # Resolve target directory.
+    if args.path:
+        target = Path(args.path).expanduser().resolve()
+    else:
+        target = (Path.cwd() / name).resolve()
+
+    if not _marketplace_dir_is_empty(target):
+        return {
+            "error": f"target directory exists and is non-empty: {target}",
+            "path": str(target),
+        }
+
+    target.mkdir(parents=True, exist_ok=True)
+
+    files_written: list[str] = []
+
+    # marketplace.json
+    mj_path = target / "marketplace.json"
+    mj_path.write_text(
+        json.dumps(_marketplace_json(owner, name), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    files_written.append("marketplace.json")
+
+    # README.md
+    (target / "README.md").write_text(_marketplace_readme(owner, name), encoding="utf-8")
+    files_written.append("README.md")
+
+    # LICENSE
+    year = _dt.datetime.now(_dt.timezone.utc).year
+    (target / "LICENSE").write_text(_mit_license_text(year, owner), encoding="utf-8")
+    files_written.append("LICENSE")
+
+    # .gitignore
+    (target / ".gitignore").write_text(_MARKETPLACE_GITIGNORE, encoding="utf-8")
+    files_written.append(".gitignore")
+
+    # CHANGELOG.md
+    (target / "CHANGELOG.md").write_text(
+        _marketplace_changelog(owner, name), encoding="utf-8",
+    )
+    files_written.append("CHANGELOG.md")
+
+    # git init (best-effort).
+    git_initialized, git_note = _git_init_in(target)
+
+    next_steps = [
+        f"gh repo create {owner}/{name} --public --source . --remote origin",
+        f"gh repo edit {owner}/{name} --add-topic agent-plus-skills",
+        f"gh repo edit {owner}/{name} --add-topic claude-code",
+    ]
+
+    payload: dict[str, Any] = {
+        "marketplace": {
+            "path": str(target),
+            "owner": owner,
+            "name": name,
+            "files_written": files_written,
+            "git_initialized": git_initialized,
+            "next_steps": next_steps,
+        },
+    }
+    if git_note:
+        payload["marketplace"]["git_note"] = git_note
+    return payload
+
+
+def cmd_marketplace(args: argparse.Namespace) -> dict:
+    sub = getattr(args, "marketplace_cmd", None)
+    if sub == "init":
+        return cmd_marketplace_init(args)
+    return {
+        "error": (
+            "marketplace subcommand required: init "
+            "(install/update/list/remove are Phase 2)"
+        ),
+    }
+
+
 # ─── argparse ────────────────────────────────────────────────────────────────
 
 
@@ -1579,6 +1819,22 @@ def _build_parser() -> argparse.ArgumentParser:
                               parents=[pretty_parent])
     s_rm.add_argument("--name", required=True, help="extension slug to remove")
 
+    # ── marketplace ────────────────────────────────────────────────────────
+    s_market = sub.add_parser(
+        "marketplace",
+        help="manage agent-plus marketplaces (Phase 1: `init` only)",
+        parents=[pretty_parent],
+    )
+    market_sub = s_market.add_subparsers(dest="marketplace_cmd")
+
+    s_minit = market_sub.add_parser(
+        "init",
+        help="scaffold a new <user>/agent-plus-skills marketplace repo locally",
+        parents=[pretty_parent],
+    )
+    s_minit.add_argument("slug", help="`<user>/<name>` slug; name must be `agent-plus-skills` for v1")
+    s_minit.add_argument("--path", help="override target directory (default: <cwd>/<name>/)")
+
     return p
 
 
@@ -1603,6 +1859,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "refresh": cmd_refresh,
         "list": cmd_list,
         "extensions": cmd_extensions,
+        "marketplace": cmd_marketplace,
     }
     if args.cmd not in handlers:
         parser.print_help()

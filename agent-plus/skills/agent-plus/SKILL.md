@@ -36,6 +36,7 @@ agent-plus refresh    [--dir PATH] [--env-file PATH] [--plugin <name>]
                       [--no-extensions | --extensions-only] [--pretty]
 agent-plus list       [--dir PATH] [--names-only] [--pretty]
 agent-plus extensions list|validate|add|remove [--dir PATH] [--pretty]
+agent-plus marketplace init <user>/<name> [--path PATH] [--pretty]
 agent-plus --version
 ```
 
@@ -89,6 +90,19 @@ Cheapest identity probe per built-in plugin, NAMES + IDs + URLs only. User exten
 - **`langfuse-remote`** — if both `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are set, hits `GET <base>/api/public/health` with Basic auth. Base URL precedence: `LANGFUSE_BASE_URL > LANGFUSE_HOST > https://cloud.langfuse.com`. Multi-instance health is `langfuse-remote health --all`'s job.
 
 Plugins still out of scope for refresh (envcheck still reports them): coolify-remote, hcloud-remote, hermes-remote, openrouter-remote, skill-feedback.
+
+## `marketplace` (Phase 1 — `init` only)
+
+`agent-plus marketplace init <user>/agent-plus-skills` scaffolds a new marketplace repo following the `<user>/agent-plus-skills` GitHub naming convention. Writes `marketplace.json` (empty `skills: []`, `agent_plus_version: ">=0.5"`, `surface: "claude-code"`), `README.md`, MIT `LICENSE`, `.gitignore`, `CHANGELOG.md`. Runs `git init` if available. Prints — does NOT execute — `gh repo create` and `gh repo edit --add-topic` follow-up invocations.
+
+```bash
+agent-plus marketplace init osouthgate/agent-plus-skills            # scaffolds ./agent-plus-skills/
+agent-plus marketplace init osouthgate/agent-plus-skills --path /tmp/myrepo
+```
+
+The `name` portion of the slug must be `agent-plus-skills` for v1; anything else is rejected. Target directory must not exist or must be empty.
+
+**When NOT to use:** use this for scaffolding a NEW marketplace repo; not for installing one (Phase 2). The `install`, `update`, `list`, `remove` subcommands are not yet implemented.
 
 ## When NOT to use this — fall back to the underlying plugin
 

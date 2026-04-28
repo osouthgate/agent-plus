@@ -21,6 +21,7 @@ agent-plus refresh    [--dir PATH] [--env-file PATH] [--plugin <name>]
                       [--no-extensions | --extensions-only] [--pretty]
 agent-plus list       [--dir PATH] [--names-only] [--pretty]
 agent-plus extensions list|validate|add|remove [--dir PATH] [--pretty]
+agent-plus marketplace init <user>/<name> [--path PATH] [--pretty]
 agent-plus --version
 ```
 
@@ -215,6 +216,31 @@ agent-plus refresh --extensions-only             # run only extensions, skip bui
 `extensions list` and `agent-plus list` surface `command_hash` (sha256 of argv[0]) rather than the command itself — paths often contain usernames, and there's no reason to leak them into agent transcripts.
 
 Disabled extensions (`"enabled": false` in `extensions.json`) load but skip at refresh time. Names that collide with built-in plugin names are rejected at add/load time — no silent shadowing.
+
+## `marketplace init`
+
+Scaffold a new `<user>/agent-plus-skills` marketplace repo following the marketplace convention. Phase 1 of the marketplace surface — install, update, list, and remove are Phase 2.
+
+```bash
+$ agent-plus marketplace init osouthgate/agent-plus-skills --pretty
+{
+  "tool": {"name": "agent-plus", "version": "0.5.0"},
+  "marketplace": {
+    "path": "/path/to/agent-plus-skills",
+    "owner": "osouthgate",
+    "name": "agent-plus-skills",
+    "files_written": ["marketplace.json", "README.md", "LICENSE", ".gitignore", "CHANGELOG.md"],
+    "git_initialized": true,
+    "next_steps": [
+      "gh repo create osouthgate/agent-plus-skills --public --source . --remote origin",
+      "gh repo edit osouthgate/agent-plus-skills --add-topic agent-plus-skills",
+      "gh repo edit osouthgate/agent-plus-skills --add-topic claude-code"
+    ]
+  }
+}
+```
+
+The `name` portion of the slug **must** be `agent-plus-skills` for v1 — the convention is fixed so `gh search repos topic:agent-plus-skills` is unambiguous. Default target dir is `<cwd>/<name>/`; override with `--path`. Refuses to scaffold into a non-empty directory. `agent-plus marketplace init` never runs `gh` itself — it prints suggested invocations only, keeping the scaffold pure and avoiding a `gh` auth dependency.
 
 ## Install
 

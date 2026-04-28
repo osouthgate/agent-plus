@@ -1239,5 +1239,147 @@ class TestListIntegrationWithExtensions(unittest.TestCase):
         self.assertEqual(sorted(result["extensions"]), ["ext-a", "ext-b"])
 
 
+# ─── marketplace init ──────────────────────────────────────────────────────
+
+
+class TestMarketplaceInit(unittest.TestCase):
+    """Phase 1 / Slice 1: `agent-plus marketplace init <user>/<name>`."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cwd = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _init(self, slug: str, *, extra: list[str] | None = None,
+              cwd: str | None = None) -> tuple[int, str, str]:
+        args = ["marketplace", "init", slug]
+        if extra:
+            args.extend(extra)
+        return _run(*args, cwd=cwd or str(self.cwd))
+
+    def test_happy_path_scaffolds_all_files(self) -> None:
+        rc, out, err = self._init("testuser/agent-plus-skills")
+        self.assertEqual(rc, 0, msg=err)
+        result = json.loads(out)
+        self.assertEqual(result["tool"]["name"], "agent-plus")
+        m = result["marketplace"]
+        self.assertEqual(m["owner"], "testuser")
+        self.assertEqual(m["name"], "agent-plus-skills")
+        self.assertEqual(sorted(m["files_written"]),
+                         [".gitignore", "CHANGELOG.md", "LICENSE",
+                          "README.md", "marketplace.json"])
+        target = Path(m["path"])
+        self.assertTrue(target.is_dir())
+        for f in ("marketplace.json", "README.md", "LICENSE",
+                  ".gitignore", "CHANGELOG.md"):
+            self.assertTrue((target / f).is_file(), f"missing {f}")
+
+    def test_marketplace_json_shape(self) -> None:
+        rc, out, _ = self._init("testuser/agent-plus-skills")
+        self.assertEqual(rc, 0)
+        target = Path(json.loads(out)["marketplace"]["path"])
+        mj = json.loads((target / "marketplace.json").read_text(encoding="utf-8"))
+        self.assertEqual(mj["name"], "agent-plus-skills")
+        self.assertEqual(mj["owner"], "testuser")
+        self.assertEqual(mj["version"], "0.1.0")
+        self.assertEqual(mj["agent_plus_version"], ">=0.5")
+        self.assertEqual(mj["surface"], "claude-code")
+        self.assertEqual(mj["skills"], [])
+        self.assertEqual(mj["homepage"], "https://github.com/testuser/agent-plus-skills")
+        self.assertEqual(mj["license"], "MIT")
+
+    def test_license_is_mit(self) -> None:
+        rc, out, _ = self._init("testuser/agent-plus-skills")
+        self.assertEqual(rc, 0)
+        target = Path(json.loads(out)["marketplace"]["path"])
+        license_text = (target / "LICENSE").read_text(encoding="utf-8")
+        self.assertIn("MIT License", license_text)
+        self.assertIn("testuser", license_text)
+        self.assertIn("Permission is hereby granted", license_text)
+
+    def test_readme_mentions_owner_and_name(self) -> None:
+        rc, out, _ = self._init("testuser/agent-plus-skills")
+        target = Path(json.loads(out)["marketplace"]["path"])
+        readme = (target / "README.md").read_text(encoding="utf-8")
+        self.assertIn("testuser", readme)
+        self.assertIn("agent-plus-skills", readme)
+
+    def test_next_steps_printed_not_executed(self) -> None:
+        rc, out, _ = self._init("testuser/agent-plus-skills")
+        result = json.loads(out)
+        steps = result["marketplace"]["next_steps"]
+        self.assertEqual(len(steps), 3)
+        self.assertTrue(any("gh repo create" in s for s in steps))
+        self.assertTrue(any("agent-plus-skills" in s and "add-topic" in s for s in steps))
+        self.assertTrue(any("claude-code" in s and "add-topic" in s for s in steps))
+
+    def test_default_target_is_cwd_plus_name(self) -> None:
+        rc, out, _ = self._init("testuser/agent-plus-skills")
+        result = json.loads(out)
+        expected = (self.cwd / "agent-plus-skills").resolve()
+        self.assertEqual(Path(result["marketplace"]["path"]), expected)
+
+    def test_path_override(self) -> None:
+        custom = self.cwd / "my-custom-dir"
+        rc, out, err = self._init("testuser/agent-plus-skills",
+                                  extra=["--path", str(custom)])
+        self.assertEqual(rc, 0, msg=err)
+        result = json.loads(out)
+        self.assertEqual(Path(result["marketplace"]["path"]), custom.resolve())
+        self.assertTrue((custom / "marketplace.json").is_file())
+
+    def test_name_mismatch_rejected(self) -> None:
+        rc, out, _ = self._init("testuser/wrong-name")
+        self.assertEqual(rc, 0)
+        result = json.loads(out)
+        self.assertIn("error", result)
+        self.assertIn("agent-plus-skills", result["error"])
+        self.assertIn("wrong-name", result["error"])
+
+    def test_invalid_slug_rejected(self) -> None:
+        rc, out, _ = self._init("not-a-slug")
+        self.assertEqual(rc, 0)
+        result = json.loads(out)
+        self.assertIn("error", result)
+        self.assertIn("slug", result["error"].lower())
+
+    def test_existing_non_empty_dir_rejected(self) -> None:
+        target = self.cwd / "agent-plus-skills"
+        target.mkdir()
+        (target / "preexisting.txt").write_text("hi", encoding="utf-8")
+        rc, out, _ = self._init("testuser/agent-plus-skills")
+        self.assertEqual(rc, 0)
+        result = json.loads(out)
+        self.assertIn("error", result)
+        self.assertIn("non-empty", result["error"])
+        # Existing file untouched.
+        self.assertEqual((target / "preexisting.txt").read_text(encoding="utf-8"), "hi")
+        self.assertFalse((target / "marketplace.json").is_file())
+
+    def test_existing_empty_dir_accepted(self) -> None:
+        target = self.cwd / "agent-plus-skills"
+        target.mkdir()
+        rc, out, err = self._init("testuser/agent-plus-skills")
+        self.assertEqual(rc, 0, msg=err)
+        result = json.loads(out)
+        self.assertIn("marketplace", result)
+        self.assertTrue((target / "marketplace.json").is_file())
+
+    def test_envelope_present(self) -> None:
+        rc, out, _ = self._init("testuser/agent-plus-skills")
+        result = json.loads(out)
+        self.assertIn("tool", result)
+        self.assertEqual(result["tool"]["name"], "agent-plus")
+        self.assertIsInstance(result["tool"]["version"], str)
+
+    def test_pretty_flag_emits_indented_json(self) -> None:
+        rc, out, err = self._init("testuser/agent-plus-skills", extra=["--pretty"])
+        self.assertEqual(rc, 0, msg=err)
+        # Pretty output has newlines + indentation.
+        self.assertIn("\n  ", out)
+
+
 if __name__ == "__main__":
     unittest.main()

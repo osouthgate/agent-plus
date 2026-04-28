@@ -82,7 +82,7 @@ For monorepos or any output over ~50KB:
 repo-analyze --output /tmp/analyze.json --shape-depth 3
 ```
 
-Full payload to disk. Stdout returns the standard envelope: `savedTo`, `bytes`, `payloadKeys`, `payloadShape`. `payloadShape` is the recursive type+size descriptor — at depth 3 you see e.g. `languages.python.loc` directly without opening the file.
+Full payload to disk. Stdout returns the standard envelope: `payloadPath`, `bytes`, `payloadKeys`, `payloadShape`. `payloadShape` is the recursive type+size descriptor — at depth 3 you see e.g. `languages.python.loc` directly without opening the file.
 
 ## Install
 

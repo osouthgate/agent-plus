@@ -61,7 +61,7 @@ For monorepos or anything over ~50KB of output, use `--output PATH`:
 repo-analyze --output /tmp/analyze.json --shape-depth 3
 ```
 
-The full payload lands on disk. Stdout returns a compact envelope: `savedTo`, `bytes`, `payloadKeys`, `payloadShape`. `payloadShape` is recursive (depth 3 by default) so you can see `tree.entries.length` and `languages.python.loc` without opening the file.
+The full payload lands on disk. Stdout returns a compact envelope: `payloadPath`, `bytes`, `payloadKeys`, `payloadShape`. `payloadShape` is recursive (depth 3 by default) so you can see `tree.entries.length` and `languages.python.loc` without opening the file.
 
 ## Stay in your lane
 

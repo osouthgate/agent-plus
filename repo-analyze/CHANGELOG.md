@@ -4,6 +4,13 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.2.0 - 2026-04-28
+
+Coordinated framework-plugin envelope-contract bump (Track A slice A0).
+
+### Changed
+- **Envelope field rename: `savedTo` → `payloadPath`.** The `--output` envelope now returns `payloadPath` instead of `savedTo` — same semantics (absolute path of the written JSON file), clearer name. Pre-1.0 breaking surface change, hence the minor bump per the project README's stability clause. CLI help text and tests updated to match. [2026-04-28]
+
 ## 0.1.0 - 2026-04-28
 
 Initial release. Replaces the cold-start orientation dance (~67 grep + ~60 ls ops, mined from real session transcripts) with one structured JSON call.
@@ -18,7 +25,7 @@ Initial release. Replaces the cold-start orientation dance (~67 grep + ~60 ls op
 - **Tree.** Capped breadth-first traversal (default depth 4, max 200 entries). Sorts directories first, alphabetical per parent. LOC included for source files. Skip-list covers `.git`, `node_modules`, `__pycache__`, `.venv`, `venv`, `.pytest_cache`, `dist`, `build`, `target`, `.next`, `.turbo`, `out`, `.cache`, `.parcel-cache`, `.nuxt`, `.svelte-kit`, `.idea`, `.vscode`, `.gradle`, `.terraform`, `coverage`, `.nyc_output`, `htmlcov`, `vendor`, `Pods`.
 - **README highlights.** Title (first H1), first paragraph (capped at 800 chars), all H2 headings (capped at 20). Searches `README.md`, `README.rst`, `README.txt`, `README` in order. No code blocks, no full sections.
 - **Agent-plus enrichment.** Walks up from `--path` looking for `.agent-plus/services.json`. When present, populates `agentPlusServices.services` with names + statuses only — never IDs, never project lists, never values (Pattern 5).
-- **Envelope contract.** Top-level `tool.{name, version}` injected on every payload. `--output PATH` writes the full JSON to disk and returns a compact envelope (`savedTo`, `bytes`, `fileLineCount`, `payloadKeys`, `payloadShape`). `--shape-depth 1|2|3` controls recursion depth on `payloadShape` (default 3 — surfaces nested-list-of-dicts patterns directly in the envelope). Matches the `railway-ops` / `vercel-remote` / `langfuse-remote` shape exactly.
+- **Envelope contract.** Top-level `tool.{name, version}` injected on every payload. `--output PATH` writes the full JSON to disk and returns a compact envelope (`payloadPath`, `bytes`, `fileLineCount`, `payloadKeys`, `payloadShape`). `--shape-depth 1|2|3` controls recursion depth on `payloadShape` (default 3 — surfaces nested-list-of-dicts patterns directly in the envelope). Matches the `railway-ops` / `vercel-remote` / `langfuse-remote` shape exactly.
 - **Pattern 5 canary.** `package.json` parsing is whitelist-only — unknown keys like `npm-publish-token`, `publishConfig`, `npmRegistry` never appear in output. Tested.
 - **39 unit tests** covering envelope contract, language detection, framework detection, build-tool detection, dep parsing, entrypoint discovery, tree caps, README extraction, `--output` offload, Pattern 5 no-leakage, and agent-plus enrichment.
 

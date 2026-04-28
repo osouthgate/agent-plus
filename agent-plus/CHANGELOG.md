@@ -6,6 +6,21 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.5.0 - 2026-04-28
+
+`marketplace init` subcommand (Slice 1 of marketplace convention).
+
+### Added
+
+- **`agent-plus marketplace init <user>/<name>`** — scaffold a new marketplace repo locally per the `<user>/agent-plus-skills` convention. Validates `name === "agent-plus-skills"` (v1 reserves the name), refuses non-empty target dirs, writes `marketplace.json` (with `version: "0.1.0"`, `agent_plus_version: ">=0.5"`, `surface: "claude-code"`, empty `skills: []`), `README.md`, MIT `LICENSE`, `.gitignore`, and `CHANGELOG.md`. Runs `git init` if `git` is on PATH (records a `git_note` rather than failing if missing). Prints suggested `gh repo create` + `gh repo edit --add-topic agent-plus-skills` follow-up invocations as `next_steps` — never executes `gh` itself. Optional `--path` overrides the default `<cwd>/<name>/` target. Install / update / list / remove are Phase 2. [2026-04-28]
+
+## 0.4.0 - 2026-04-28
+
+Coordinated framework-plugin envelope-contract bump (Track A slice A0).
+
+### Changed
+- **Envelope field rename: `savedTo` → `payloadPath`.** Coordinated rename across the four framework plugins (`agent-plus`, `repo-analyze`, `diff-summary`, `skill-feedback`) so the `--output` envelope field reads as a payload pointer rather than a transient verb. Pre-1.0 breaking surface change, hence the minor bump per the project README's stability clause. agent-plus itself does not currently emit `savedTo`; this version bump keeps the framework plugins moving in lockstep on the shared envelope contract. [2026-04-28]
+
 ## 0.3.0 - 2026-04-27
 
 User-defined refresh handlers (B-EXT-1) plus the `extensions` subcommand.

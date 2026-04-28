@@ -391,7 +391,7 @@ class TestOutput(unittest.TestCase):
             outpath = Path(td) / "out.json"
             envelope = _run_cli("--path", td, "--output", str(outpath))
             self.assertTrue(outpath.exists())
-            self.assertEqual(envelope["savedTo"], str(outpath.resolve()))
+            self.assertEqual(envelope["payloadPath"], str(outpath.resolve()))
             self.assertIn("payloadKeys", envelope)
             self.assertIn("payloadShape", envelope)
             self.assertIn("languages", envelope["payloadShape"])

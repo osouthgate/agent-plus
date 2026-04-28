@@ -126,7 +126,7 @@ For 100-file PRs or `--include-patches` invocations:
 diff-summary --base main --include-patches --output /tmp/diff.json --shape-depth 3
 ```
 
-Full payload to disk. Stdout returns `savedTo`, `bytes`, `payloadKeys`, `payloadShape` — same envelope shape as `repo-analyze`, `railway-ops`, `vercel-remote`.
+Full payload to disk. Stdout returns `payloadPath`, `bytes`, `payloadKeys`, `payloadShape` — same envelope shape as `repo-analyze`, `railway-ops`, `vercel-remote`.
 
 ## Install
 
