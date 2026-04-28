@@ -30,7 +30,7 @@ agent-plus envcheck --pretty | jq '.plugins["hermes-remote"].ready'
 ## Headline commands
 
 ```bash
-agent-plus init       [--dir PATH] [--pretty]
+agent-plus init       [--dir PATH] [--pretty]   # also suggests matching skills from osouthgate/agent-plus-skills based on stack markers (vercel.json, supabase/, .github/workflows/, etc.)
 agent-plus envcheck   [--dir PATH] [--env-file PATH] [--pretty]
 agent-plus refresh    [--dir PATH] [--env-file PATH] [--plugin <name>]
                       [--no-extensions | --extensions-only] [--pretty]

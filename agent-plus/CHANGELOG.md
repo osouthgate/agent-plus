@@ -6,6 +6,14 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.6.0 - 2026-04-28
+
+`init` now suggests matching skills from `osouthgate/agent-plus-skills` based on detected stack markers.
+
+### Added
+
+- **`agent-plus init` stack detection + skill suggestions.** Adds a top-level `suggested_skills` array to `init`'s JSON envelope. Hardcoded marker → suggestion table (no LLM, no fuzzy matching, no network): `vercel.json` / `.vercel/` / Next.js + Vercel deps → `vercel-remote`; `supabase/` (config.toml or dir) → `supabase-remote`; `railway.json` / `.railway/` → `railway-ops`; `.github/workflows/` → `github-remote`; `langfuse.yaml` / `LANGFUSE_PUBLIC_KEY` / langfuse in deps → `langfuse-remote`; `openrouter` in deps / `OPENROUTER_API_KEY` → `openrouter-remote`. Pure filesystem + env-var reads — env *names* only per pattern #5, values never read or echoed. Silent on no match. With `--pretty`, an extra human-readable "Suggested skills" section is rendered on stderr (stdout stays pure JSON). Solves the onboarding-discovery problem: a fresh Vercel project sees `vercel-remote` recommended without the user having to know the marketplace exists. [2026-04-28]
+
 ## 0.5.0 - 2026-04-28
 
 `marketplace init` subcommand (Slice 1 of marketplace convention).

@@ -1381,5 +1381,143 @@ class TestMarketplaceInit(unittest.TestCase):
         self.assertIn("\n  ", out)
 
 
+# ─── stack detection / suggested_skills ─────────────────────────────────────
+
+
+class TestSuggestedSkills(unittest.TestCase):
+    """Stack-marker → skill suggestion mapping. Hardcoded, no network."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.workspace_dir = self.root  # parent dir; .agent-plus is appended by --dir resolver
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _run_clean(self, *args: str, env_extra: dict | None = None) -> tuple[int, str, str]:
+        # Build a deterministic env: bypass _run's merge with os.environ.
+        clean_env: dict[str, str] = {}
+        for k, v in os.environ.items():
+            if any(k.startswith(prefix) for prefix in (
+                "GITHUB_", "VERCEL_", "COOLIFY_", "HCLOUD_", "HERMES_",
+                "LANGFUSE_", "OPENROUTER_", "SUPABASE_", "LINEAR_",
+            )):
+                continue
+            clean_env[k] = v
+        if env_extra:
+            clean_env.update(env_extra)
+        proc = subprocess.run(
+            [sys.executable, str(BIN), *args],
+            capture_output=True, text=True,
+            env=clean_env,
+            cwd=str(self.workspace_dir),
+            timeout=15,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def _init(self, env_extra: dict | None = None) -> dict:
+        rc, out, err = self._run_clean(
+            "init", "--dir", str(self.workspace_dir),
+            env_extra=env_extra,
+        )
+        self.assertEqual(rc, 0, msg=f"init failed: {err!r}")
+        return json.loads(out)
+
+    def test_empty_workspace_yields_empty_suggestions(self) -> None:
+        result = self._init()
+        self.assertIn("suggested_skills", result)
+        self.assertEqual(result["suggested_skills"], [])
+
+    def test_envelope_still_has_tool_and_workspace(self) -> None:
+        result = self._init()
+        self.assertIn("tool", result)
+        self.assertIn("workspace", result)
+
+    def test_vercel_json_triggers_vercel_remote(self) -> None:
+        (self.root / "vercel.json").write_text("{}", encoding="utf-8")
+        result = self._init()
+        names = [s["name"] for s in result["suggested_skills"]]
+        self.assertIn("vercel-remote", names)
+        # Reason wording check.
+        v = next(s for s in result["suggested_skills"] if s["name"] == "vercel-remote")
+        self.assertIn("Vercel", v["reason"])
+        self.assertEqual(v["marketplace"], "osouthgate/agent-plus-skills")
+        self.assertIn("vercel-remote@agent-plus-skills", v["install_hint"])
+
+    def test_dot_vercel_directory_triggers_vercel_remote(self) -> None:
+        (self.root / ".vercel").mkdir()
+        result = self._init()
+        names = [s["name"] for s in result["suggested_skills"]]
+        self.assertIn("vercel-remote", names)
+
+    def test_supabase_dir_triggers_supabase_remote(self) -> None:
+        (self.root / "supabase").mkdir()
+        (self.root / "supabase" / "config.toml").write_text("", encoding="utf-8")
+        result = self._init()
+        names = [s["name"] for s in result["suggested_skills"]]
+        self.assertIn("supabase-remote", names)
+
+    def test_multiple_markers_yield_multiple_suggestions(self) -> None:
+        (self.root / "vercel.json").write_text("{}", encoding="utf-8")
+        (self.root / "supabase").mkdir()
+        (self.root / "supabase" / "config.toml").write_text("", encoding="utf-8")
+        result = self._init()
+        names = [s["name"] for s in result["suggested_skills"]]
+        self.assertIn("vercel-remote", names)
+        self.assertIn("supabase-remote", names)
+
+    def test_github_workflows_triggers_github_remote(self) -> None:
+        (self.root / ".github" / "workflows").mkdir(parents=True)
+        result = self._init()
+        names = [s["name"] for s in result["suggested_skills"]]
+        self.assertIn("github-remote", names)
+
+    def test_railway_json_triggers_railway_ops(self) -> None:
+        (self.root / "railway.json").write_text("{}", encoding="utf-8")
+        result = self._init()
+        names = [s["name"] for s in result["suggested_skills"]]
+        self.assertIn("railway-ops", names)
+
+    def test_langfuse_env_var_triggers_suggestion_without_leaking_value(self) -> None:
+        secret = "lf_pk_super_secret_DO_NOT_LEAK"
+        result = self._init(env_extra={"LANGFUSE_PUBLIC_KEY": secret})
+        lf = next((s for s in result["suggested_skills"] if s["name"] == "langfuse-remote"), None)
+        self.assertIsNotNone(lf, "langfuse-remote not suggested when env var present")
+        # Privacy: value never leaks into output.
+        self.assertNotIn(secret, json.dumps(result))
+        # Reason mentions the integration but not a value.
+        self.assertIn("Langfuse", lf["reason"])
+
+    def test_openrouter_env_var_triggers_suggestion(self) -> None:
+        secret = "sk-or-canary-DO-NOT-LEAK"
+        result = self._init(env_extra={"OPENROUTER_API_KEY": secret})
+        names = [s["name"] for s in result["suggested_skills"]]
+        self.assertIn("openrouter-remote", names)
+        self.assertNotIn(secret, json.dumps(result))
+
+    def test_pretty_renders_human_section_to_stderr(self) -> None:
+        (self.root / "vercel.json").write_text("{}", encoding="utf-8")
+        rc, out, err = self._run_clean(
+            "init", "--dir", str(self.workspace_dir), "--pretty",
+        )
+        self.assertEqual(rc, 0, msg=err)
+        # JSON on stdout still parses.
+        parsed = json.loads(out)
+        self.assertIn("suggested_skills", parsed)
+        # Human section appears on stderr.
+        self.assertIn("Suggested skills", err)
+        self.assertIn("vercel-remote", err)
+        self.assertIn("claude plugin marketplace add osouthgate/agent-plus-skills", err)
+
+    def test_pretty_silent_when_no_suggestions(self) -> None:
+        rc, out, err = self._run_clean(
+            "init", "--dir", str(self.workspace_dir), "--pretty",
+        )
+        self.assertEqual(rc, 0, msg=err)
+        # No "Suggested skills" header on empty.
+        self.assertNotIn("Suggested skills", err)
+
+
 if __name__ == "__main__":
     unittest.main()
