@@ -1,0 +1,1884 @@
+#!/usr/bin/env python3
+"""
+agent-plus — workspace bootstrap for the agent-plus plugin collection.
+
+The meta plugin. Three subcommands, all emitting JSON wrapped in the
+standard `tool: {name, version}` envelope:
+
+  init       create `.agent-plus/` with empty-but-valid manifest /
+             services / env-status JSON files. Idempotent.
+  envcheck   for every installed sibling plugin, report which required
+             env-var prefixes are set. NAMES ONLY — values never land
+             on disk or in stdout.
+  refresh    resolve identity for github-remote and vercel-remote
+             (lightest API endpoints) and cache the IDs/names into
+             `.agent-plus/services.json`. Out-of-scope plugins are
+             not touched in v0.1.0.
+
+Workspace dir resolution (highest first), MUST match skill-feedback so
+both plugins share one `.agent-plus/`:
+  1. --dir PATH                              (explicit override)
+  2. <git-toplevel>/.agent-plus/             (cwd is in a git repo)
+  3. <cwd>/.agent-plus/                      (cwd contains .agent-plus/)
+  4. ~/.agent-plus/                          (last-resort fallback)
+
+Config precedence (highest first):
+  1. CLI flags
+  2. --env-file path
+  3. project .env.local / .env (walked up from cwd)
+  4. shell env
+
+Stdlib-only, Python 3.9+. No pip, no requests.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import functools
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any, Optional
+
+# ─── tool identity ────────────────────────────────────────────────────────────
+
+TOOL_NAME = "agent-plus"
+
+
+@functools.lru_cache(maxsize=1)
+def _plugin_version() -> str:
+    try:
+        manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        return str(json.loads(manifest.read_text(encoding="utf-8")).get("version", "unknown"))
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+
+
+def _tool_meta() -> dict[str, str]:
+    return {"name": TOOL_NAME, "version": _plugin_version()}
+
+
+def _with_tool_meta(payload: Any) -> Any:
+    if isinstance(payload, dict) and "tool" not in payload:
+        return {"tool": _tool_meta(), **payload}
+    return payload
+
+
+# ─── constants ───────────────────────────────────────────────────────────────
+
+WORKSPACE_DIRNAME = ".agent-plus"
+MANIFEST_VERSION = "0.1.0"
+
+HTTP_TIMEOUT = 15
+USER_AGENT = f"agent-plus/{_plugin_version()} (+https://github.com/osouthgate/agent-plus)"
+
+# Per-plugin env-var contract. Hardcoded list, derived from each plugin's
+# README. Each entry: "required" = must be set for the plugin to function;
+# "optional" = enhances behaviour but plugin still works without it.
+#
+# Drift to watch: this dict must stay in sync with each plugin's README
+# "Required" / "env" sections. CHANGELOG entries should call out edits here.
+PLUGIN_ENV_SPEC: dict[str, dict[str, list[str]]] = {
+    "coolify-remote":  {"required": ["COOLIFY_URL", "COOLIFY_API_KEY"], "optional": []},
+    "hcloud-remote":   {"required": ["HCLOUD_TOKEN"], "optional": []},
+    "hermes-remote":   {"required": ["HERMES_URL", "HERMES_CHAT_API_KEY"], "optional": []},
+    "langfuse-remote": {"required": ["LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"],
+                        "optional": ["LANGFUSE_BASE_URL", "LANGFUSE_HOST"]},
+    "openrouter-remote": {"required": ["OPENROUTER_API_KEY"],
+                          "optional": ["OPENROUTER_PROVISIONING_KEY"]},
+    "railway-ops":     {"required": [], "optional": []},  # defers to `railway` CLI auth
+    "supabase-remote": {"required": ["SUPABASE_ACCESS_TOKEN"],
+                        "optional": ["SUPABASE_PROJECT_REF", "SUPABASE_DB_URL"]},
+    "vercel-remote":   {"required": ["VERCEL_TOKEN"], "optional": ["VERCEL_TEAM_ID"]},
+    "github-remote":   {"required": [], "optional": ["GITHUB_TOKEN", "GITHUB_REPO"]},  # gh-cli fallback
+    "linear-remote":   {"required": ["LINEAR_API_KEY"], "optional": []},
+    "skill-feedback":  {"required": [], "optional": []},
+}
+
+# Plugins that need a CLI binary on PATH instead of (or in addition to) env.
+PLUGIN_BINARY_REQUIREMENT: dict[str, str] = {
+    "railway-ops": "railway",
+}
+
+
+# ─── workspace resolution ────────────────────────────────────────────────────
+
+
+def _git_toplevel(cwd: Optional[Path] = None) -> Optional[Path]:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=2,
+            cwd=str(cwd) if cwd else None,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    line = out.stdout.strip()
+    return Path(line) if line else None
+
+
+def resolve_workspace(dir_flag: Optional[str] = None) -> tuple[Path, str]:
+    """Return (workspace_path, source) where source is one of:
+    flag, git, cwd, home. Mirrors skill-feedback's resolution exactly so
+    the two plugins share one `.agent-plus/` directory.
+
+    Note: for `init`, we want to create the directory if it doesn't exist
+    yet, so the cwd-precedence rule ("only if .agent-plus/ already exists
+    in cwd") would never fire on a fresh setup. To keep `init` useful in
+    that case, the rule is applied inside the consumers (envcheck/refresh
+    enforce the same precedence, init creates at the highest applicable
+    level). The intent: in a git repo, default to git-toplevel; otherwise,
+    default to cwd; if neither, fall back to home.
+    """
+    if dir_flag:
+        return Path(dir_flag).expanduser().resolve() / WORKSPACE_DIRNAME, "flag"
+    top = _git_toplevel()
+    if top is not None:
+        return (top / WORKSPACE_DIRNAME).resolve(), "git"
+    cwd = Path.cwd()
+    # If a .agent-plus already exists in cwd (project without git), respect it.
+    if (cwd / WORKSPACE_DIRNAME).is_dir():
+        return (cwd / WORKSPACE_DIRNAME).resolve(), "cwd"
+    # Last-resort fallback for `init`: prefer cwd over home so a fresh
+    # `agent-plus init` in a non-git project lands locally rather than in
+    # the home dir. Read paths (envcheck/refresh) still respect skill-feedback's
+    # ordering (home is the final fallback) — see _resolve_for_read.
+    return (cwd / WORKSPACE_DIRNAME).resolve(), "cwd"
+
+
+def _resolve_for_read(dir_flag: Optional[str]) -> tuple[Path, str]:
+    """Like resolve_workspace, but used by envcheck/refresh which read or
+    update an existing workspace. Falls back to ~/.agent-plus/ as the last
+    rung — matches skill-feedback exactly so both plugins agree on which
+    `.agent-plus/` they're talking to."""
+    if dir_flag:
+        return Path(dir_flag).expanduser().resolve() / WORKSPACE_DIRNAME, "flag"
+    top = _git_toplevel()
+    if top is not None:
+        return (top / WORKSPACE_DIRNAME).resolve(), "git"
+    cwd = Path.cwd()
+    if (cwd / WORKSPACE_DIRNAME).is_dir():
+        return (cwd / WORKSPACE_DIRNAME).resolve(), "cwd"
+    return (Path.home() / WORKSPACE_DIRNAME).resolve(), "home"
+
+
+# ─── time utilities ──────────────────────────────────────────────────────────
+
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ─── env file loading ────────────────────────────────────────────────────────
+
+
+def _find_env_files(start: Path) -> list[Path]:
+    found: list[Path] = []
+    cur = start.resolve()
+    while True:
+        for name in (".env.local", ".env"):
+            p = cur / name
+            if p.is_file():
+                found.append(p)
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+    return found
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k:
+                out[k] = v
+    except OSError:
+        pass
+    return out
+
+
+def load_env(env_file: Optional[str] = None) -> dict[str, str]:
+    """Layered env autoload. Returns dict of var_name -> value; we ONLY use
+    this to determine which vars are SET. Values never leave this function
+    boundary unless explicitly needed for an outbound API call (refresh)."""
+    cfg: dict[str, str] = dict(os.environ)
+    env_files = _find_env_files(Path.cwd())
+    for p in reversed(env_files):
+        cfg.update(_parse_env_file(p))
+    if env_file:
+        p = Path(env_file)
+        if not p.is_file():
+            die(f"--env-file not found: {env_file}")
+        cfg.update(_parse_env_file(p))
+    return cfg
+
+
+# ─── error helper ────────────────────────────────────────────────────────────
+
+
+def die(msg: str, *, code: int = 1) -> None:
+    sys.stderr.write(f"agent-plus: {msg}\n")
+    sys.exit(code)
+
+
+# ─── init ────────────────────────────────────────────────────────────────────
+
+
+def _initial_files() -> dict[str, dict]:
+    now = _now_iso()
+    return {
+        "manifest.json": {
+            "plugins": [],
+            "version": MANIFEST_VERSION,
+            "createdAt": now,
+        },
+        "services.json": {
+            "services": {},
+        },
+        "env-status.json": {
+            "checked": [],
+            "missing": [],
+            "checkedAt": None,
+        },
+    }
+
+
+def cmd_init(args: argparse.Namespace) -> dict:
+    workspace, source = resolve_workspace(args.dir)
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    created: list[str] = []
+    skipped: list[str] = []
+
+    for fname, default in _initial_files().items():
+        path = workspace / fname
+        if path.is_file():
+            skipped.append(fname)
+            continue
+        path.write_text(json.dumps(default, indent=2) + "\n", encoding="utf-8")
+        created.append(fname)
+
+    return {
+        "workspace": str(workspace),
+        "source": source,
+        "created": created,
+        "skipped": skipped,
+    }
+
+
+# ─── envcheck ────────────────────────────────────────────────────────────────
+
+
+def cmd_envcheck(args: argparse.Namespace) -> dict:
+    workspace, source = _resolve_for_read(args.dir)
+    cfg = load_env(args.env_file)
+
+    all_required: list[str] = []
+    all_optional: list[str] = []
+    set_names: list[str] = []
+    missing_required: list[str] = []
+    missing_optional: list[str] = []
+
+    plugin_status: dict[str, Any] = {}
+
+    for plugin, spec in sorted(PLUGIN_ENV_SPEC.items()):
+        req = spec["required"]
+        opt = spec["optional"]
+        all_required.extend(req)
+        all_optional.extend(opt)
+
+        plugin_set: list[str] = []
+        plugin_missing_req: list[str] = []
+        plugin_missing_opt: list[str] = []
+
+        for name in req:
+            if cfg.get(name, "").strip():
+                plugin_set.append(name)
+                if name not in set_names:
+                    set_names.append(name)
+            else:
+                plugin_missing_req.append(name)
+                if name not in missing_required:
+                    missing_required.append(name)
+
+        for name in opt:
+            if cfg.get(name, "").strip():
+                plugin_set.append(name)
+                if name not in set_names:
+                    set_names.append(name)
+            else:
+                plugin_missing_opt.append(name)
+                if name not in missing_optional:
+                    missing_optional.append(name)
+
+        # Binary-on-PATH check (e.g. railway-ops needs `railway`).
+        binary_status: Optional[dict[str, Any]] = None
+        bin_name = PLUGIN_BINARY_REQUIREMENT.get(plugin)
+        if bin_name:
+            found = shutil.which(bin_name)
+            binary_status = {"binary": bin_name, "on_path": found is not None}
+
+        ready = not plugin_missing_req and (
+            binary_status is None or binary_status["on_path"]
+        )
+
+        plugin_status[plugin] = {
+            "set": plugin_set,
+            "missing_required": plugin_missing_req,
+            "missing_optional": plugin_missing_opt,
+            "binary": binary_status,
+            "ready": ready,
+        }
+
+    # Deduplicate the global lists while preserving deterministic order.
+    checked = sorted(set(all_required) | set(all_optional))
+
+    payload: dict[str, Any] = {
+        "workspace": str(workspace),
+        "source": source,
+        "checked": checked,
+        "set": sorted(set_names),
+        "missing": sorted(missing_required),  # required only
+        "missing_optional": sorted(missing_optional),
+        "plugins": plugin_status,
+        "checkedAt": _now_iso(),
+    }
+
+    # Persist to env-status.json (names only, no values).
+    if workspace.is_dir():
+        out_path = workspace / "env-status.json"
+        on_disk = {
+            "checked": payload["checked"],
+            "set": payload["set"],
+            "missing": payload["missing"],
+            "missing_optional": payload["missing_optional"],
+            "plugins": plugin_status,
+            "checkedAt": payload["checkedAt"],
+        }
+        try:
+            out_path.write_text(json.dumps(on_disk, indent=2) + "\n", encoding="utf-8")
+            payload["written_to"] = str(out_path)
+        except OSError as e:
+            payload["write_error"] = str(e)
+    else:
+        payload["note"] = (
+            f"workspace {workspace} not initialised; run `agent-plus init` first "
+            "to persist env-status.json"
+        )
+
+    return payload
+
+
+# ─── refresh ─────────────────────────────────────────────────────────────────
+
+_GIT_REPO_URL_RE = re.compile(
+    r"(?:github\.com[:/])([A-Za-z0-9_.\-]+)/([A-Za-z0-9_.\-]+?)(?:\.git)?/?$"
+)
+
+
+def _http_get_json(url: str, headers: dict[str, str]) -> tuple[int, Any]:
+    """GET url, return (status, json). Returns (status, None) on parse error.
+    Returns (-1, str(error)) on connection/transport error."""
+    return _http_request_json("GET", url, headers, data=None)
+
+
+def _http_request_json(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    *,
+    data: Optional[bytes] = None,
+) -> tuple[int, Any]:
+    """Generalised HTTP -> JSON helper. Same return shape as _http_get_json:
+    (status, parsed_json | {"raw": ...} | {"error": ...}). Used for POST
+    GraphQL (Linear) and any future non-GET surface. Reuse this rather than
+    sprouting per-handler urllib code."""
+    merged = {**headers, "User-Agent": USER_AGENT}
+    req = urllib.request.Request(url, data=data, method=method, headers=merged)
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
+            status = resp.getcode()
+            body = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            body = ""
+        try:
+            return e.code, json.loads(body) if body else None
+        except json.JSONDecodeError:
+            return e.code, {"raw": body[:500]}
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        return -1, {"error": str(e)}
+
+    try:
+        return status, json.loads(body) if body else None
+    except json.JSONDecodeError:
+        return status, {"raw": body[:500]}
+
+
+def _refresh_github(cfg: dict[str, str]) -> dict[str, Any]:
+    """Resolve github-remote identity. Parses git remote in cwd; if a token
+    is available, hits GET /repos/{owner}/{repo} for the default branch.
+    NAMES + IDs only, no token ever appears in output."""
+    out: dict[str, Any] = {"plugin": "github-remote"}
+
+    # Parse origin URL.
+    try:
+        proc = subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        out["status"] = "unconfigured"
+        out["reason"] = f"git not available: {e}"
+        return out
+    if proc.returncode != 0:
+        out["status"] = "unconfigured"
+        out["reason"] = "no git remote in cwd"
+        return out
+
+    url = (proc.stdout or "").strip()
+    m = _GIT_REPO_URL_RE.search(url)
+    if not m:
+        out["status"] = "unconfigured"
+        out["reason"] = f"could not parse github remote: {url[:80]}"
+        return out
+    owner, repo = m.group(1), m.group(2)
+    out["owner"] = owner
+    out["repo"] = repo
+
+    token = cfg.get("GITHUB_TOKEN", "").strip()
+    if not token:
+        # Try `gh auth token` fallback.
+        try:
+            gh = subprocess.run(
+                ["gh", "auth", "token"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            if gh.returncode == 0 and gh.stdout.strip():
+                token = gh.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            token = ""
+
+    if not token:
+        out["status"] = "partial"
+        out["reason"] = "no GITHUB_TOKEN and `gh auth token` unavailable; remote parsed only"
+        return out
+
+    status, body = _http_get_json(
+        f"https://api.github.com/repos/{owner}/{repo}",
+        headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
+    )
+    if status != 200 or not isinstance(body, dict):
+        out["status"] = "error"
+        out["http_status"] = status
+        # Preserve only message-like fields from a possible error body.
+        if isinstance(body, dict):
+            msg = body.get("message")
+            if isinstance(msg, str):
+                out["api_message"] = msg
+        return out
+
+    out["status"] = "ok"
+    out["default_branch"] = body.get("default_branch")
+    out["repo_id"] = body.get("id")
+    out["private"] = body.get("private")
+    return out
+
+
+def _refresh_vercel(cfg: dict[str, str]) -> dict[str, Any]:
+    """Resolve vercel-remote identity. If VERCEL_TOKEN is unset, return
+    `unconfigured` — never prompt. Otherwise hit /v9/projects?limit=20 and
+    keep [{name, id}]. Token never appears in output."""
+    out: dict[str, Any] = {"plugin": "vercel-remote"}
+    token = cfg.get("VERCEL_TOKEN", "").strip()
+    if not token:
+        out["status"] = "unconfigured"
+        out["reason"] = "VERCEL_TOKEN not set"
+        return out
+
+    team_id = cfg.get("VERCEL_TEAM_ID", "").strip()
+    suffix = f"&teamId={urllib.parse.quote(team_id)}" if team_id else ""
+    url = f"https://api.vercel.com/v9/projects?limit=20{suffix}"
+    status, body = _http_get_json(
+        url, headers={"Authorization": f"Bearer {token}"},
+    )
+    if status != 200 or not isinstance(body, dict):
+        out["status"] = "error"
+        out["http_status"] = status
+        if isinstance(body, dict):
+            msg = body.get("error", {})
+            if isinstance(msg, dict) and isinstance(msg.get("message"), str):
+                out["api_message"] = msg["message"]
+        return out
+
+    projects = body.get("projects", [])
+    cleaned = []
+    if isinstance(projects, list):
+        for p in projects:
+            if not isinstance(p, dict):
+                continue
+            cleaned.append({"name": p.get("name"), "id": p.get("id")})
+    out["status"] = "ok"
+    out["projects"] = cleaned
+    out["count"] = len(cleaned)
+    if team_id:
+        out["team_id"] = team_id
+    return out
+
+
+def _refresh_supabase(cfg: dict[str, str]) -> dict[str, Any]:
+    """Resolve supabase-remote identity. If SUPABASE_ACCESS_TOKEN unset,
+    return `unconfigured`. Otherwise GET /v1/projects (Bearer auth) and keep
+    [{name, id, region, organization_id}]. Token never appears in output."""
+    out: dict[str, Any] = {"plugin": "supabase-remote"}
+    token = cfg.get("SUPABASE_ACCESS_TOKEN", "").strip()
+    if not token:
+        out["status"] = "unconfigured"
+        out["reason"] = "SUPABASE_ACCESS_TOKEN not set"
+        return out
+
+    status, body = _http_get_json(
+        "https://api.supabase.com/v1/projects",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    if status != 200 or not isinstance(body, list):
+        out["status"] = "error"
+        out["http_status"] = status
+        if isinstance(body, dict):
+            msg = body.get("message") or body.get("error")
+            if isinstance(msg, str):
+                out["api_message"] = msg
+        return out
+
+    cleaned: list[dict[str, Any]] = []
+    for p in body[:20]:
+        if not isinstance(p, dict):
+            continue
+        cleaned.append({
+            "name": p.get("name"),
+            "id": p.get("id") or p.get("ref"),
+            "region": p.get("region"),
+            "organization_id": p.get("organization_id"),
+        })
+    out["status"] = "ok"
+    out["projects"] = cleaned
+    out["count"] = len(cleaned)
+    return out
+
+
+def _refresh_railway(cfg: dict[str, str]) -> dict[str, Any]:  # noqa: ARG001
+    """Resolve railway-ops identity by shelling out to `railway list --json`.
+    railway-ops itself defers to the local CLI's auth state, so this handler
+    does the same — no env values are passed in. If `railway` is not on PATH
+    or the command fails (not authed / no projects), record `unconfigured`.
+    NEVER pass cfg values into the subprocess env."""
+    out: dict[str, Any] = {"plugin": "railway-ops"}
+    railway_exe = shutil.which("railway")
+    if railway_exe is None:
+        out["status"] = "unconfigured"
+        out["reason"] = "`railway` CLI not on PATH"
+        return out
+
+    try:
+        proc = subprocess.run(
+            [railway_exe, "list", "--json"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except FileNotFoundError as e:
+        # Windows: shutil.which can return a .cmd shim that subprocess can't
+        # spawn directly without shell. Treat as unconfigured rather than
+        # crash — the plugin's own bin/ has more robust resolution and is
+        # what the agent should reach for if it actually wants to use railway.
+        out["status"] = "unconfigured"
+        out["reason"] = f"`railway` CLI not spawnable: {e}"
+        return out
+    except (OSError, subprocess.SubprocessError) as e:
+        out["status"] = "error"
+        out["reason"] = f"railway list failed to spawn: {e}"
+        return out
+
+    if proc.returncode != 0:
+        out["status"] = "unconfigured"
+        # stderr from railway often mentions "unauthorized" or "log in"
+        msg = (proc.stderr or proc.stdout or "").strip()
+        out["reason"] = f"railway list failed: {msg[:160]}" if msg else "railway list failed"
+        return out
+
+    try:
+        data = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError as e:
+        out["status"] = "error"
+        out["reason"] = f"could not parse `railway list --json`: {e}"
+        return out
+
+    if not isinstance(data, list):
+        out["status"] = "error"
+        out["reason"] = "unexpected shape from `railway list --json`"
+        return out
+
+    cleaned: list[dict[str, Any]] = []
+    for p in data[:20]:
+        if not isinstance(p, dict):
+            continue
+        cleaned.append({"name": p.get("name"), "id": p.get("id")})
+    out["status"] = "ok"
+    out["projects"] = cleaned
+    out["count"] = len(cleaned)
+    return out
+
+
+def _refresh_linear(cfg: dict[str, str]) -> dict[str, Any]:
+    """Resolve linear-remote identity. If LINEAR_API_KEY unset, return
+    `unconfigured`. Otherwise POST a tiny GraphQL viewer+teams query.
+    Linear uses a raw `Authorization: <key>` header — NO Bearer prefix.
+    Key never appears in output, even on error paths."""
+    out: dict[str, Any] = {"plugin": "linear-remote"}
+    key = cfg.get("LINEAR_API_KEY", "").strip()
+    if not key:
+        out["status"] = "unconfigured"
+        out["reason"] = "LINEAR_API_KEY not set"
+        return out
+
+    query = (
+        "{ viewer { id name email } "
+        "teams(first: 20) { nodes { id key name } } }"
+    )
+    body_bytes = json.dumps({"query": query}).encode("utf-8")
+    status, body = _http_request_json(
+        "POST",
+        "https://api.linear.app/graphql",
+        headers={
+            "Authorization": key,  # NO Bearer prefix.
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        data=body_bytes,
+    )
+    if status != 200 or not isinstance(body, dict):
+        out["status"] = "error"
+        out["http_status"] = status
+        if isinstance(body, dict):
+            errs = body.get("errors")
+            if isinstance(errs, list) and errs and isinstance(errs[0], dict):
+                msg = errs[0].get("message")
+                if isinstance(msg, str):
+                    out["api_message"] = msg
+        return out
+
+    if isinstance(body.get("errors"), list) and body["errors"]:
+        out["status"] = "error"
+        first = body["errors"][0]
+        if isinstance(first, dict) and isinstance(first.get("message"), str):
+            out["api_message"] = first["message"]
+        return out
+
+    data = body.get("data") or {}
+    viewer = data.get("viewer") or {}
+    teams_root = data.get("teams") or {}
+    nodes = teams_root.get("nodes") if isinstance(teams_root, dict) else []
+    teams_clean: list[dict[str, Any]] = []
+    if isinstance(nodes, list):
+        for t in nodes[:20]:
+            if not isinstance(t, dict):
+                continue
+            teams_clean.append({
+                "id": t.get("id"), "key": t.get("key"), "name": t.get("name"),
+            })
+
+    out["status"] = "ok"
+    out["viewer"] = {
+        "id": viewer.get("id"),
+        "name": viewer.get("name"),
+        "email": viewer.get("email"),
+    }
+    out["teams"] = teams_clean
+    out["count"] = len(teams_clean)
+    return out
+
+
+def _refresh_langfuse(cfg: dict[str, str]) -> dict[str, Any]:
+    """Resolve langfuse-remote identity for the default unnamed instance.
+    v0.1.x: only checks the default instance — multi-instance health is
+    `langfuse-remote health --all`'s job. Base URL precedence:
+    LANGFUSE_BASE_URL > LANGFUSE_HOST > https://cloud.langfuse.com.
+    Both keys are stripped from any output, even error paths."""
+    import base64
+
+    out: dict[str, Any] = {"plugin": "langfuse-remote"}
+    pk = cfg.get("LANGFUSE_PUBLIC_KEY", "").strip()
+    sk = cfg.get("LANGFUSE_SECRET_KEY", "").strip()
+    if not pk or not sk:
+        out["status"] = "unconfigured"
+        missing = [n for n, v in (("LANGFUSE_PUBLIC_KEY", pk), ("LANGFUSE_SECRET_KEY", sk)) if not v]
+        out["reason"] = f"missing: {', '.join(missing)}"
+        return out
+
+    base = (
+        cfg.get("LANGFUSE_BASE_URL", "").strip()
+        or cfg.get("LANGFUSE_HOST", "").strip()
+        or "https://cloud.langfuse.com"
+    )
+    base = base.rstrip("/")
+    out["base_url"] = base
+
+    token = base64.b64encode(f"{pk}:{sk}".encode("utf-8")).decode("ascii")
+    status, body = _http_get_json(
+        f"{base}/api/public/health",
+        headers={"Authorization": f"Basic {token}"},
+    )
+    if status != 200:
+        out["status"] = "error"
+        out["http_status"] = status
+        # /api/public/health returns plain text on success; error bodies may
+        # be JSON. Surface only message-shaped fields.
+        if isinstance(body, dict):
+            msg = body.get("message") or body.get("error")
+            if isinstance(msg, str):
+                out["api_message"] = msg
+        return out
+
+    out["status"] = "ok"
+    # Body might be plain text (non-JSON) -> body is {"raw": "..."} or None.
+    if isinstance(body, dict):
+        # health returns {"status": "OK", "version": "..."} on some versions;
+        # fall back to the raw passthrough for older builds.
+        if isinstance(body.get("status"), str):
+            out["health_status"] = body["status"]
+        elif isinstance(body.get("raw"), str):
+            out["health_status"] = body["raw"][:80]
+        if isinstance(body.get("version"), str):
+            out["version"] = body["version"]
+    elif body is None:
+        out["health_status"] = "ok"
+    return out
+
+
+REFRESH_HANDLERS = {
+    "github-remote": _refresh_github,
+    "langfuse-remote": _refresh_langfuse,
+    "linear-remote": _refresh_linear,
+    "railway-ops": _refresh_railway,
+    "supabase-remote": _refresh_supabase,
+    "vercel-remote": _refresh_vercel,
+}
+
+
+# ─── extensions ──────────────────────────────────────────────────────────────
+#
+# User-defined refresh handlers. The contract:
+#
+#   <workspace>/extensions.json:
+#     {"extensions": [
+#       {"name": "<slug>", "command": ["argv0", ...],
+#        "description": "...", "timeout_seconds": 30, "enabled": true}
+#     ]}
+#
+# Each script's stdout MUST be a single JSON object with at least a `status`
+# field (one of: "ok", "unconfigured", "partial", "error"). All other fields
+# pass through verbatim. The orchestrator wraps each output with
+#   {"plugin": "<name>", "source": "extension", ...whatever the script emitted}
+# so downstream consumers can tell apart user, built-in, and migrated handlers.
+#
+# Forward-compat: `_run_extension(ext_config, *, cwd, env)` does NOT assume
+# user-supplied. A future migration could call it for built-in handlers via a
+# config like {"name": "github-remote", "command": [...], ...}.
+
+EXTENSIONS_FILENAME = "extensions.json"
+EXTENSION_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,30}$")
+EXTENSION_DEFAULT_TIMEOUT = 30
+EXTENSION_STDERR_TAIL_CAP = 500
+EXTENSION_VALID_STATUSES = ("ok", "unconfigured", "partial", "error")
+
+
+def _builtin_plugin_names() -> set[str]:
+    """Names that an extension may NOT shadow in this slice. Built-in refresh
+    handlers + every plugin in PLUGIN_ENV_SPEC."""
+    return set(PLUGIN_ENV_SPEC) | set(REFRESH_HANDLERS)
+
+
+def _hash_command(command: list[str]) -> str:
+    """SHA-256 of the first command element (the executable). Surfacing a
+    stable identifier without leaking the user's filesystem path. Pattern 5
+    spirit. SHA-256 chosen over SHA-1: SHA-1 is collision-broken; the few
+    extra bytes don't matter for an identifier that lives in a JSON blob."""
+    if not command:
+        return ""
+    return hashlib.sha256(command[0].encode("utf-8")).hexdigest()
+
+
+def _validate_extension_config(ext: Any, *, idx: int = 0) -> Optional[str]:
+    """Return None if valid, else a human-readable error string. Does NOT
+    check on-disk existence of the command — that's `extensions validate`."""
+    if not isinstance(ext, dict):
+        return f"extension #{idx}: not an object"
+    name = ext.get("name")
+    if not isinstance(name, str):
+        return f"extension #{idx}: `name` must be a string"
+    if not EXTENSION_NAME_RE.match(name):
+        return (f"extension {name!r}: name must match {EXTENSION_NAME_RE.pattern} "
+                "(lowercase slug, 1-31 chars, starts with letter)")
+    if name in _builtin_plugin_names():
+        return (f"extension {name!r}: name collides with a built-in plugin; "
+                "rename to avoid shadowing")
+
+    cmd = ext.get("command")
+    if not isinstance(cmd, list) or not cmd:
+        return f"extension {name!r}: `command` must be a non-empty list of strings"
+    for i, part in enumerate(cmd):
+        if not isinstance(part, str):
+            return f"extension {name!r}: command[{i}] must be a string"
+    if not cmd[0]:
+        return f"extension {name!r}: command[0] (executable) is empty"
+
+    desc = ext.get("description")
+    if desc is not None and not isinstance(desc, str):
+        return f"extension {name!r}: `description` must be a string"
+
+    timeout = ext.get("timeout_seconds")
+    if timeout is not None:
+        if isinstance(timeout, bool) or not isinstance(timeout, int):
+            return f"extension {name!r}: `timeout_seconds` must be an integer"
+        if timeout <= 0:
+            return f"extension {name!r}: `timeout_seconds` must be > 0"
+
+    enabled = ext.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        return f"extension {name!r}: `enabled` must be a boolean"
+
+    return None
+
+
+def _load_extensions(workspace: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    """Load extensions.json. Returns (extensions, errors). A missing file is a
+    silent no-op (returns ([], [])). A malformed file returns ([], [error...]).
+    Per-extension validation errors are returned as errors but don't stop
+    other valid extensions from loading."""
+    path = workspace / EXTENSIONS_FILENAME
+    if not path.is_file():
+        return [], []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return [], [f"could not read {path.name}: {e}"]
+
+    if not isinstance(raw, dict) or "extensions" not in raw:
+        return [], [f"{path.name}: missing top-level `extensions` array"]
+    items = raw.get("extensions")
+    if not isinstance(items, list):
+        return [], [f"{path.name}: `extensions` must be a list"]
+
+    cleaned: list[dict[str, Any]] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+    for i, ext in enumerate(items):
+        err = _validate_extension_config(ext, idx=i)
+        if err:
+            errors.append(err)
+            continue
+        name = ext["name"]
+        if name in seen:
+            errors.append(f"extension {name!r}: duplicate name in extensions.json")
+            continue
+        seen.add(name)
+        # Apply defaults so callers always see fully populated dicts.
+        normalized = {
+            "name": name,
+            "command": list(ext["command"]),
+            "description": ext.get("description"),
+            "timeout_seconds": int(ext.get("timeout_seconds") or EXTENSION_DEFAULT_TIMEOUT),
+            "enabled": bool(ext.get("enabled", True)),
+        }
+        cleaned.append(normalized)
+    return cleaned, errors
+
+
+def _save_extensions(workspace: Path, extensions: list[dict[str, Any]]) -> Path:
+    """Atomic write of extensions.json. Filters each ext to declared fields
+    only so user typos don't get silently persisted."""
+    workspace.mkdir(parents=True, exist_ok=True)
+    path = workspace / EXTENSIONS_FILENAME
+    # Strip None-valued optional fields for cleanliness.
+    out: list[dict[str, Any]] = []
+    for ext in extensions:
+        record: dict[str, Any] = {
+            "name": ext["name"],
+            "command": list(ext["command"]),
+        }
+        if ext.get("description"):
+            record["description"] = ext["description"]
+        if ext.get("timeout_seconds") and ext["timeout_seconds"] != EXTENSION_DEFAULT_TIMEOUT:
+            record["timeout_seconds"] = int(ext["timeout_seconds"])
+        if ext.get("enabled") is False:
+            record["enabled"] = False
+        out.append(record)
+    payload = {"extensions": out}
+    body = json.dumps(payload, indent=2) + "\n"
+
+    fd, tmp_path = tempfile.mkstemp(prefix=".extensions.", suffix=".tmp", dir=str(workspace))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.replace(tmp_path, path)
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def _resolve_extension_command(command: list[str], cwd: Path) -> list[str]:
+    """Resolve a relative argv[0] against cwd (the dir scripts run in). The
+    other argv elements are passed through unchanged."""
+    if not command:
+        return command
+    head = command[0]
+    p = Path(head)
+    if not p.is_absolute():
+        candidate = (cwd / head)
+        if candidate.is_file():
+            return [str(candidate.resolve())] + list(command[1:])
+    return command
+
+
+def _run_extension(
+    ext: dict[str, Any],
+    *,
+    cwd: Path,
+    env: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    """Run a single extension config and return the merged service entry.
+
+    The returned dict ALWAYS has these keys: plugin (=name), source ("extension"),
+    status. It then carries through every other field the script emitted on
+    stdout (verbatim), or, on failure, an `error`/`reason`/`stderr_tail` triplet.
+
+    Forward-compat: this function is intentionally unaware of "user-supplied"
+    vs "built-in". Future migration of refresh handlers to the same contract
+    can call this function with a config pointing at a bundled script.
+    """
+    name = ext["name"]
+    out: dict[str, Any] = {"plugin": name, "source": "extension"}
+
+    command = _resolve_extension_command(list(ext["command"]), cwd)
+    timeout = int(ext.get("timeout_seconds") or EXTENSION_DEFAULT_TIMEOUT)
+
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(cwd),
+            env=env if env is not None else os.environ.copy(),
+            check=False,
+            shell=False,
+        )
+    except subprocess.TimeoutExpired:
+        out["status"] = "error"
+        out["reason"] = "timeout"
+        out["timeout_seconds"] = timeout
+        return out
+    except FileNotFoundError as e:
+        out["status"] = "error"
+        out["reason"] = f"extension command not found: {e}"
+        return out
+    except (OSError, subprocess.SubprocessError) as e:
+        out["status"] = "error"
+        out["reason"] = f"extension failed to spawn: {e}"
+        return out
+
+    stderr_tail = (proc.stderr or "")[-EXTENSION_STDERR_TAIL_CAP:]
+
+    if proc.returncode != 0:
+        out["status"] = "error"
+        out["reason"] = f"extension exited {proc.returncode}"
+        if stderr_tail:
+            out["stderr_tail"] = stderr_tail
+        return out
+
+    stdout = proc.stdout or ""
+    try:
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError:
+        out["status"] = "error"
+        out["reason"] = "extension output is not valid JSON"
+        if stderr_tail:
+            out["stderr_tail"] = stderr_tail
+        return out
+
+    if not isinstance(parsed, dict):
+        out["status"] = "error"
+        out["reason"] = "extension output is not a JSON object"
+        if stderr_tail:
+            out["stderr_tail"] = stderr_tail
+        return out
+
+    # Pass through verbatim, but never let the script overwrite the orchestrator's
+    # `plugin` and `source` fields.
+    for k, v in parsed.items():
+        if k in ("plugin", "source"):
+            continue
+        out[k] = v
+    # Status default is "ok" if the script didn't say otherwise (advisory, not enforced).
+    if "status" not in out:
+        out["status"] = "ok"
+    return out
+
+
+def cmd_refresh(args: argparse.Namespace) -> dict:
+    workspace, source = _resolve_for_read(args.dir)
+    cfg = load_env(args.env_file)
+
+    extensions_only = bool(getattr(args, "extensions_only", False))
+    no_extensions = bool(getattr(args, "no_extensions", False))
+    if extensions_only and no_extensions:
+        return {
+            "workspace": str(workspace),
+            "source": source,
+            "error": "--no-extensions and --extensions-only are mutually exclusive",
+        }
+
+    plugins_to_refresh: list[str]
+    if args.plugin:
+        if args.plugin not in REFRESH_HANDLERS:
+            return {
+                "workspace": str(workspace),
+                "source": source,
+                "error": (
+                    f"refresh not implemented for plugin {args.plugin!r}. "
+                    f"v0.1.0 supports: {sorted(REFRESH_HANDLERS)}"
+                ),
+            }
+        plugins_to_refresh = [args.plugin]
+        # --plugin implies built-ins-only. Skip extensions in this mode.
+        no_extensions = True
+    elif extensions_only:
+        plugins_to_refresh = []
+    else:
+        plugins_to_refresh = sorted(REFRESH_HANDLERS)
+
+    services: dict[str, Any] = {}
+    for name in plugins_to_refresh:
+        services[name] = REFRESH_HANDLERS[name](cfg)
+
+    # Run extensions (default on; suppressed by --no-extensions / --plugin).
+    extension_errors: list[str] = []
+    extensions_ran: list[str] = []
+    if not no_extensions:
+        extensions, load_errors = _load_extensions(workspace)
+        extension_errors.extend(load_errors)
+        # Determine cwd for extension scripts: workspace's parent (i.e. repo root).
+        ext_cwd = workspace.parent
+        for ext in extensions:
+            if not ext.get("enabled", True):
+                continue
+            ext_name = ext["name"]
+            # Defensive: if a malformed extensions.json somehow let a built-in
+            # name through, refuse to shadow at run time too.
+            if ext_name in _builtin_plugin_names():
+                services[ext_name] = {
+                    "plugin": ext_name,
+                    "source": "extension",
+                    "status": "error",
+                    "reason": "name collides with a built-in plugin",
+                }
+                continue
+            services[ext_name] = _run_extension(ext, cwd=ext_cwd)
+            extensions_ran.append(ext_name)
+
+    refreshed_at = _now_iso()
+    payload: dict[str, Any] = {
+        "workspace": str(workspace),
+        "source": source,
+        "services": services,
+        "refreshedAt": refreshed_at,
+    }
+    if not no_extensions:
+        payload["extensions_ran"] = extensions_ran
+        if extension_errors:
+            payload["extension_errors"] = extension_errors
+
+    # Merge into services.json if the workspace exists.
+    services_path = workspace / "services.json"
+    if workspace.is_dir():
+        existing: dict[str, Any] = {"services": {}}
+        if services_path.is_file():
+            try:
+                existing = json.loads(services_path.read_text(encoding="utf-8"))
+                if not isinstance(existing, dict) or "services" not in existing:
+                    existing = {"services": {}}
+            except (OSError, json.JSONDecodeError):
+                existing = {"services": {}}
+        for k, v in services.items():
+            existing["services"][k] = v
+        existing["refreshedAt"] = refreshed_at
+        try:
+            services_path.write_text(
+                json.dumps(existing, indent=2) + "\n", encoding="utf-8",
+            )
+            payload["written_to"] = str(services_path)
+        except OSError as e:
+            payload["write_error"] = str(e)
+    else:
+        payload["note"] = (
+            f"workspace {workspace} not initialised; run `agent-plus init` first "
+            "to persist services.json"
+        )
+
+    return payload
+
+
+# ─── list ────────────────────────────────────────────────────────────────────
+
+
+_LIST_README_PREVIEW_CAP = 400
+
+# Section headings that signal "this is what the plugin does", in priority
+# order. We pick the first one that appears in the README.
+_LIST_PREFERRED_HEADINGS = (
+    "headline commands",
+    "usage",
+    "commands",
+    "what it does",
+    "why",
+)
+
+
+def _extract_readme_preview(readme_path: Path) -> Optional[str]:
+    """Pull a short, agent-useful slice out of a plugin README. Looks for the
+    first `##` section whose heading matches one of the preferred names; if
+    none match, falls back to the first `##` section after the title.
+    Returns None if the file can't be read or has no `##` sections."""
+    try:
+        text = readme_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+    lines = text.splitlines()
+    sections: list[tuple[str, int]] = []  # (heading_text_lower, line_index)
+    for idx, line in enumerate(lines):
+        if line.startswith("## ") and not line.startswith("### "):
+            sections.append((line[3:].strip().lower(), idx))
+    if not sections:
+        return None
+
+    chosen_idx: Optional[int] = None
+    for pref in _LIST_PREFERRED_HEADINGS:
+        for heading, idx in sections:
+            if heading.startswith(pref):
+                chosen_idx = idx
+                break
+        if chosen_idx is not None:
+            break
+    if chosen_idx is None:
+        chosen_idx = sections[0][1]
+
+    # Find the next `## ` that ends the section.
+    end_idx = len(lines)
+    for heading, idx in sections:  # noqa: B007 — heading unused
+        if idx > chosen_idx:
+            end_idx = idx
+            break
+
+    chunk = "\n".join(lines[chosen_idx:end_idx]).strip()
+    if len(chunk) > _LIST_README_PREVIEW_CAP:
+        chunk = chunk[: _LIST_README_PREVIEW_CAP].rstrip() + "…"
+    return chunk or None
+
+
+def cmd_list(args: argparse.Namespace) -> dict:
+    """Read .claude-plugin/marketplace.json + each plugin's README, return a
+    discoverability blob. Pattern 1: aggregate, one call returns everything
+    the agent needs to choose a plugin."""
+    # Locate the agent-plus repo root. Prefer git toplevel so this works from
+    # any subdir; fall back to walking up from the bin script's location.
+    repo_root: Optional[Path] = _git_toplevel()
+    if repo_root is None:
+        # Walk up from this script's parent; bin/agent-plus -> agent-plus/ -> repo.
+        cur = Path(__file__).resolve()
+        for parent in cur.parents:
+            if (parent / ".claude-plugin" / "marketplace.json").is_file():
+                repo_root = parent
+                break
+
+    if repo_root is None:
+        return {
+            "error": "could not locate .claude-plugin/marketplace.json "
+                     "(no git toplevel and no marketplace.json in any parent)",
+            "plugins": [],
+            "count": 0,
+        }
+
+    market_path = repo_root / ".claude-plugin" / "marketplace.json"
+    try:
+        market = json.loads(market_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return {
+            "error": f"could not read {market_path}: {e}",
+            "plugins": [],
+            "count": 0,
+        }
+
+    market_plugins = market.get("plugins") or []
+    if not isinstance(market_plugins, list):
+        return {
+            "error": "marketplace.json `plugins` is not a list",
+            "plugins": [],
+            "count": 0,
+        }
+
+    # Optional cross-reference with env-status.json for `ready` flag.
+    workspace, _src = _resolve_for_read(args.dir)
+    env_ready: dict[str, bool] = {}
+    es_path = workspace / "env-status.json"
+    if es_path.is_file():
+        try:
+            es = json.loads(es_path.read_text(encoding="utf-8"))
+            plugins_node = es.get("plugins") or {}
+            if isinstance(plugins_node, dict):
+                for name, info in plugins_node.items():
+                    if isinstance(info, dict) and "ready" in info:
+                        env_ready[name] = bool(info["ready"])
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    plugins_out: list[dict[str, Any]] = []
+    for entry in market_plugins:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str):
+            continue
+        source = entry.get("source") or f"./{name}"
+        # Resolve README relative to repo root via the source path.
+        plugin_dir = (repo_root / source).resolve() if isinstance(source, str) else None
+        readme_preview: Optional[str] = None
+        if plugin_dir is not None:
+            readme_path = plugin_dir / "README.md"
+            if readme_path.is_file():
+                readme_preview = _extract_readme_preview(readme_path)
+
+        item: dict[str, Any] = {
+            "name": name,
+            "description": entry.get("description"),
+            "headline_commands": readme_preview,
+            "source": source,
+        }
+        if name in env_ready:
+            item["ready"] = env_ready[name]
+        plugins_out.append(item)
+
+    # Surface user extensions alongside built-in plugins.
+    extensions_out: list[dict[str, Any]] = []
+    extensions, _ext_load_errors = _load_extensions(workspace)
+    for ext in extensions:
+        extensions_out.append({
+            "name": ext["name"],
+            "description": ext.get("description"),
+            "enabled": bool(ext.get("enabled", True)),
+            "command_hash": _hash_command(ext["command"]),
+        })
+
+    if getattr(args, "names_only", False):
+        return {
+            "plugins": [p["name"] for p in plugins_out],
+            "count": len(plugins_out),
+            "extensions": [e["name"] for e in extensions_out],
+            "extensions_count": len(extensions_out),
+        }
+
+    return {
+        "plugins": plugins_out,
+        "count": len(plugins_out),
+        "extensions": extensions_out,
+        "extensions_count": len(extensions_out),
+    }
+
+
+# ─── extensions subcommand ───────────────────────────────────────────────────
+
+
+def cmd_extensions_list(args: argparse.Namespace) -> dict:
+    workspace, source = _resolve_for_read(args.dir)
+    extensions, errors = _load_extensions(workspace)
+    items: list[dict[str, Any]] = []
+    for ext in extensions:
+        cmd = ext["command"]
+        head = cmd[0] if cmd else ""
+        # Resolve relative argv[0] for the on-disk check, but DON'T leak the
+        # full path back unless explicitly --show-paths.
+        head_path = Path(head)
+        if not head_path.is_absolute():
+            candidate = workspace.parent / head
+        else:
+            candidate = head_path
+        on_disk = candidate.is_file() if head else False
+        items.append({
+            "name": ext["name"],
+            "description": ext.get("description"),
+            "command_hash": _hash_command(cmd),
+            "command_argc": len(cmd),
+            "timeout_seconds": ext["timeout_seconds"],
+            "enabled": ext["enabled"],
+            "on_disk": on_disk,
+        })
+
+    payload: dict[str, Any] = {
+        "workspace": str(workspace),
+        "source": source,
+        "extensions": items,
+        "count": len(items),
+    }
+    if errors:
+        payload["errors"] = errors
+    return payload
+
+
+def cmd_extensions_validate(args: argparse.Namespace) -> dict:
+    workspace, source = _resolve_for_read(args.dir)
+    path = workspace / EXTENSIONS_FILENAME
+    payload: dict[str, Any] = {
+        "workspace": str(workspace),
+        "source": source,
+        "extensions_file": str(path),
+        "exists": path.is_file(),
+    }
+    extensions, errors = _load_extensions(workspace)
+    issues: list[dict[str, Any]] = []
+    for err in errors:
+        issues.append({"level": "error", "message": err})
+
+    # Per-extension on-disk + name-collision report.
+    seen: set[str] = set()
+    for ext in extensions:
+        name = ext["name"]
+        if name in seen:
+            issues.append({
+                "level": "error", "name": name,
+                "message": "duplicate name in extensions.json",
+            })
+        seen.add(name)
+        if name in _builtin_plugin_names():
+            issues.append({
+                "level": "error", "name": name,
+                "message": "name collides with a built-in plugin",
+            })
+        head = ext["command"][0] if ext["command"] else ""
+        head_path = Path(head)
+        if not head_path.is_absolute():
+            candidate = workspace.parent / head
+        else:
+            candidate = head_path
+        if not candidate.is_file():
+            issues.append({
+                "level": "warning", "name": name,
+                "message": f"command[0] does not exist on disk (looked for {candidate.name})",
+            })
+
+    payload["count"] = len(extensions)
+    payload["issues"] = issues
+    payload["ok"] = not any(it["level"] == "error" for it in issues)
+    return payload
+
+
+def cmd_extensions_add(args: argparse.Namespace) -> dict:
+    workspace, source = _resolve_for_read(args.dir)
+    name = args.name
+    command = [args.command] + (list(args.command_arg) if args.command_arg else [])
+
+    candidate = {
+        "name": name,
+        "command": command,
+        "description": args.description,
+        "timeout_seconds": int(args.timeout) if args.timeout else EXTENSION_DEFAULT_TIMEOUT,
+        "enabled": True,
+    }
+    err = _validate_extension_config(candidate)
+    if err:
+        return {
+            "workspace": str(workspace),
+            "source": source,
+            "error": err,
+        }
+
+    existing, load_errors = _load_extensions(workspace)
+    if load_errors:
+        return {
+            "workspace": str(workspace),
+            "source": source,
+            "error": (
+                "refusing to modify extensions.json with pre-existing errors; "
+                "fix or remove the file first"
+            ),
+            "errors": load_errors,
+        }
+    if any(e["name"] == name for e in existing):
+        return {
+            "workspace": str(workspace),
+            "source": source,
+            "error": f"extension {name!r} already registered; use `extensions remove` first",
+        }
+
+    existing.append(candidate)
+    written = _save_extensions(workspace, existing)
+    return {
+        "workspace": str(workspace),
+        "source": source,
+        "added": name,
+        "command_hash": _hash_command(command),
+        "written_to": str(written),
+        "count": len(existing),
+    }
+
+
+def cmd_extensions_remove(args: argparse.Namespace) -> dict:
+    workspace, source = _resolve_for_read(args.dir)
+    name = args.name
+    existing, load_errors = _load_extensions(workspace)
+    if load_errors:
+        return {
+            "workspace": str(workspace),
+            "source": source,
+            "error": (
+                "refusing to modify extensions.json with pre-existing errors; "
+                "fix or remove the file first"
+            ),
+            "errors": load_errors,
+        }
+    remaining = [e for e in existing if e["name"] != name]
+    if len(remaining) == len(existing):
+        return {
+            "workspace": str(workspace),
+            "source": source,
+            "error": f"no extension named {name!r}",
+        }
+
+    written = _save_extensions(workspace, remaining)
+    return {
+        "workspace": str(workspace),
+        "source": source,
+        "removed": name,
+        "written_to": str(written),
+        "count": len(remaining),
+    }
+
+
+def cmd_extensions(args: argparse.Namespace) -> dict:
+    sub = getattr(args, "ext_cmd", None)
+    if sub == "list":
+        return cmd_extensions_list(args)
+    if sub == "validate":
+        return cmd_extensions_validate(args)
+    if sub == "add":
+        return cmd_extensions_add(args)
+    if sub == "remove":
+        return cmd_extensions_remove(args)
+    return {"error": "extensions subcommand required: list | validate | add | remove"}
+
+
+# ─── marketplace ─────────────────────────────────────────────────────────────
+#
+# Phase 1 (slice 1): `agent-plus marketplace init <user>/<name>` only.
+# Scaffolds a new `<user>/agent-plus-skills` repo's local files. Does NOT
+# run `gh repo create`; prints suggested follow-up invocations instead.
+# Install / update / list / remove are Phase 2 and live in a separate slice.
+
+MARKETPLACE_REQUIRED_NAME = "agent-plus-skills"
+MARKETPLACE_SLUG_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)/([A-Za-z0-9][A-Za-z0-9._-]*)$")
+MARKETPLACE_SCHEMA_VERSION = "0.1.0"
+MARKETPLACE_AGENT_PLUS_RANGE = ">=0.5"
+MARKETPLACE_DEFAULT_SURFACE = "claude-code"
+
+
+def _mit_license_text(year: int, owner: str) -> str:
+    return (
+        f"MIT License\n\n"
+        f"Copyright (c) {year} {owner}\n\n"
+        "Permission is hereby granted, free of charge, to any person obtaining a copy\n"
+        "of this software and associated documentation files (the \"Software\"), to deal\n"
+        "in the Software without restriction, including without limitation the rights\n"
+        "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n"
+        "copies of the Software, and to permit persons to whom the Software is\n"
+        "furnished to do so, subject to the following conditions:\n\n"
+        "The above copyright notice and this permission notice shall be included in all\n"
+        "copies or substantial portions of the Software.\n\n"
+        "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n"
+        "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n"
+        "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n"
+        "AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n"
+        "LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n"
+        "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n"
+        "SOFTWARE.\n"
+    )
+
+
+def _marketplace_readme(owner: str, name: str) -> str:
+    return (
+        f"# {name}\n\n"
+        f"An [agent-plus](https://github.com/osouthgate/agent-plus) marketplace published by **{owner}**.\n\n"
+        "This repo follows the `<user>/agent-plus-skills` convention: every skill it ships\n"
+        "is declared in [`marketplace.json`](./marketplace.json) at the repo root.\n\n"
+        "## Install\n\n"
+        "```bash\n"
+        f"agent-plus marketplace install {owner}/{name}\n"
+        "```\n\n"
+        "(Phase 2 — install is not implemented yet. For now, clone manually:)\n\n"
+        "```bash\n"
+        f"git clone https://github.com/{owner}/{name}.git ~/.agent-plus/marketplaces/{owner}-{name}\n"
+        "```\n\n"
+        "## Discovery\n\n"
+        "This repo is tagged with the `agent-plus-skills` GitHub topic so it surfaces in:\n\n"
+        "```bash\n"
+        "gh search repos topic:agent-plus-skills\n"
+        "```\n\n"
+        "## Schema\n\n"
+        "See the [marketplace convention](https://github.com/osouthgate/agent-plus) for the full\n"
+        "`marketplace.json` schema. This repo declares `agent_plus_version: \""
+        + MARKETPLACE_AGENT_PLUS_RANGE
+        + "\"` and `surface: \"claude-code\"`.\n\n"
+        "## License\n\n"
+        "MIT — see [LICENSE](./LICENSE).\n"
+    )
+
+
+_MARKETPLACE_GITIGNORE = (
+    "# agent-plus marketplace\n"
+    ".DS_Store\n"
+    "Thumbs.db\n"
+    "*.swp\n"
+    "*.bak\n"
+    ".idea/\n"
+    ".vscode/\n"
+    "__pycache__/\n"
+    "*.py[cod]\n"
+    "node_modules/\n"
+    ".env\n"
+    ".env.local\n"
+)
+
+
+def _marketplace_changelog(owner: str, name: str) -> str:
+    today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+    return (
+        f"# {name} — changelog\n\n"
+        "All notable changes to this marketplace.\n\n"
+        "Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.\n\n"
+        "## Unreleased\n\n"
+        f"## 0.1.0 - {today}\n\n"
+        f"Initial scaffold via `agent-plus marketplace init {owner}/{name}`.\n\n"
+        "### Added\n\n"
+        "- `marketplace.json` with empty `skills: []` and `agent_plus_version: \""
+        + MARKETPLACE_AGENT_PLUS_RANGE
+        + "\"`.\n"
+        "- README, MIT LICENSE, .gitignore.\n"
+    )
+
+
+def _marketplace_json(owner: str, name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "owner": owner,
+        "version": MARKETPLACE_SCHEMA_VERSION,
+        "agent_plus_version": MARKETPLACE_AGENT_PLUS_RANGE,
+        "surface": MARKETPLACE_DEFAULT_SURFACE,
+        "skills": [],
+        "homepage": f"https://github.com/{owner}/{name}",
+        "license": "MIT",
+    }
+
+
+def _marketplace_dir_is_empty(path: Path) -> bool:
+    """A directory is 'empty' if it doesn't exist OR it exists with no children."""
+    if not path.exists():
+        return True
+    if not path.is_dir():
+        return False
+    try:
+        next(path.iterdir())
+    except StopIteration:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _git_init_in(path: Path) -> tuple[bool, Optional[str]]:
+    """Run `git init` in path. Returns (initialized, note).
+    note is set if git is missing or init failed; not a hard error."""
+    if shutil.which("git") is None:
+        return False, "git not found on PATH; skipped `git init`"
+    try:
+        proc = subprocess.run(
+            ["git", "init", "--quiet"],
+            capture_output=True, text=True, timeout=10,
+            cwd=str(path), check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"git init failed to spawn: {e}"
+    if proc.returncode != 0:
+        msg = (proc.stderr or proc.stdout or "").strip()
+        return False, f"git init exited {proc.returncode}: {msg[:160]}"
+    return True, None
+
+
+def cmd_marketplace_init(args: argparse.Namespace) -> dict:
+    slug = args.slug
+    m = MARKETPLACE_SLUG_RE.match(slug)
+    if not m:
+        return {"error": f"invalid slug {slug!r}; expected `<user>/<name>`"}
+    owner, name = m.group(1), m.group(2)
+
+    if name != MARKETPLACE_REQUIRED_NAME:
+        return {
+            "error": (
+                f"v1 reserves the marketplace name `{MARKETPLACE_REQUIRED_NAME}`; "
+                f"got `{name}`"
+            ),
+            "slug": slug,
+        }
+
+    # Resolve target directory.
+    if args.path:
+        target = Path(args.path).expanduser().resolve()
+    else:
+        target = (Path.cwd() / name).resolve()
+
+    if not _marketplace_dir_is_empty(target):
+        return {
+            "error": f"target directory exists and is non-empty: {target}",
+            "path": str(target),
+        }
+
+    target.mkdir(parents=True, exist_ok=True)
+
+    files_written: list[str] = []
+
+    # marketplace.json
+    mj_path = target / "marketplace.json"
+    mj_path.write_text(
+        json.dumps(_marketplace_json(owner, name), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    files_written.append("marketplace.json")
+
+    # README.md
+    (target / "README.md").write_text(_marketplace_readme(owner, name), encoding="utf-8")
+    files_written.append("README.md")
+
+    # LICENSE
+    year = _dt.datetime.now(_dt.timezone.utc).year
+    (target / "LICENSE").write_text(_mit_license_text(year, owner), encoding="utf-8")
+    files_written.append("LICENSE")
+
+    # .gitignore
+    (target / ".gitignore").write_text(_MARKETPLACE_GITIGNORE, encoding="utf-8")
+    files_written.append(".gitignore")
+
+    # CHANGELOG.md
+    (target / "CHANGELOG.md").write_text(
+        _marketplace_changelog(owner, name), encoding="utf-8",
+    )
+    files_written.append("CHANGELOG.md")
+
+    # git init (best-effort).
+    git_initialized, git_note = _git_init_in(target)
+
+    next_steps = [
+        f"gh repo create {owner}/{name} --public --source . --remote origin",
+        f"gh repo edit {owner}/{name} --add-topic agent-plus-skills",
+        f"gh repo edit {owner}/{name} --add-topic claude-code",
+    ]
+
+    payload: dict[str, Any] = {
+        "marketplace": {
+            "path": str(target),
+            "owner": owner,
+            "name": name,
+            "files_written": files_written,
+            "git_initialized": git_initialized,
+            "next_steps": next_steps,
+        },
+    }
+    if git_note:
+        payload["marketplace"]["git_note"] = git_note
+    return payload
+
+
+def cmd_marketplace(args: argparse.Namespace) -> dict:
+    sub = getattr(args, "marketplace_cmd", None)
+    if sub == "init":
+        return cmd_marketplace_init(args)
+    return {
+        "error": (
+            "marketplace subcommand required: init "
+            "(install/update/list/remove are Phase 2)"
+        ),
+    }
+
+
+# ─── argparse ────────────────────────────────────────────────────────────────
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="agent-plus",
+        description="Workspace bootstrap for the agent-plus collection.",
+    )
+    p.add_argument("--version", action="store_true",
+                   help="print plugin version and exit")
+    p.add_argument("--pretty", action="store_true",
+                   help="pretty-print JSON output")
+    sub = p.add_subparsers(dest="cmd")
+
+    pretty_parent = argparse.ArgumentParser(add_help=False)
+    pretty_parent.add_argument("--pretty", action="store_true",
+                               help="pretty-print JSON output")
+    pretty_parent.add_argument("--dir", help="override workspace dir resolution "
+                                             "(creates/uses <PATH>/.agent-plus)")
+    pretty_parent.add_argument("--env-file", help="extra env file to load (highest "
+                                                  "precedence after CLI flags)")
+
+    sub.add_parser("init", help="create .agent-plus/ workspace files",
+                   parents=[pretty_parent])
+
+    sub.add_parser("envcheck", help="report which plugin env vars are set "
+                                    "(names only)",
+                   parents=[pretty_parent])
+
+    s_refresh = sub.add_parser(
+        "refresh",
+        help="resolve identity for supported plugins into services.json",
+        parents=[pretty_parent],
+    )
+    s_refresh.add_argument("--plugin", choices=sorted(REFRESH_HANDLERS),
+                           help="refresh only this plugin (default: all supported)")
+    s_refresh.add_argument("--no-extensions", action="store_true",
+                           help="skip user extensions defined in extensions.json")
+    s_refresh.add_argument("--extensions-only", action="store_true",
+                           help="run only user extensions; skip built-in handlers")
+
+    s_list = sub.add_parser(
+        "list",
+        help="discoverability — every plugin in marketplace.json with "
+             "headline-commands previews from each README",
+        parents=[pretty_parent],
+    )
+    s_list.add_argument("--names-only", action="store_true",
+                        help="return only the plugin names list")
+
+    s_ext = sub.add_parser(
+        "extensions",
+        help="manage user-defined refresh extensions (extensions.json)",
+        parents=[pretty_parent],
+    )
+    ext_sub = s_ext.add_subparsers(dest="ext_cmd")
+
+    ext_sub.add_parser("list", help="show registered extensions",
+                       parents=[pretty_parent])
+    ext_sub.add_parser("validate",
+                       help="dry-run validate extensions.json (no script execution)",
+                       parents=[pretty_parent])
+
+    s_add = ext_sub.add_parser("add", help="register a new extension",
+                               parents=[pretty_parent])
+    s_add.add_argument("--name", required=True,
+                       help="extension slug (lowercase, 1-31 chars)")
+    s_add.add_argument("--command", required=True,
+                       help="extension executable (argv[0])")
+    s_add.add_argument("--command-arg", action="append", default=[],
+                       help="additional argv element; repeatable")
+    s_add.add_argument("--description", help="human-readable description")
+    s_add.add_argument("--timeout", type=int,
+                       help="timeout in seconds (default 30)")
+
+    s_rm = ext_sub.add_parser("remove", help="remove an extension by name",
+                              parents=[pretty_parent])
+    s_rm.add_argument("--name", required=True, help="extension slug to remove")
+
+    # ── marketplace ────────────────────────────────────────────────────────
+    s_market = sub.add_parser(
+        "marketplace",
+        help="manage agent-plus marketplaces (Phase 1: `init` only)",
+        parents=[pretty_parent],
+    )
+    market_sub = s_market.add_subparsers(dest="marketplace_cmd")
+
+    s_minit = market_sub.add_parser(
+        "init",
+        help="scaffold a new <user>/agent-plus-skills marketplace repo locally",
+        parents=[pretty_parent],
+    )
+    s_minit.add_argument("slug", help="`<user>/<name>` slug; name must be `agent-plus-skills` for v1")
+    s_minit.add_argument("--path", help="override target directory (default: <cwd>/<name>/)")
+
+    return p
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    # Windows: default stdout is cp1252 which chokes on em-dashes/arrows from
+    # plugin READMEs. Force UTF-8 so list output round-trips cleanly.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        pass
+
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if args.version:
+        print(_plugin_version())
+        return 0
+
+    handlers = {
+        "init": cmd_init,
+        "envcheck": cmd_envcheck,
+        "refresh": cmd_refresh,
+        "list": cmd_list,
+        "extensions": cmd_extensions,
+        "marketplace": cmd_marketplace,
+    }
+    if args.cmd not in handlers:
+        parser.print_help()
+        return 2
+
+    try:
+        payload = handlers[args.cmd](args)
+    except SystemExit:
+        raise
+    except Exception as e:  # noqa: BLE001 — never crash with a stack trace
+        err = {"tool": _tool_meta(), "error": str(e), "cmd": args.cmd}
+        print(json.dumps(err), file=sys.stderr)
+        return 1
+
+    out = _with_tool_meta(payload)
+    indent = 2 if args.pretty else None
+    print(json.dumps(out, ensure_ascii=False, indent=indent))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

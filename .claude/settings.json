@@ -1,5 +1,15 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/.claude/hooks/agent-plus-context.py"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

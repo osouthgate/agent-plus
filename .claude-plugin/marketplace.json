@@ -9,6 +9,11 @@
   },
   "plugins": [
     {
+      "name": "agent-plus",
+      "source": "./agent-plus",
+      "description": "Workspace bootstrap for the agent-plus collection — init, envcheck, refresh services. One call to discover what's installed, what's configured, and what services this checkout already knows about. Names only, no values."
+    },
+    {
       "name": "hermes-remote",
       "source": "./hermes-remote",
       "description": "Remote CLI for managing a Hermes Agent deployment — cron jobs, env, status, model, config, and one-shot chat via /v1/chat/completions."
@@ -17,6 +22,11 @@
       "name": "coolify-remote",
       "source": "./coolify-remote",
       "description": "Remote CLI for Coolify PaaS — apps, env vars with post-write verification, domains, TLS, deploys with --wait, and app exec via SSH + docker exec."
+    },
+    {
+      "name": "diff-summary",
+      "source": "./diff-summary",
+      "description": "One-call structured triage of a git diff — per-file role classification (source/test/config/doc/generated/build/fixture/migration), risk tier with reasons, public-API touch detection, co-changed-test detection, secret-risk path flagging. Replaces the 5–20 Read calls an agent burns reading each modified file to figure out 'what kind of change is this'. Stdlib only, no network, stateless."
     },
     {
       "name": "hcloud-remote",
@@ -57,6 +67,11 @@
       "name": "linear-remote",
       "source": "./linear-remote",
       "description": "Read-first Linear GraphQL API wrapper — issues get/list/search/create/update/move/assign, project overviews with state-bucketed issues, name-resolved teams/states/labels/assignees, --from-markdown YAML frontmatter issue creation, zero API-key leakage."
+    },
+    {
+      "name": "repo-analyze",
+      "source": "./repo-analyze",
+      "description": "One-call cold-start orientation for an unfamiliar repo — file tree (capped), language mix, framework + build-tool detection, top-level deps, entrypoints, README highlights. Replaces ~67-grep + ~60-ls cold-start dance with one structured JSON blob. Stdlib only, no network, stateless."
     },
     {
       "name": "skill-feedback",

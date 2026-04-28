@@ -1,0 +1,1024 @@
+#!/usr/bin/env python3
+"""
+repo-analyze — one-call cold-start orientation for an unfamiliar repo.
+
+Replaces the ~67-grep + ~60-ls cold-start dance with a single structured JSON
+payload covering: file tree (capped), language mix, framework + build-tool
+detection, top-level deps, entrypoints, README highlights, and (optionally)
+the agent-plus `services.json` snapshot if the workspace has one.
+
+Usage:
+  repo-analyze [--path PATH] [--max-tree-files INT] [--max-tree-depth INT]
+               [--no-readme] [--output PATH] [--shape-depth N]
+               [--json|--pretty]
+
+Stdlib only. No network. Stateless.
+"""
+
+from __future__ import annotations
+
+import argparse
+import functools
+import json
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+try:
+    import tomllib  # Python 3.11+
+except ImportError:  # pragma: no cover
+    tomllib = None
+
+
+# ──────────────────────────── tool identity ────────────────────────────
+
+TOOL_NAME = "repo-analyze"
+
+
+@functools.lru_cache(maxsize=1)
+def _plugin_version() -> str:
+    try:
+        manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return str(data.get("version", "unknown"))
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+
+
+def _tool_meta() -> dict[str, str]:
+    return {"name": TOOL_NAME, "version": _plugin_version()}
+
+
+def _with_tool_meta(payload: Any) -> Any:
+    if isinstance(payload, dict) and "tool" not in payload:
+        return {"tool": _tool_meta(), **payload}
+    return payload
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ──────────────────────────── constants ────────────────────────────
+
+# Directories whose contents we never traverse for tree, languages, or
+# entrypoints. Non-negotiable performance floor.
+SKIP_DIRS = frozenset({
+    ".git", "node_modules", "__pycache__", ".venv", "venv", "env",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox",
+    "dist", "build", "target", ".next", ".turbo", "out",
+    ".cache", ".parcel-cache", ".nuxt", ".svelte-kit",
+    ".idea", ".vscode", ".gradle", ".terraform",
+    "coverage", ".nyc_output", "htmlcov",
+    "vendor",  # Go/PHP vendor dirs
+    "Pods",    # iOS
+})
+
+# Extension → language. Lowercased.
+LANG_BY_EXT: dict[str, str] = {
+    ".py": "python", ".pyi": "python",
+    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".ts": "typescript", ".tsx": "typescript",
+    ".rs": "rust",
+    ".go": "go",
+    ".java": "java", ".kt": "kotlin", ".kts": "kotlin",
+    ".rb": "ruby",
+    ".php": "php",
+    ".c": "c", ".h": "c",
+    ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".hh": "cpp",
+    ".cs": "csharp",
+    ".swift": "swift",
+    ".m": "objective-c", ".mm": "objective-c",
+    ".sh": "shell", ".bash": "shell", ".zsh": "shell",
+    ".ps1": "powershell",
+    ".lua": "lua",
+    ".r": "r", ".R": "r",
+    ".scala": "scala",
+    ".clj": "clojure", ".cljs": "clojure",
+    ".ex": "elixir", ".exs": "elixir",
+    ".erl": "erlang",
+    ".dart": "dart",
+    ".sql": "sql",
+    ".html": "html", ".htm": "html",
+    ".css": "css", ".scss": "css", ".sass": "css", ".less": "css",
+    ".vue": "vue",
+    ".svelte": "svelte",
+    ".md": "markdown",
+    ".yaml": "yaml", ".yml": "yaml",
+    ".toml": "toml",
+    ".json": "json",
+    ".tf": "terraform",
+}
+
+DEFAULT_MAX_TREE_FILES = 200
+DEFAULT_MAX_TREE_DEPTH = 4
+
+LOC_MAX_FILE_BYTES = 1024 * 1024  # 1 MB
+BINARY_SNIFF_BYTES = 8192
+DEPS_LIST_CAP = 50
+
+PACKAGE_JSON_WHITELIST = {
+    "name", "version",
+    "dependencies", "devDependencies", "peerDependencies", "optionalDependencies",
+    "scripts", "main", "bin", "engines", "type", "module",
+}
+PACKAGE_JSON_SCRIPTS_WHITELIST = {"build", "dev", "test", "start", "lint", "typecheck"}
+
+
+# ──────────────────────────── errors ────────────────────────────
+
+
+def die(msg: str, *, code: int = 1) -> None:
+    sys.stderr.write(f"{TOOL_NAME}: {msg}\n")
+    # Also emit a JSON error envelope on stdout so callers parsing JSON get
+    # a structured signal (matches diff-summary's contract).
+    err = _with_tool_meta({"error": msg, "analyzedAt": _now_iso()})
+    print(json.dumps(err))
+    sys.exit(code)
+
+
+# ──────────────────────────── path + traversal helpers ────────────────────────────
+
+
+def _is_binary(path: Path) -> bool:
+    """Cheap binary heuristic: NUL byte in the first 8KB."""
+    try:
+        with path.open("rb") as f:
+            chunk = f.read(BINARY_SNIFF_BYTES)
+    except OSError:
+        return True
+    return b"\x00" in chunk
+
+
+def _count_lines(path: Path) -> Optional[int]:
+    """Return LOC for a text source file, or None if skipped (binary/large/error)."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size > LOC_MAX_FILE_BYTES:
+        return None
+    if _is_binary(path):
+        return None
+    try:
+        with path.open("rb") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return None
+
+
+def _walk(root: Path, *, max_depth: int) -> list[tuple[Path, int]]:
+    """Breadth-first walk of root, skipping SKIP_DIRS. Returns list of
+    (file_or_dir_path, depth). Depth 0 = root itself (not yielded). Depth 1 =
+    direct children. We yield directories AND files so the tree builder can
+    show empty directories; language counter filters to files."""
+    out: list[tuple[Path, int]] = []
+    stack: list[tuple[Path, int]] = [(root, 0)]
+    while stack:
+        cur, depth = stack.pop(0)
+        if depth >= max_depth:
+            continue
+        try:
+            entries = sorted(cur.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except OSError:
+            continue
+        for entry in entries:
+            name = entry.name
+            try:
+                is_dir = entry.is_dir()
+            except OSError:
+                continue
+            if is_dir:
+                if name in SKIP_DIRS:
+                    continue
+                # Skip symlinked directories so a malicious or accidental
+                # symlink (e.g. node_modules → /) cannot escape the analyzed
+                # tree. We still report the symlink itself as a file entry.
+                try:
+                    if entry.is_symlink():
+                        continue
+                except OSError:
+                    continue
+                out.append((entry, depth + 1))
+                stack.append((entry, depth + 1))
+            else:
+                out.append((entry, depth + 1))
+    return out
+
+
+# ──────────────────────────── git ────────────────────────────
+
+
+def _git_info(root: Path) -> dict[str, Any]:
+    info: dict[str, Any] = {"isRepo": False, "branch": None, "remote": None, "headCommit": None}
+    if not (root / ".git").exists():
+        return info
+    info["isRepo"] = True
+
+    def _git(*args: str) -> Optional[str]:
+        try:
+            proc = subprocess.run(
+                ["git", *args],
+                capture_output=True, text=True, timeout=5, cwd=str(root), check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return None
+        if proc.returncode != 0:
+            return None
+        return (proc.stdout or "").strip() or None
+
+    info["branch"] = _git("rev-parse", "--abbrev-ref", "HEAD")
+    remote = _git("config", "--get", "remote.origin.url")
+    if remote:
+        # Normalise SSH form into HTTPS for readability.
+        m = re.match(r"git@([^:]+):(.+?)(?:\.git)?/?$", remote)
+        if m:
+            remote = f"https://{m.group(1)}/{m.group(2)}"
+        elif remote.endswith(".git"):
+            remote = remote[:-4]
+    info["remote"] = remote
+    head = _git("rev-parse", "HEAD")
+    if head:
+        info["headCommit"] = head[:7]
+    return info
+
+
+# ──────────────────────────── languages ────────────────────────────
+
+
+def _languages(files: list[Path]) -> dict[str, dict[str, Any]]:
+    by_lang: dict[str, dict[str, int]] = {}
+    for p in files:
+        ext = p.suffix.lower()
+        lang = LANG_BY_EXT.get(ext)
+        if not lang:
+            continue
+        loc = _count_lines(p)
+        if loc is None:
+            continue
+        bucket = by_lang.setdefault(lang, {"files": 0, "loc": 0})
+        bucket["files"] += 1
+        bucket["loc"] += loc
+    total_loc = sum(b["loc"] for b in by_lang.values()) or 1
+    out: dict[str, dict[str, Any]] = {}
+    for lang, b in sorted(by_lang.items(), key=lambda kv: -kv[1]["loc"]):
+        out[lang] = {
+            "files": b["files"],
+            "loc": b["loc"],
+            "percent": round(100.0 * b["loc"] / total_loc, 1),
+        }
+    return out
+
+
+# ──────────────────────────── manifest parsers ────────────────────────────
+
+
+def _parse_package_json(path: Path) -> Optional[dict[str, Any]]:
+    """Whitelist-only — never echo unknown keys (Pattern 5)."""
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    for k in PACKAGE_JSON_WHITELIST:
+        if k not in raw:
+            continue
+        v = raw[k]
+        if k == "scripts" and isinstance(v, dict):
+            out["scripts"] = {sk: sv for sk, sv in v.items()
+                              if sk in PACKAGE_JSON_SCRIPTS_WHITELIST and isinstance(sv, str)}
+        else:
+            out[k] = v
+    return out
+
+
+def _parse_pyproject(path: Path) -> Optional[dict[str, Any]]:
+    if tomllib is None:
+        return None
+    try:
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    project = raw.get("project") if isinstance(raw.get("project"), dict) else {}
+    tool = raw.get("tool") if isinstance(raw.get("tool"), dict) else {}
+    poetry = tool.get("poetry") if isinstance(tool, dict) and isinstance(tool.get("poetry"), dict) else {}
+
+    deps: list[str] = []
+    dev_deps: list[str] = []
+
+    raw_deps = project.get("dependencies") if isinstance(project, dict) else None
+    if isinstance(raw_deps, list):
+        for d in raw_deps:
+            if isinstance(d, str):
+                deps.append(_strip_pep508(d))
+
+    poetry_deps = poetry.get("dependencies") if isinstance(poetry, dict) else None
+    if isinstance(poetry_deps, dict):
+        for k in poetry_deps.keys():
+            if k != "python":
+                deps.append(str(k))
+    poetry_dev = poetry.get("dev-dependencies") if isinstance(poetry, dict) else None
+    if isinstance(poetry_dev, dict):
+        dev_deps.extend(str(k) for k in poetry_dev.keys())
+    poetry_groups = poetry.get("group") if isinstance(poetry, dict) else None
+    if isinstance(poetry_groups, dict):
+        for grp in poetry_groups.values():
+            if isinstance(grp, dict) and isinstance(grp.get("dependencies"), dict):
+                dev_deps.extend(str(k) for k in grp["dependencies"].keys())
+
+    scripts: dict[str, str] = {}
+    project_scripts = project.get("scripts") if isinstance(project, dict) else None
+    if isinstance(project_scripts, dict):
+        for k, v in project_scripts.items():
+            if isinstance(k, str) and isinstance(v, str):
+                scripts[k] = v
+
+    return {
+        "name": project.get("name") if isinstance(project, dict) else None,
+        "version": project.get("version") if isinstance(project, dict) else None,
+        "dependencies": deps,
+        "devDependencies": dev_deps,
+        "scripts": scripts,
+    }
+
+
+def _strip_pep508(spec: str) -> str:
+    """`fastapi>=0.100,<1.0` → `fastapi`."""
+    m = re.match(r"\s*([A-Za-z0-9_.\-]+)", spec)
+    return m.group(1) if m else spec.strip()
+
+
+def _parse_requirements_txt(path: Path) -> list[str]:
+    out: list[str] = []
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or line.startswith("-"):
+                continue
+            if line.startswith("git+") or line.startswith("http"):
+                continue
+            out.append(_strip_pep508(line))
+    except OSError:
+        return out
+    return out
+
+
+def _parse_cargo_toml(path: Path) -> Optional[dict[str, Any]]:
+    if tomllib is None:
+        return None
+    try:
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    package = raw.get("package") if isinstance(raw.get("package"), dict) else {}
+    deps = raw.get("dependencies") if isinstance(raw.get("dependencies"), dict) else {}
+    dev_deps = raw.get("dev-dependencies") if isinstance(raw.get("dev-dependencies"), dict) else {}
+    bins: list[str] = []
+    raw_bins = raw.get("bin")
+    if isinstance(raw_bins, list):
+        for b in raw_bins:
+            if isinstance(b, dict) and isinstance(b.get("name"), str):
+                bins.append(b["name"])
+    return {
+        "name": package.get("name") if isinstance(package, dict) else None,
+        "version": package.get("version") if isinstance(package, dict) else None,
+        "dependencies": list(deps.keys()),
+        "devDependencies": list(dev_deps.keys()),
+        "bins": bins,
+    }
+
+
+def _parse_go_mod(path: Path) -> Optional[dict[str, Any]]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    module = None
+    deps: list[str] = []
+    in_require = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("module "):
+            module = line.split(None, 1)[1].strip().strip('"')
+        elif line.startswith("require ("):
+            in_require = True
+            continue
+        elif in_require and line == ")":
+            in_require = False
+        elif in_require:
+            # `cloud.google.com/go v0.110.0 // indirect`
+            parts = line.split()
+            if parts and parts[0] != "//":
+                deps.append(parts[0])
+        elif line.startswith("require "):
+            parts = line.split()
+            if len(parts) >= 2:
+                deps.append(parts[1])
+    return {"module": module, "dependencies": deps}
+
+
+def _parse_gemfile(path: Path) -> list[str]:
+    out: list[str] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        m = re.match(r"gem\s+['\"]([^'\"]+)['\"]", line)
+        if m:
+            out.append(m.group(1))
+    return out
+
+
+def _truncate(items: list[str], cap: int = DEPS_LIST_CAP) -> tuple[list[str], bool]:
+    if len(items) <= cap:
+        return items, False
+    return items[:cap], True
+
+
+# ──────────────────────────── framework + build-tool detection ────────────────────────────
+
+
+def _detect_frameworks(root: Path, deps_node: list[str], deps_python: list[str],
+                       deps_rust: list[str], deps_go: list[str]) -> list[dict[str, Any]]:
+    frameworks: list[dict[str, Any]] = []
+    node_set = {d.lower() for d in deps_node}
+    py_set = {d.lower() for d in deps_python}
+    rust_set = {d.lower() for d in deps_rust}
+    go_set = {d.lower() for d in deps_go}
+
+    def _add(name: str, evidence: str, confidence: str = "high") -> None:
+        frameworks.append({"name": name, "evidence": evidence, "confidence": confidence})
+
+    # Node frameworks (manifest evidence)
+    if "next" in node_set:
+        _add("Next.js", "package.json:next")
+    if "react" in node_set:
+        _add("React", "package.json:react")
+    if "vue" in node_set:
+        _add("Vue", "package.json:vue")
+    if "svelte" in node_set:
+        _add("Svelte", "package.json:svelte")
+    if "@sveltejs/kit" in node_set:
+        _add("SvelteKit", "package.json:@sveltejs/kit")
+    if "nuxt" in node_set:
+        _add("Nuxt", "package.json:nuxt")
+    if "express" in node_set:
+        _add("Express", "package.json:express")
+    if "fastify" in node_set:
+        _add("Fastify", "package.json:fastify")
+    if "hono" in node_set:
+        _add("Hono", "package.json:hono")
+    if "tailwindcss" in node_set:
+        _add("TailwindCSS", "package.json:tailwindcss")
+    elif any((root / f).exists() for f in
+             ("tailwind.config.js", "tailwind.config.ts", "tailwind.config.cjs", "tailwind.config.mjs")):
+        _add("TailwindCSS", "tailwind.config.*", confidence="medium")
+    if "vite" in node_set:
+        _add("Vite", "package.json:vite")
+    if "astro" in node_set:
+        _add("Astro", "package.json:astro")
+    if "remix" in node_set or "@remix-run/react" in node_set:
+        _add("Remix", "package.json:@remix-run/*")
+
+    # Python frameworks
+    for f, label in [
+        ("fastapi", "FastAPI"), ("flask", "Flask"), ("django", "Django"),
+        ("starlette", "Starlette"), ("tornado", "Tornado"),
+        ("pydantic", "Pydantic"), ("sqlalchemy", "SQLAlchemy"),
+        ("pytest", "pytest"), ("celery", "Celery"),
+    ]:
+        if f in py_set:
+            _add(label, f"python:{f}")
+
+    # Rust frameworks
+    for f, label in [
+        ("actix-web", "Actix Web"), ("axum", "Axum"), ("rocket", "Rocket"),
+        ("warp", "Warp"), ("tokio", "Tokio"), ("serde", "Serde"),
+    ]:
+        if f in rust_set:
+            _add(label, f"Cargo.toml:{f}")
+
+    # Go frameworks (substring check — go modules are full paths)
+    for sub, label in [
+        ("github.com/gin-gonic/gin", "Gin"),
+        ("github.com/gorilla/mux", "Gorilla Mux"),
+        ("github.com/labstack/echo", "Echo"),
+        ("github.com/gofiber/fiber", "Fiber"),
+    ]:
+        if any(sub in d for d in go_set):
+            _add(label, f"go.mod:{sub}")
+
+    return frameworks
+
+
+def _detect_build_tools(root: Path) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    checks = [
+        ("pnpm", "pnpm-lock.yaml"),
+        ("yarn", "yarn.lock"),
+        ("npm", "package-lock.json"),
+        ("bun", "bun.lockb"),
+        ("cargo", "Cargo.lock"),
+        ("go-modules", "go.sum"),
+        ("poetry", "poetry.lock"),
+        ("uv", "uv.lock"),
+        ("pipenv", "Pipfile.lock"),
+        ("bundler", "Gemfile.lock"),
+        ("composer", "composer.lock"),
+        ("Docker", "Dockerfile"),
+        ("docker-compose", "docker-compose.yml"),
+        ("Make", "Makefile"),
+        ("CMake", "CMakeLists.txt"),
+        ("Gradle", "build.gradle"),
+        ("Maven", "pom.xml"),
+        ("Bazel", "WORKSPACE"),
+        ("Turborepo", "turbo.json"),
+        ("Nx", "nx.json"),
+    ]
+    for name, fname in checks:
+        if (root / fname).exists():
+            out.append({"name": name, "evidence": fname})
+    # docker-compose alternates
+    for alt in ("docker-compose.yaml", "compose.yml", "compose.yaml"):
+        if (root / alt).exists() and not any(b["name"] == "docker-compose" for b in out):
+            out.append({"name": "docker-compose", "evidence": alt})
+    return out
+
+
+# ──────────────────────────── deps aggregation ────────────────────────────
+
+
+def _collect_deps(root: Path) -> dict[str, Any]:
+    deps: dict[str, Any] = {"node": None, "python": None, "rust": None, "go": None, "ruby": None}
+
+    pkg = root / "package.json"
+    if pkg.exists():
+        parsed = _parse_package_json(pkg)
+        if parsed is not None:
+            runtime = list((parsed.get("dependencies") or {}).keys())
+            dev = list((parsed.get("devDependencies") or {}).keys())
+            runtime, runtime_t = _truncate(runtime)
+            dev, dev_t = _truncate(dev)
+            deps["node"] = {"runtime": runtime, "dev": dev,
+                            "truncated": runtime_t or dev_t,
+                            "name": parsed.get("name"),
+                            "version": parsed.get("version")}
+
+    pyproj = root / "pyproject.toml"
+    py_runtime: list[str] = []
+    py_dev: list[str] = []
+    if pyproj.exists():
+        parsed_py = _parse_pyproject(pyproj)
+        if parsed_py is not None:
+            py_runtime = list(parsed_py.get("dependencies") or [])
+            py_dev = list(parsed_py.get("devDependencies") or [])
+    req = root / "requirements.txt"
+    if req.exists():
+        py_runtime.extend(_parse_requirements_txt(req))
+    if py_runtime or py_dev or pyproj.exists() or req.exists():
+        runtime, rt = _truncate(py_runtime)
+        dev, dvt = _truncate(py_dev)
+        deps["python"] = {"runtime": runtime, "dev": dev, "truncated": rt or dvt}
+
+    cargo = root / "Cargo.toml"
+    if cargo.exists():
+        parsed_rs = _parse_cargo_toml(cargo)
+        if parsed_rs is not None:
+            runtime, rt = _truncate(parsed_rs.get("dependencies") or [])
+            dev, dvt = _truncate(parsed_rs.get("devDependencies") or [])
+            deps["rust"] = {"runtime": runtime, "dev": dev, "truncated": rt or dvt,
+                            "name": parsed_rs.get("name"), "version": parsed_rs.get("version")}
+
+    gomod = root / "go.mod"
+    if gomod.exists():
+        parsed_go = _parse_go_mod(gomod)
+        if parsed_go is not None:
+            runtime, rt = _truncate(parsed_go.get("dependencies") or [])
+            deps["go"] = {"runtime": runtime, "truncated": rt,
+                          "module": parsed_go.get("module")}
+
+    gem = root / "Gemfile"
+    if gem.exists():
+        gems = _parse_gemfile(gem)
+        runtime, rt = _truncate(gems)
+        deps["ruby"] = {"runtime": runtime, "truncated": rt}
+
+    return deps
+
+
+# ──────────────────────────── entrypoints ────────────────────────────
+
+
+def _entrypoints(root: Path, deps: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+
+    # Node: package.json main / bin
+    pkg = root / "package.json"
+    if pkg.exists():
+        parsed = _parse_package_json(pkg)
+        if isinstance(parsed, dict):
+            main = parsed.get("main")
+            if isinstance(main, str) and main:
+                out.append({"path": main, "kind": "node-main"})
+            bin_field = parsed.get("bin")
+            if isinstance(bin_field, str):
+                out.append({"path": bin_field, "kind": "node-bin"})
+            elif isinstance(bin_field, dict):
+                for name, p in bin_field.items():
+                    if isinstance(p, str):
+                        out.append({"path": p, "kind": f"node-bin:{name}"})
+
+    # pyproject [project.scripts]
+    pyproj = root / "pyproject.toml"
+    if pyproj.exists() and tomllib is not None:
+        try:
+            raw = tomllib.loads(pyproj.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError):
+            raw = {}
+        scripts = (raw.get("project") or {}).get("scripts") if isinstance(raw, dict) else None
+        if isinstance(scripts, dict):
+            for name, target in scripts.items():
+                if isinstance(name, str) and isinstance(target, str):
+                    out.append({"path": target, "kind": f"python-script:{name}"})
+
+    # Cargo [[bin]]
+    cargo = root / "Cargo.toml"
+    if cargo.exists() and tomllib is not None:
+        try:
+            raw = tomllib.loads(cargo.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError, ValueError, UnicodeDecodeError):
+            raw = {}
+        bins = raw.get("bin") if isinstance(raw, dict) else None
+        if isinstance(bins, list):
+            for b in bins:
+                if isinstance(b, dict) and isinstance(b.get("path"), str):
+                    out.append({"path": b["path"], "kind": f"rust-bin:{b.get('name', '?')}"})
+        if (root / "src" / "main.rs").exists():
+            out.append({"path": "src/main.rs", "kind": "rust-bin"})
+        if (root / "src" / "lib.rs").exists():
+            out.append({"path": "src/lib.rs", "kind": "rust-lib"})
+
+    # Go: cmd/*/main.go
+    cmd = root / "cmd"
+    if cmd.is_dir():
+        try:
+            for child in cmd.iterdir():
+                if child.is_dir() and (child / "main.go").exists():
+                    out.append({"path": f"cmd/{child.name}/main.go", "kind": f"go-bin:{child.name}"})
+        except OSError:
+            pass
+    if (root / "main.go").exists():
+        out.append({"path": "main.go", "kind": "go-bin"})
+
+    # Well-known files
+    candidates = [
+        ("src/index.ts", "ts-entry"),
+        ("src/index.tsx", "ts-entry"),
+        ("src/index.js", "js-entry"),
+        ("src/index.jsx", "js-entry"),
+        ("src/main.ts", "ts-entry"),
+        ("src/main.tsx", "ts-entry"),
+        ("src/main.py", "python-entry"),
+        ("src/main.rs", "rust-entry"),
+        ("src/main.go", "go-entry"),
+        ("app/page.tsx", "next-page"),
+        ("app/page.jsx", "next-page"),
+        ("src/app/page.tsx", "next-page"),
+        ("src/app/page.jsx", "next-page"),
+        ("pages/_app.tsx", "next-pages-app"),
+        ("pages/index.tsx", "next-pages-index"),
+        ("manage.py", "django-manage"),
+        ("wsgi.py", "wsgi"),
+        ("asgi.py", "asgi"),
+        ("app.py", "python-entry"),
+        ("main.py", "python-entry"),
+        ("index.html", "html-entry"),
+    ]
+    seen: set[str] = {e["path"] for e in out}
+    for rel, kind in candidates:
+        p = root / rel
+        if p.exists() and rel not in seen:
+            out.append({"path": rel, "kind": kind})
+            seen.add(rel)
+
+    return out
+
+
+# ──────────────────────────── tree ────────────────────────────
+
+
+def _build_tree(root: Path, *, max_files: int, max_depth: int) -> dict[str, Any]:
+    """Capped breadth-first tree. Includes dirs + files, sorted dirs-first then
+    alphabetical per parent. LOC included for source files (omitted for binary
+    or oversized)."""
+    walked = _walk(root, max_depth=max_depth)
+    total_files = sum(1 for p, _ in walked if not p.is_dir())
+    entries: list[dict[str, Any]] = []
+    shown = 0
+    for path, depth in walked:
+        if shown >= max_files:
+            break
+        rel = path.relative_to(root).as_posix()
+        try:
+            is_dir = path.is_dir()
+        except OSError:
+            continue
+        if is_dir:
+            entries.append({"path": rel + "/", "type": "dir", "depth": depth})
+        else:
+            ext = path.suffix.lower()
+            entry: dict[str, Any] = {"path": rel, "type": "file", "depth": depth}
+            if ext in LANG_BY_EXT:
+                loc = _count_lines(path)
+                if loc is not None:
+                    entry["loc"] = loc
+            entries.append(entry)
+        shown += 1
+    return {
+        "totalFiles": total_files,
+        "shown": len([e for e in entries if e["type"] == "file"]),
+        "totalEntries": len(entries),
+        "truncated": shown >= max_files and len(walked) > shown,
+        "maxDepth": max_depth,
+        "entries": entries,
+    }
+
+
+# ──────────────────────────── README ────────────────────────────
+
+
+def _readme_highlights(root: Path) -> Optional[dict[str, Any]]:
+    for name in ("README.md", "README.rst", "README.txt", "README"):
+        p = root / name
+        if p.is_file():
+            return _parse_readme(p, name)
+    return None
+
+
+def _parse_readme(path: Path, name: str) -> dict[str, Any]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {"path": name, "title": None, "firstParagraph": None, "headings": []}
+    lines = text.splitlines()
+
+    # Title: first H1, or first non-empty non-heading line.
+    title: Optional[str] = None
+    title_idx = -1
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if s.startswith("# "):
+            title = s[2:].strip()
+            title_idx = i
+            break
+    if title is None:
+        for i, line in enumerate(lines):
+            s = line.strip()
+            if s:
+                title = s.lstrip("#").strip() or None
+                title_idx = i
+                break
+
+    # First paragraph: text after the title until a blank line or next heading.
+    first_para_lines: list[str] = []
+    in_code = False
+    for line in lines[title_idx + 1:] if title_idx >= 0 else lines:
+        s = line.rstrip()
+        if s.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            continue
+        if not s.strip():
+            if first_para_lines:
+                break
+            continue
+        if s.lstrip().startswith("#"):
+            break
+        first_para_lines.append(s.strip())
+    first_paragraph = " ".join(first_para_lines) if first_para_lines else None
+    if first_paragraph and len(first_paragraph) > 800:
+        first_paragraph = first_paragraph[:800] + "…"
+
+    # H2 headings, capped at 20.
+    headings: list[str] = []
+    in_code = False
+    for line in lines:
+        s = line.strip()
+        if s.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            continue
+        if s.startswith("## "):
+            headings.append(s[3:].strip())
+            if len(headings) >= 20:
+                break
+
+    return {
+        "path": name,
+        "title": title,
+        "firstParagraph": first_paragraph,
+        "headings": headings,
+    }
+
+
+# ──────────────────────────── agent-plus enrichment ────────────────────────────
+
+
+def _agent_plus_services(root: Path) -> Optional[dict[str, Any]]:
+    """Walk up from `root` looking for `.agent-plus/services.json`. Pluck the
+    service names + statuses only — never IDs, never project lists."""
+    cur = root.resolve()
+    while True:
+        candidate = cur / ".agent-plus" / "services.json"
+        if candidate.is_file():
+            try:
+                raw = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+            services = raw.get("services") if isinstance(raw, dict) else None
+            if not isinstance(services, dict):
+                return None
+            out: dict[str, Any] = {}
+            for name, info in services.items():
+                if isinstance(info, dict):
+                    out[name] = {"status": info.get("status")}
+                else:
+                    out[name] = {"status": None}
+            return {"path": str(candidate), "services": out}
+        if cur.parent == cur:
+            return None
+        cur = cur.parent
+
+
+# ──────────────────────────── analyze (top level) ────────────────────────────
+
+
+def analyze(root: Path, *, max_tree_files: int, max_tree_depth: int,
+            include_readme: bool) -> dict[str, Any]:
+    walked = _walk(root, max_depth=max_tree_depth)
+    files = [p for p, _ in walked if not p.is_dir()]
+
+    deps = _collect_deps(root)
+    deps_node = list((deps.get("node") or {}).get("runtime") or []) + list((deps.get("node") or {}).get("dev") or [])
+    deps_python = list((deps.get("python") or {}).get("runtime") or []) + list((deps.get("python") or {}).get("dev") or [])
+    deps_rust = list((deps.get("rust") or {}).get("runtime") or []) + list((deps.get("rust") or {}).get("dev") or [])
+    deps_go = list((deps.get("go") or {}).get("runtime") or [])
+
+    out: dict[str, Any] = {
+        "path": str(root.resolve()),
+        "analyzedAt": _now_iso(),
+        "git": _git_info(root),
+        "languages": _languages(files),
+        "frameworks": _detect_frameworks(root, deps_node, deps_python, deps_rust, deps_go),
+        "buildTools": _detect_build_tools(root),
+        "deps": deps,
+        "entrypoints": _entrypoints(root, deps),
+        "tree": _build_tree(root, max_files=max_tree_files, max_depth=max_tree_depth),
+    }
+    if include_readme:
+        out["readme"] = _readme_highlights(root)
+
+    out["agentPlusServices"] = _agent_plus_services(root)
+    return out
+
+
+# ──────────────────────────── envelope offload (mirrors railway-ops) ────────────────────────────
+
+
+def _payload_shape(payload: dict, depth: int = 3) -> dict[str, dict[str, Any]]:
+    if depth < 1 or not isinstance(payload, dict):
+        return {}
+    return {k: _shape_value(v, depth) for k, v in payload.items() if k != "tool"}
+
+
+def _shape_value(v: Any, depth: int) -> dict[str, Any]:
+    if isinstance(v, str):
+        return {"type": "string", "length": len(v)}
+    if isinstance(v, bool):
+        return {"type": "boolean"}
+    if isinstance(v, (int, float)):
+        return {"type": "number"}
+    if isinstance(v, list):
+        out: dict[str, Any] = {"type": "list", "length": len(v)}
+        if depth > 1 and v:
+            out["sample"] = _shape_value(v[0], depth - 1)
+        return out
+    if isinstance(v, dict):
+        out = {"type": "dict", "keys": len(v)}
+        if depth > 1:
+            out["shape"] = {k: _shape_value(val, depth - 1) for k, val in v.items()}
+        return out
+    if v is None:
+        return {"type": "null"}
+    return {"type": type(v).__name__}
+
+
+def _write_output_file(payload: Any, output_path: str, *, shape_depth: int = 3) -> dict[str, Any]:
+    path = Path(output_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2, default=str)
+    path.write_text(text, encoding="utf-8")
+    tool = payload.get("tool") if isinstance(payload, dict) else None
+    summary: dict[str, Any] = {
+        "tool": tool or _tool_meta(),
+        "payloadPath": str(path),
+        "bytes": len(text.encode("utf-8")),
+        "fileLineCount": text.count("\n") + 1,
+    }
+    if isinstance(payload, dict):
+        summary["payloadKeys"] = [k for k in payload.keys() if k != "tool"]
+        summary["payloadShape"] = _payload_shape(payload, depth=shape_depth)
+    return summary
+
+
+def emit(data: Any, *, pretty: bool, output: Optional[str], shape_depth: int) -> None:
+    wrapped = _with_tool_meta(data)
+    if output and isinstance(wrapped, (dict, list)):
+        wrapped = _write_output_file(wrapped, output, shape_depth=shape_depth)
+    if pretty:
+        print(json.dumps(wrapped, indent=2, default=str))
+    else:
+        print(json.dumps(wrapped, default=str))
+
+
+# ──────────────────────────── CLI ────────────────────────────
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog=TOOL_NAME,
+        description="One-call cold-start orientation for an unfamiliar repo.",
+    )
+    p.add_argument("--version", action="version",
+                   version=f"{TOOL_NAME} {_plugin_version()}")
+    p.add_argument("--path", default=".",
+                   help="directory to analyze (default: cwd)")
+    p.add_argument("--max-tree-files", type=int, default=DEFAULT_MAX_TREE_FILES,
+                   dest="max_tree_files",
+                   help=f"cap files in the tree section (default: {DEFAULT_MAX_TREE_FILES})")
+    p.add_argument("--max-tree-depth", type=int, default=DEFAULT_MAX_TREE_DEPTH,
+                   dest="max_tree_depth",
+                   help=f"cap directory depth (default: {DEFAULT_MAX_TREE_DEPTH})")
+
+    readme_group = p.add_mutually_exclusive_group()
+    readme_group.add_argument("--include-readme", dest="include_readme", action="store_true",
+                              default=True, help="include README highlights (default)")
+    readme_group.add_argument("--no-readme", dest="include_readme", action="store_false",
+                              help="omit README highlights")
+
+    p.add_argument("--output", metavar="PATH", default=None,
+                   help=("write the full JSON payload to PATH and print a compact "
+                         "summary (payloadPath, bytes, payloadKeys, payloadShape). Use "
+                         "this when the response is large enough that routing it "
+                         "through the model's context is wasteful."))
+    p.add_argument("--shape-depth", type=int, choices=[1, 2, 3], default=3,
+                   dest="shape_depth",
+                   help=("how deep payloadShape recurses (1=top-level types only, "
+                         "2=one layer down, 3=two layers down [default]). Only "
+                         "affects the --output envelope."))
+    fmt = p.add_mutually_exclusive_group()
+    fmt.add_argument("--json", dest="pretty", action="store_false", default=False,
+                     help="compact JSON output (default)")
+    fmt.add_argument("--pretty", dest="pretty", action="store_true",
+                     help="pretty-print JSON output")
+    return p
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    args = build_parser().parse_args(argv)
+    root = Path(args.path).expanduser()
+    if not root.exists():
+        die(f"--path not found: {args.path}")
+    if not root.is_dir():
+        die(f"--path is not a directory: {args.path}")
+    if args.max_tree_files < 1:
+        die("--max-tree-files must be >= 1")
+    if args.max_tree_depth < 1:
+        die("--max-tree-depth must be >= 1")
+    data = analyze(
+        root,
+        max_tree_files=args.max_tree_files,
+        max_tree_depth=args.max_tree_depth,
+        include_readme=args.include_readme,
+    )
+    emit(data, pretty=args.pretty, output=args.output, shape_depth=args.shape_depth)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
