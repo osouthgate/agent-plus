@@ -10,10 +10,11 @@ standard `tool: {name, version}` envelope:
   envcheck   for every installed sibling plugin, report which required
              env-var prefixes are set. NAMES ONLY — values never land
              on disk or in stdout.
-  refresh    resolve identity for github-remote and vercel-remote
-             (lightest API endpoints) and cache the IDs/names into
-             `.agent-plus/services.json`. Out-of-scope plugins are
-             not touched in v0.1.0.
+  refresh    discover `refresh_handler` declarations across installed
+             plugins (walking ~/.claude/plugins/cache/) and run each
+             one, caching the identity output into
+             `.agent-plus/services.json`. Plugins without a
+             refresh_handler block silently don't participate.
 
 Workspace dir resolution (highest first), MUST match skill-feedback so
 both plugins share one `.agent-plus/`:
@@ -557,352 +558,206 @@ def _http_request_json(
         return status, {"raw": body[:500]}
 
 
-def _refresh_github(cfg: dict[str, str]) -> dict[str, Any]:
-    """Resolve github-remote identity. Parses git remote in cwd; if a token
-    is available, hits GET /repos/{owner}/{repo} for the default branch.
-    NAMES + IDs only, no token ever appears in output."""
-    out: dict[str, Any] = {"plugin": "github-remote"}
+def _claude_plugins_cache_dir() -> Path:
+    """Return ~/.claude/plugins/cache regardless of platform."""
+    return Path.home() / ".claude" / "plugins" / "cache"
 
-    # Parse origin URL.
-    try:
-        proc = subprocess.run(
-            ["git", "config", "--get", "remote.origin.url"],
-            capture_output=True, text=True, timeout=5, check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as e:
-        out["status"] = "unconfigured"
-        out["reason"] = f"git not available: {e}"
-        return out
-    if proc.returncode != 0:
-        out["status"] = "unconfigured"
-        out["reason"] = "no git remote in cwd"
-        return out
 
-    url = (proc.stdout or "").strip()
-    m = _GIT_REPO_URL_RE.search(url)
-    if not m:
-        out["status"] = "unconfigured"
-        out["reason"] = f"could not parse github remote: {url[:80]}"
-        return out
-    owner, repo = m.group(1), m.group(2)
-    out["owner"] = owner
-    out["repo"] = repo
-
-    token = cfg.get("GITHUB_TOKEN", "").strip()
-    if not token:
-        # Try `gh auth token` fallback.
+def _natural_version_key(s: str) -> tuple:
+    """Sort key that turns "0.10.0" > "0.9.0" rather than the lexicographic
+    opposite. Falls back to the original string if a part isn't an int."""
+    parts: list = []
+    for chunk in re.split(r"\.+", s):
         try:
-            gh = subprocess.run(
-                ["gh", "auth", "token"],
-                capture_output=True, text=True, timeout=5, check=False,
+            parts.append((0, int(chunk)))
+        except ValueError:
+            parts.append((1, chunk))
+    return tuple(parts)
+
+
+def _validate_refresh_handler_block(
+    name: str, block: Any
+) -> tuple[Optional[dict], Optional[str]]:
+    """Normalize and validate one plugin.json refresh_handler block.
+
+    Returns (normalized_block, None) on success, (None, error_msg) on failure.
+    """
+    if not isinstance(block, dict):
+        return None, f"{name}: refresh_handler must be an object"
+    cmd = block.get("command")
+    if not isinstance(cmd, str) or not cmd.strip():
+        return None, f"{name}: refresh_handler.command must be a non-empty string"
+    timeout = block.get("timeout_seconds", 10)
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        return None, f"{name}: refresh_handler.timeout_seconds must be a positive int"
+    keys = block.get("identity_keys", [])
+    if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
+        return None, f"{name}: refresh_handler.identity_keys must be a list of strings"
+    failure_mode = block.get("failure_mode", "soft")
+    if failure_mode not in ("soft", "hard"):
+        return None, f"{name}: refresh_handler.failure_mode must be 'soft' or 'hard'"
+    return {
+        "command": cmd.strip(),
+        "timeout_seconds": int(timeout),
+        "identity_keys": list(keys),
+        "failure_mode": failure_mode,
+    }, None
+
+
+def _discover_refresh_handlers(
+    cache_dir: Optional[Path] = None,
+) -> tuple[dict, list]:
+    """Walk ~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/.claude-plugin/plugin.json
+    and return ({plugin_name: refresh_handler_block}, [load_errors]).
+
+    For plugins with multiple cached versions, the highest-version directory
+    wins. Plugins without a `refresh_handler` block are silently skipped.
+    Defensive on every step: missing cache dir, malformed plugin.json, etc.
+    all degrade to "no handler" rather than crashing.
+    """
+    cache = cache_dir or _claude_plugins_cache_dir()
+    handlers: dict = {}
+    errors: list = []
+    if not cache.is_dir():
+        return handlers, errors
+
+    for marketplace_dir in sorted(p for p in cache.iterdir() if p.is_dir()):
+        for plugin_dir in sorted(p for p in marketplace_dir.iterdir() if p.is_dir()):
+            version_dirs = sorted(
+                (p for p in plugin_dir.iterdir() if p.is_dir()),
+                key=lambda p: _natural_version_key(p.name),
+                reverse=True,
             )
-            if gh.returncode == 0 and gh.stdout.strip():
-                token = gh.stdout.strip()
-        except (OSError, subprocess.SubprocessError):
-            token = ""
-
-    if not token:
-        out["status"] = "partial"
-        out["reason"] = "no GITHUB_TOKEN and `gh auth token` unavailable; remote parsed only"
-        return out
-
-    status, body = _http_get_json(
-        f"https://api.github.com/repos/{owner}/{repo}",
-        headers={"Authorization": f"token {token}", "Accept": "application/vnd.github+json"},
-    )
-    if status != 200 or not isinstance(body, dict):
-        out["status"] = "error"
-        out["http_status"] = status
-        # Preserve only message-like fields from a possible error body.
-        if isinstance(body, dict):
-            msg = body.get("message")
-            if isinstance(msg, str):
-                out["api_message"] = msg
-        return out
-
-    out["status"] = "ok"
-    out["default_branch"] = body.get("default_branch")
-    out["repo_id"] = body.get("id")
-    out["private"] = body.get("private")
-    return out
-
-
-def _refresh_vercel(cfg: dict[str, str]) -> dict[str, Any]:
-    """Resolve vercel-remote identity. If VERCEL_TOKEN is unset, return
-    `unconfigured` — never prompt. Otherwise hit /v9/projects?limit=20 and
-    keep [{name, id}]. Token never appears in output."""
-    out: dict[str, Any] = {"plugin": "vercel-remote"}
-    token = cfg.get("VERCEL_TOKEN", "").strip()
-    if not token:
-        out["status"] = "unconfigured"
-        out["reason"] = "VERCEL_TOKEN not set"
-        return out
-
-    team_id = cfg.get("VERCEL_TEAM_ID", "").strip()
-    suffix = f"&teamId={urllib.parse.quote(team_id)}" if team_id else ""
-    url = f"https://api.vercel.com/v9/projects?limit=20{suffix}"
-    status, body = _http_get_json(
-        url, headers={"Authorization": f"Bearer {token}"},
-    )
-    if status != 200 or not isinstance(body, dict):
-        out["status"] = "error"
-        out["http_status"] = status
-        if isinstance(body, dict):
-            msg = body.get("error", {})
-            if isinstance(msg, dict) and isinstance(msg.get("message"), str):
-                out["api_message"] = msg["message"]
-        return out
-
-    projects = body.get("projects", [])
-    cleaned = []
-    if isinstance(projects, list):
-        for p in projects:
-            if not isinstance(p, dict):
+            if not version_dirs:
                 continue
-            cleaned.append({"name": p.get("name"), "id": p.get("id")})
-    out["status"] = "ok"
-    out["projects"] = cleaned
-    out["count"] = len(cleaned)
-    if team_id:
-        out["team_id"] = team_id
-    return out
+            chosen = version_dirs[0]
+            manifest = chosen / ".claude-plugin" / "plugin.json"
+            if not manifest.is_file():
+                continue
+            try:
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as e:
+                errors.append(f"{manifest}: {e}")
+                continue
+            if not isinstance(data, dict):
+                continue
+            block = data.get("refresh_handler")
+            if block is None:
+                continue
+            name = data.get("name") or plugin_dir.name
+            if not isinstance(name, str):
+                continue
+            normalized, err = _validate_refresh_handler_block(name, block)
+            if err:
+                errors.append(err)
+                continue
+            handlers[name] = normalized
+    return handlers, errors
 
 
-def _refresh_supabase(cfg: dict[str, str]) -> dict[str, Any]:
-    """Resolve supabase-remote identity. If SUPABASE_ACCESS_TOKEN unset,
-    return `unconfigured`. Otherwise GET /v1/projects (Bearer auth) and keep
-    [{name, id, region, organization_id}]. Token never appears in output."""
-    out: dict[str, Any] = {"plugin": "supabase-remote"}
-    token = cfg.get("SUPABASE_ACCESS_TOKEN", "").strip()
-    if not token:
-        out["status"] = "unconfigured"
-        out["reason"] = "SUPABASE_ACCESS_TOKEN not set"
-        return out
+def _run_refresh_handler(
+    name: str,
+    block: dict,
+    cfg: dict,  # noqa: ARG001 — reserved for future env injection
+) -> dict:
+    """Execute one declared refresh_handler block. Returns a dict suitable
+    for stuffing into services.<name>. Never raises on soft failures. On
+    hard failures, raises RuntimeError so the caller can choose to abort.
+    """
+    import shlex
 
-    status, body = _http_get_json(
-        "https://api.supabase.com/v1/projects",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    if status != 200 or not isinstance(body, list):
+    out: dict = {"plugin": name, "source": "plugin-manifest"}
+    command = block["command"]
+    timeout = block["timeout_seconds"]
+    failure_mode = block["failure_mode"]
+    identity_keys = block["identity_keys"]
+
+    try:
+        argv = shlex.split(command, posix=(os.name != "nt"))
+    except ValueError as e:
         out["status"] = "error"
-        out["http_status"] = status
-        if isinstance(body, dict):
-            msg = body.get("message") or body.get("error")
-            if isinstance(msg, str):
-                out["api_message"] = msg
+        out["reason"] = f"could not parse command: {e}"
+        if failure_mode == "hard":
+            raise RuntimeError(out["reason"])
         return out
 
-    cleaned: list[dict[str, Any]] = []
-    for p in body[:20]:
-        if not isinstance(p, dict):
-            continue
-        cleaned.append({
-            "name": p.get("name"),
-            "id": p.get("id") or p.get("ref"),
-            "region": p.get("region"),
-            "organization_id": p.get("organization_id"),
-        })
-    out["status"] = "ok"
-    out["projects"] = cleaned
-    out["count"] = len(cleaned)
-    return out
-
-
-def _refresh_railway(cfg: dict[str, str]) -> dict[str, Any]:  # noqa: ARG001
-    """Resolve railway-ops identity by shelling out to `railway list --json`.
-    railway-ops itself defers to the local CLI's auth state, so this handler
-    does the same — no env values are passed in. If `railway` is not on PATH
-    or the command fails (not authed / no projects), record `unconfigured`.
-    NEVER pass cfg values into the subprocess env."""
-    out: dict[str, Any] = {"plugin": "railway-ops"}
-    railway_exe = shutil.which("railway")
-    if railway_exe is None:
-        out["status"] = "unconfigured"
-        out["reason"] = "`railway` CLI not on PATH"
+    if not argv:
+        out["status"] = "error"
+        out["reason"] = "empty command"
+        if failure_mode == "hard":
+            raise RuntimeError(out["reason"])
         return out
 
     try:
         proc = subprocess.run(
-            [railway_exe, "list", "--json"],
-            capture_output=True, text=True, timeout=15, check=False,
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            shell=False,
         )
+    except subprocess.TimeoutExpired:
+        out["status"] = "error"
+        out["reason"] = "timeout"
+        out["timeout_seconds"] = timeout
+        if failure_mode == "hard":
+            raise RuntimeError(f"{name}: refresh handler timed out after {timeout}s")
+        return out
     except FileNotFoundError as e:
-        # Windows: shutil.which can return a .cmd shim that subprocess can't
-        # spawn directly without shell. Treat as unconfigured rather than
-        # crash — the plugin's own bin/ has more robust resolution and is
-        # what the agent should reach for if it actually wants to use railway.
         out["status"] = "unconfigured"
-        out["reason"] = f"`railway` CLI not spawnable: {e}"
+        out["reason"] = f"command not found: {e}"
+        if failure_mode == "hard":
+            raise RuntimeError(f"{name}: {out['reason']}")
         return out
     except (OSError, subprocess.SubprocessError) as e:
         out["status"] = "error"
-        out["reason"] = f"railway list failed to spawn: {e}"
+        out["reason"] = f"failed to spawn: {e}"
+        if failure_mode == "hard":
+            raise RuntimeError(f"{name}: {out['reason']}")
         return out
 
     if proc.returncode != 0:
-        out["status"] = "unconfigured"
-        # stderr from railway often mentions "unauthorized" or "log in"
-        msg = (proc.stderr or proc.stdout or "").strip()
-        out["reason"] = f"railway list failed: {msg[:160]}" if msg else "railway list failed"
+        out["status"] = "error"
+        out["reason"] = f"exited {proc.returncode}"
+        tail = (proc.stderr or "")[-EXTENSION_STDERR_TAIL_CAP:]
+        if tail:
+            out["stderr_tail"] = tail
+        if failure_mode == "hard":
+            raise RuntimeError(f"{name}: refresh handler exited {proc.returncode}")
         return out
 
     try:
-        data = json.loads(proc.stdout or "[]")
+        parsed = json.loads(proc.stdout or "")
     except json.JSONDecodeError as e:
         out["status"] = "error"
-        out["reason"] = f"could not parse `railway list --json`: {e}"
+        out["reason"] = f"output is not valid JSON: {e}"
+        if failure_mode == "hard":
+            raise RuntimeError(f"{name}: {out['reason']}")
         return out
 
-    if not isinstance(data, list):
+    if not isinstance(parsed, dict):
         out["status"] = "error"
-        out["reason"] = "unexpected shape from `railway list --json`"
+        out["reason"] = "output is not a JSON object"
+        if failure_mode == "hard":
+            raise RuntimeError(f"{name}: {out['reason']}")
         return out
 
-    cleaned: list[dict[str, Any]] = []
-    for p in data[:20]:
-        if not isinstance(p, dict):
+    identity: dict = {}
+    for key in identity_keys:
+        if key in parsed:
+            identity[key] = parsed[key]
+    out["status"] = "ok"
+    if identity:
+        out["identity"] = identity
+    for k, v in parsed.items():
+        if k in ("plugin", "source", "status"):
             continue
-        cleaned.append({"name": p.get("name"), "id": p.get("id")})
-    out["status"] = "ok"
-    out["projects"] = cleaned
-    out["count"] = len(cleaned)
+        if k not in out:
+            out[k] = v
     return out
 
 
-def _refresh_linear(cfg: dict[str, str]) -> dict[str, Any]:
-    """Resolve linear-remote identity. If LINEAR_API_KEY unset, return
-    `unconfigured`. Otherwise POST a tiny GraphQL viewer+teams query.
-    Linear uses a raw `Authorization: <key>` header — NO Bearer prefix.
-    Key never appears in output, even on error paths."""
-    out: dict[str, Any] = {"plugin": "linear-remote"}
-    key = cfg.get("LINEAR_API_KEY", "").strip()
-    if not key:
-        out["status"] = "unconfigured"
-        out["reason"] = "LINEAR_API_KEY not set"
-        return out
-
-    query = (
-        "{ viewer { id name email } "
-        "teams(first: 20) { nodes { id key name } } }"
-    )
-    body_bytes = json.dumps({"query": query}).encode("utf-8")
-    status, body = _http_request_json(
-        "POST",
-        "https://api.linear.app/graphql",
-        headers={
-            "Authorization": key,  # NO Bearer prefix.
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        data=body_bytes,
-    )
-    if status != 200 or not isinstance(body, dict):
-        out["status"] = "error"
-        out["http_status"] = status
-        if isinstance(body, dict):
-            errs = body.get("errors")
-            if isinstance(errs, list) and errs and isinstance(errs[0], dict):
-                msg = errs[0].get("message")
-                if isinstance(msg, str):
-                    out["api_message"] = msg
-        return out
-
-    if isinstance(body.get("errors"), list) and body["errors"]:
-        out["status"] = "error"
-        first = body["errors"][0]
-        if isinstance(first, dict) and isinstance(first.get("message"), str):
-            out["api_message"] = first["message"]
-        return out
-
-    data = body.get("data") or {}
-    viewer = data.get("viewer") or {}
-    teams_root = data.get("teams") or {}
-    nodes = teams_root.get("nodes") if isinstance(teams_root, dict) else []
-    teams_clean: list[dict[str, Any]] = []
-    if isinstance(nodes, list):
-        for t in nodes[:20]:
-            if not isinstance(t, dict):
-                continue
-            teams_clean.append({
-                "id": t.get("id"), "key": t.get("key"), "name": t.get("name"),
-            })
-
-    out["status"] = "ok"
-    out["viewer"] = {
-        "id": viewer.get("id"),
-        "name": viewer.get("name"),
-        "email": viewer.get("email"),
-    }
-    out["teams"] = teams_clean
-    out["count"] = len(teams_clean)
-    return out
-
-
-def _refresh_langfuse(cfg: dict[str, str]) -> dict[str, Any]:
-    """Resolve langfuse-remote identity for the default unnamed instance.
-    v0.1.x: only checks the default instance — multi-instance health is
-    `langfuse-remote health --all`'s job. Base URL precedence:
-    LANGFUSE_BASE_URL > LANGFUSE_HOST > https://cloud.langfuse.com.
-    Both keys are stripped from any output, even error paths."""
-    import base64
-
-    out: dict[str, Any] = {"plugin": "langfuse-remote"}
-    pk = cfg.get("LANGFUSE_PUBLIC_KEY", "").strip()
-    sk = cfg.get("LANGFUSE_SECRET_KEY", "").strip()
-    if not pk or not sk:
-        out["status"] = "unconfigured"
-        missing = [n for n, v in (("LANGFUSE_PUBLIC_KEY", pk), ("LANGFUSE_SECRET_KEY", sk)) if not v]
-        out["reason"] = f"missing: {', '.join(missing)}"
-        return out
-
-    base = (
-        cfg.get("LANGFUSE_BASE_URL", "").strip()
-        or cfg.get("LANGFUSE_HOST", "").strip()
-        or "https://cloud.langfuse.com"
-    )
-    base = base.rstrip("/")
-    out["base_url"] = base
-
-    token = base64.b64encode(f"{pk}:{sk}".encode("utf-8")).decode("ascii")
-    status, body = _http_get_json(
-        f"{base}/api/public/health",
-        headers={"Authorization": f"Basic {token}"},
-    )
-    if status != 200:
-        out["status"] = "error"
-        out["http_status"] = status
-        # /api/public/health returns plain text on success; error bodies may
-        # be JSON. Surface only message-shaped fields.
-        if isinstance(body, dict):
-            msg = body.get("message") or body.get("error")
-            if isinstance(msg, str):
-                out["api_message"] = msg
-        return out
-
-    out["status"] = "ok"
-    # Body might be plain text (non-JSON) -> body is {"raw": "..."} or None.
-    if isinstance(body, dict):
-        # health returns {"status": "OK", "version": "..."} on some versions;
-        # fall back to the raw passthrough for older builds.
-        if isinstance(body.get("status"), str):
-            out["health_status"] = body["status"]
-        elif isinstance(body.get("raw"), str):
-            out["health_status"] = body["raw"][:80]
-        if isinstance(body.get("version"), str):
-            out["version"] = body["version"]
-    elif body is None:
-        out["health_status"] = "ok"
-    return out
-
-
-REFRESH_HANDLERS = {
-    "github-remote": _refresh_github,
-    "langfuse-remote": _refresh_langfuse,
-    "linear-remote": _refresh_linear,
-    "railway-ops": _refresh_railway,
-    "supabase-remote": _refresh_supabase,
-    "vercel-remote": _refresh_vercel,
-}
 
 
 # ─── extensions ──────────────────────────────────────────────────────────────
@@ -933,9 +788,10 @@ EXTENSION_VALID_STATUSES = ("ok", "unconfigured", "partial", "error")
 
 
 def _builtin_plugin_names() -> set[str]:
-    """Names that an extension may NOT shadow in this slice. Built-in refresh
-    handlers + every plugin in PLUGIN_ENV_SPEC."""
-    return set(PLUGIN_ENV_SPEC) | set(REFRESH_HANDLERS)
+    """Names that an extension may NOT shadow. Every plugin in PLUGIN_ENV_SPEC
+    plus every plugin that declares a refresh_handler in plugin.json."""
+    handlers, _ = _discover_refresh_handlers()
+    return set(PLUGIN_ENV_SPEC) | set(handlers)
 
 
 def _hash_command(command: list[str]) -> str:
@@ -1182,28 +1038,32 @@ def cmd_refresh(args: argparse.Namespace) -> dict:
             "error": "--no-extensions and --extensions-only are mutually exclusive",
         }
 
+    # Discover refresh handlers from installed plugin manifests.
+    discovered, discovery_errors = _discover_refresh_handlers()
+
     plugins_to_refresh: list[str]
     if args.plugin:
-        if args.plugin not in REFRESH_HANDLERS:
+        if args.plugin not in discovered:
             return {
                 "workspace": str(workspace),
                 "source": source,
                 "error": (
-                    f"refresh not implemented for plugin {args.plugin!r}. "
-                    f"v0.1.0 supports: {sorted(REFRESH_HANDLERS)}"
+                    f"no refresh_handler declared for plugin {args.plugin!r}. "
+                    f"Plugins with handlers in this environment: "
+                    f"{sorted(discovered) if discovered else '(none)'}"
                 ),
             }
         plugins_to_refresh = [args.plugin]
-        # --plugin implies built-ins-only. Skip extensions in this mode.
+        # --plugin implies plugin-handlers-only. Skip extensions in this mode.
         no_extensions = True
     elif extensions_only:
         plugins_to_refresh = []
     else:
-        plugins_to_refresh = sorted(REFRESH_HANDLERS)
+        plugins_to_refresh = sorted(discovered)
 
     services: dict[str, Any] = {}
     for name in plugins_to_refresh:
-        services[name] = REFRESH_HANDLERS[name](cfg)
+        services[name] = _run_refresh_handler(name, discovered[name], cfg)
 
     # Run extensions (default on; suppressed by --no-extensions / --plugin).
     extension_errors: list[str] = []
@@ -1241,6 +1101,8 @@ def cmd_refresh(args: argparse.Namespace) -> dict:
         payload["extensions_ran"] = extensions_ran
         if extension_errors:
             payload["extension_errors"] = extension_errors
+    if discovery_errors:
+        payload["handler_discovery_errors"] = discovery_errors
 
     # Merge into services.json if the workspace exists.
     services_path = workspace / "services.json"
@@ -1894,8 +1756,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="resolve identity for supported plugins into services.json",
         parents=[pretty_parent],
     )
-    s_refresh.add_argument("--plugin", choices=sorted(REFRESH_HANDLERS),
-                           help="refresh only this plugin (default: all supported)")
+    s_refresh.add_argument("--plugin",
+                           help="refresh only this plugin (default: all plugins "
+                                "with a refresh_handler declared in plugin.json)")
     s_refresh.add_argument("--no-extensions", action="store_true",
                            help="skip user extensions defined in extensions.json")
     s_refresh.add_argument("--extensions-only", action="store_true",

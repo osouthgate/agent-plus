@@ -6,6 +6,28 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.7.0 - 2026-04-28
+
+`refresh` discovers handlers from plugin manifests instead of a hardcoded dispatch table.
+
+### Changed
+
+- **`agent-plus refresh` now reads `refresh_handler` blocks from each plugin's `.claude-plugin/plugin.json`** instead of dispatching to in-process Python functions hardcoded in `bin/agent-plus`. The framework walks `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/.claude-plugin/plugin.json`, collects every block of shape `{command, timeout_seconds?, identity_keys?, failure_mode?}`, and executes each via `subprocess.run(..., shell=False)`. Plugins without a `refresh_handler` block silently don't participate — no warning, no error. The framework no longer ships any plugin-specific code; the wrapper plugins (which moved to `osouthgate/agent-plus-skills`) are now the source of truth for their own refresh contract. [2026-04-28]
+- **`--plugin` no longer has a hardcoded `choices=` list.** It accepts any string and reports an explicit error at run time if no handler is declared for that plugin in the current environment. The error message lists what *is* discoverable so the agent can self-correct.
+
+### Removed
+
+- `_refresh_github`, `_refresh_vercel`, `_refresh_supabase`, `_refresh_railway`, `_refresh_linear`, `_refresh_langfuse` (≈300 lines).
+- `REFRESH_HANDLERS` registry dict.
+
+### Notes
+
+- **Behavior change for users with no plugins declaring `refresh_handler`:** `agent-plus refresh` returns `services: {}` rather than the old hardcoded six-plugin set. Plugins in `osouthgate/agent-plus-skills` will declare their handlers in a follow-up release; until then, `refresh` is a no-op for that marketplace. This is the correct behavior — the framework no longer claims to know how to refresh plugins it doesn't ship.
+- Failure modes per the new contract: `"soft"` (default) records `status: "error"|"unconfigured"` in `services.<name>` and continues; `"hard"` aborts the whole refresh run with a non-zero exit. Timeouts default to 10s per handler.
+- Discovery walks `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/.claude-plugin/plugin.json`. Multi-version caches: highest version wins (natural sort, so `0.10.0 > 0.9.0`). Session-only `--plugin-dir` plugins are out of scope for v1.
+- The user-extension surface (`extensions.json`) is unchanged — these are independent paths, both feeding into `services.json`.
+- Output envelope shape preserved: same `tool`, `services`, `refreshedAt`, `workspace`, `source` keys. New optional `handler_discovery_errors` array surfaces any malformed plugin.json blocks found during discovery (defensive: discovery never crashes).
+
 ## 0.6.0 - 2026-04-28
 
 `init` now suggests matching skills from `osouthgate/agent-plus-skills` based on detected stack markers.
