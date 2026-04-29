@@ -104,7 +104,7 @@ A "co-changed test" exists when any test file in the same diff has a name stem m
 Heuristic. We flag `publicApiTouched: true` when:
 
 - The path's basename is a well-known entrypoint (`index.{ts,tsx,js,jsx}`, `mod.rs`, `lib.rs`, `__init__.py`, `main.go`), or matches `cmd/*/main.go`.
-- The added lines (lines starting with `+` in the unified diff) include any of: `+export ` (TS/JS), `+pub fn|struct|mod|enum|trait|const|static` (Rust), `+func [A-Z]` (Go — capitalized = exported), `+def <name>(` (Python top-level), `+class ` (TS/Python).
+- The added lines (lines starting with `+` in the unified diff) include any of: `+export ` (TS/JS), `+pub fn|struct|mod|enum|trait|const|static` (Rust), `+func [A-Z]` (Go — capitalized = exported), `+def <name>(` where `<name>` doesn't start with `_` (Python top-level public def), `+class ` (TS/Python).
 
 Will miss public-API touches in unusual layouts. Will over-flag test fixtures named `index.ts`. Treat as a hint, not a verdict.
 
