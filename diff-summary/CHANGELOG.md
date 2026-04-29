@@ -6,8 +6,12 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+### Fixed
+- Python public-API heuristic no longer flags underscore-prefixed defs (`_helper`) as public. Previous regex `[a-z_][a-zA-Z0-9_]*` accepted leading `_`; tightened to `[a-z][a-zA-Z0-9_]*` so private-by-convention names are correctly excluded. [2026-04-29]
+
 ### Tests
 - Explicit LOW-tier risk-classification test (`test_doc_only_change_is_low`) — README.md doc-only diff asserts `risk=="low"` and empty `riskReasons`. Closes a slice-8 gap where LOW was only covered implicitly by the risk-filter test. [2026-04-29]
+- Python public-API regression tests: `test_python_public_def_flagged` (positive) and `test_python_underscore_def_not_flagged` (negative). [2026-04-29]
 
 ## 0.2.0 - 2026-04-28
 
