@@ -4,6 +4,11 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## Unreleased
+
+### Tests
+- Explicit LOW-tier risk-classification test (`test_doc_only_change_is_low`) — README.md doc-only diff asserts `risk=="low"` and empty `riskReasons`. Closes a slice-8 gap where LOW was only covered implicitly by the risk-filter test. [2026-04-29]
+
 ## 0.2.0 - 2026-04-28
 
 Coordinated framework-plugin envelope-contract bump (Track A slice A0).

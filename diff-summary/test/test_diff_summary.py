@@ -319,6 +319,23 @@ class TestRisk(unittest.TestCase):
             self.assertEqual(f["risk"], "high")
             self.assertIn("ci-workflow-change", f["riskReasons"])
 
+    def test_doc_only_change_is_low(self) -> None:
+        # Explicit LOW-tier coverage: a benign doc-only diff should classify
+        # as low risk with no risk reasons fired (no migration, no secret-risk
+        # path, no CI workflow, no source change, no public-API touch).
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td)
+            _init_repo(cwd)
+            _write(cwd, "README.md", "# Hello\n")
+            _commit(cwd, "init")
+            _write(cwd, "README.md", "# Hello\n\nNew paragraph.\n")
+            out = _run_cli("--path", str(cwd))
+            f = next(x for x in out["files"] if x["path"] == "README.md")
+            self.assertEqual(f["role"], "doc")
+            self.assertEqual(f["risk"], "low")
+            self.assertEqual(f["riskReasons"], [])
+            self.assertNotIn("README.md", out["summary"]["highRiskFiles"])
+
     def test_config_change_is_medium(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             cwd = Path(td)

@@ -9,6 +9,9 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 ### Changed
 - `_walk` BFS now uses `collections.deque` with `popleft()` instead of `list.pop(0)` — same traversal order, O(1) dequeue instead of O(n). [2026-04-29]
 
+### Tests
+- Explicit framework-confidence coverage (`test_framework_confidence_high_and_medium`) — asserts `confidence=="high"` for manifest-confirmed Next.js/React and `confidence=="medium"` for tailwind detected from config-only fallback in the same payload. Closes a slice-8 gap where the "high" branch was only covered implicitly. [2026-04-29]
+
 ## 0.2.0 - 2026-04-28
 
 Coordinated framework-plugin envelope-contract bump (Track A slice A0).

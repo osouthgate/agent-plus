@@ -253,6 +253,29 @@ class TestFrameworks(unittest.TestCase):
             self.assertEqual(len(tw), 1)
             self.assertEqual(tw[0]["confidence"], "medium")
 
+    def test_framework_confidence_high_and_medium(self) -> None:
+        # Explicit coverage: manifest-confirmed frameworks should report
+        # confidence="high"; config-only fallbacks should report "medium".
+        # Same repo exercises both branches in one call.
+        with tempfile.TemporaryDirectory() as td:
+            r = _Repo(Path(td))
+            r.write("package.json", json.dumps({
+                "name": "x",
+                "dependencies": {"next": "^14.0.0", "react": "^18.0.0"},
+            }))
+            r.write("tailwind.config.js", "module.exports = {};\n")
+            out = _run_cli("--path", td)
+            by_name = {f["name"]: f for f in out["frameworks"]}
+            # High-confidence path: manifest dep present.
+            self.assertIn("Next.js", by_name)
+            self.assertEqual(by_name["Next.js"]["confidence"], "high")
+            self.assertIn("React", by_name)
+            self.assertEqual(by_name["React"]["confidence"], "high")
+            # Medium-confidence path: tailwind detected from config file
+            # alone (no `tailwindcss` dep declared in package.json).
+            self.assertIn("TailwindCSS", by_name)
+            self.assertEqual(by_name["TailwindCSS"]["confidence"], "medium")
+
 
 # ──────────────────────────── build tools ────────────────────────────
 
