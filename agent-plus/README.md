@@ -217,6 +217,8 @@ agent-plus refresh --extensions-only             # run only extensions, skip bui
 
 Disabled extensions (`"enabled": false` in `extensions.json`) load but skip at refresh time. Names that collide with built-in plugin names are rejected at add/load time — no silent shadowing.
 
+`extensions remove` also drops the matching key from `services.json` if a previous refresh populated it, so stale handler output doesn't linger after removal. The envelope returns `services_cleaned: bool` so callers can confirm.
+
 ## `marketplace init`
 
 Scaffold a new `<user>/agent-plus-skills` marketplace repo following the marketplace convention. Phase 1 of the marketplace surface — install, update, list, and remove are Phase 2.
