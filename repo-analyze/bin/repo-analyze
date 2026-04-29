@@ -23,6 +23,7 @@ import json
 import re
 import subprocess
 import sys
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -176,9 +177,9 @@ def _walk(root: Path, *, max_depth: int) -> list[tuple[Path, int]]:
     direct children. We yield directories AND files so the tree builder can
     show empty directories; language counter filters to files."""
     out: list[tuple[Path, int]] = []
-    stack: list[tuple[Path, int]] = [(root, 0)]
+    stack: deque[tuple[Path, int]] = deque([(root, 0)])
     while stack:
-        cur, depth = stack.pop(0)
+        cur, depth = stack.popleft()
         if depth >= max_depth:
             continue
         try:

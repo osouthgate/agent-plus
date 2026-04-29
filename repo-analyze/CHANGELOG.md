@@ -4,6 +4,11 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## Unreleased
+
+### Changed
+- `_walk` BFS now uses `collections.deque` with `popleft()` instead of `list.pop(0)` — same traversal order, O(1) dequeue instead of O(n). [2026-04-29]
+
 ## 0.2.0 - 2026-04-28
 
 Coordinated framework-plugin envelope-contract bump (Track A slice A0).
