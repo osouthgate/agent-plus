@@ -88,10 +88,7 @@ Note: slice 6 (`d9ce987`) is `STAGING.md` + staging banner — **PRIVATE ONLY, n
 
 ### Doc follow-ups noted but not yet shipped
 
-- Stale `services.json` entries linger after `agent-plus extensions remove` (papercut).
-- Coverage gaps deferred from slice 8 review: explicit LOW-tier risk test in diff-summary, Python public-API heuristic test, framework confidence-level coverage in repo-analyze, `core.autocrlf=false` in test_init_repo for Windows safety. Not blockers; worth adding eventually.
-- `_walk` in repo-analyze uses `list.pop(0)` for BFS — `collections.deque` would be cleaner. Minor perf only.
-- `skill-feedback` envelope contract test fails (the `--version` regex now requires `<name> <semver>` shape; `skill-feedback` still emits bare `<semver>`). The change to `test_envelope_contract.py` and the partial `bin/skill-feedback` modification have been sitting uncommitted across multiple sessions. Either complete the rename to make `skill-feedback --version` match the contract, or revert the contract tightening — currently neither.
+- `core.autocrlf=false` in test_init_repo for Windows safety. Not a blocker; worth adding eventually.
 
 ## What's intentionally NOT in this file
 
