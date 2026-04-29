@@ -397,6 +397,28 @@ class TestPublicAPI(unittest.TestCase):
             f = out["files"][0]
             self.assertTrue(f["publicApiTouched"])
 
+    def test_python_public_def_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td)
+            _init_repo(cwd)
+            _write(cwd, "mod.py", "# init\n")
+            _commit(cwd, "init")
+            _write(cwd, "mod.py", "def public_thing():\n    return 1\n")
+            out = _run_cli("--path", str(cwd))
+            f = out["files"][0]
+            self.assertTrue(f["publicApiTouched"])
+
+    def test_python_underscore_def_not_flagged(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cwd = Path(td)
+            _init_repo(cwd)
+            _write(cwd, "mod.py", "# init\n")
+            _commit(cwd, "init")
+            _write(cwd, "mod.py", "def _private_helper():\n    return 1\n")
+            out = _run_cli("--path", str(cwd))
+            f = out["files"][0]
+            self.assertFalse(f["publicApiTouched"])
+
 
 # ──────────────────────────── co-changed test ────────────────────────────
 
