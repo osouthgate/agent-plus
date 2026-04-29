@@ -1075,6 +1075,58 @@ class TestExtensionsSubcommand(unittest.TestCase):
         result = json.loads(out)
         self.assertEqual(result["count"], 0)
 
+    def test_remove_cleans_stale_services_json_entry(self) -> None:
+        # Regression: after `extensions remove`, the entry in services.json
+        # left behind by an earlier `refresh` must be cleaned out so list /
+        # agent context don't show services for an extension the user
+        # just removed (Gate 2 papercut A, 2026-04-29).
+        script = _write_ext_script(self.root, "togo.py",
+            "import json; print(json.dumps({'status':'ok','tag':'lingerer'}))")
+        _run("extensions", "add", "--name", "togo",
+             "--command", sys.executable, "--command-arg", str(script),
+             "--dir", str(self.root))
+
+        # Populate services.json by running refresh.
+        rc, out, err = _run(
+            "refresh", "--extensions-only", "--dir", str(self.root),
+            cwd=str(self.root),
+        )
+        self.assertEqual(rc, 0, msg=err)
+        services_disk = json.loads(
+            (self.workspace / "services.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("togo", services_disk["services"])
+
+        # Now remove the extension.
+        rc, out, err = _run("extensions", "remove", "--name", "togo",
+                            "--dir", str(self.root))
+        self.assertEqual(rc, 0, msg=err)
+        result = json.loads(out)
+        self.assertEqual(result["removed"], "togo")
+        self.assertTrue(result.get("services_cleaned"))
+
+        # services.json no longer has a stale entry.
+        services_disk = json.loads(
+            (self.workspace / "services.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("togo", services_disk["services"])
+
+    def test_remove_when_extension_not_in_services_json_is_noop(self) -> None:
+        # Removing an extension that was never refreshed shouldn't choke
+        # — services_cleaned just stays False, services.json untouched.
+        _run("extensions", "add", "--name", "fresh", "--command", "python3",
+             "--dir", str(self.root))
+        services_path = self.workspace / "services.json"
+        before = services_path.read_text(encoding="utf-8") if services_path.is_file() else None
+        rc, out, err = _run("extensions", "remove", "--name", "fresh",
+                            "--dir", str(self.root))
+        self.assertEqual(rc, 0, msg=err)
+        result = json.loads(out)
+        self.assertEqual(result["removed"], "fresh")
+        self.assertFalse(result.get("services_cleaned"))
+        if before is not None:
+            self.assertEqual(services_path.read_text(encoding="utf-8"), before)
+
     def test_remove_nonexistent_errors(self) -> None:
         rc, out, _ = _run("extensions", "remove", "--name", "ghost",
                           "--dir", str(self.root))

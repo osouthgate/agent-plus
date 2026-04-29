@@ -6,6 +6,12 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.9.1 - 2026-04-29
+
+### Fixed
+
+- **`agent-plus extensions remove` now cleans up stale `services.json` entries.** Previously, removing an extension only updated `extensions.json` — the corresponding entry under `services.json` (populated by an earlier `agent-plus refresh`) lingered, so `agent-plus list` and SessionStart agent context kept showing a service for a plugin the user had just removed. Cleanup happens eagerly on `remove` (best-effort: a malformed or missing `services.json` is not an error). The remove envelope gained a `services_cleaned: bool` field so callers can confirm the cleanup ran. Gate 2 papercut A.
+
 ## 0.9.0 - 2026-04-28
 
 `marketplace install / list / update / remove` + the trust model (Phase 2 of the marketplace convention).

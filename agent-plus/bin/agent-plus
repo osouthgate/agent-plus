@@ -1537,12 +1537,46 @@ def cmd_extensions_remove(args: argparse.Namespace) -> dict:
         }
 
     written = _save_extensions(workspace, remaining)
+
+    # Clean up any stale entry for this extension in services.json so the
+    # next `agent-plus list` / agent context reads don't show a service
+    # for a plugin the user just removed. Best-effort: a malformed or
+    # missing services.json is not an error here — extensions.json is the
+    # source of truth for "is it installed".
+    services_cleaned = False
+    services_path = workspace / "services.json"
+    if services_path.is_file():
+        try:
+            existing_services = json.loads(
+                services_path.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            existing_services = None
+        if (
+            isinstance(existing_services, dict)
+            and isinstance(existing_services.get("services"), dict)
+            and name in existing_services["services"]
+        ):
+            del existing_services["services"][name]
+            try:
+                services_path.write_text(
+                    json.dumps(existing_services, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                services_cleaned = True
+            except OSError:
+                # Non-fatal: extension is removed from extensions.json,
+                # which is what gates future runs. The stale services.json
+                # entry can be cleaned up by hand or on next refresh.
+                pass
+
     return {
         "workspace": str(workspace),
         "source": source,
         "removed": name,
         "written_to": str(written),
         "count": len(remaining),
+        "services_cleaned": services_cleaned,
     }
 
 
