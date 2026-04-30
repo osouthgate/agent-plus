@@ -1,5 +1,7 @@
 # repo-analyze
 
+> Part of [**agent-plus**](../README.md) · siblings: [`agent-plus`](../agent-plus) · [`diff-summary`](../diff-summary) · [`skill-feedback`](../skill-feedback) · [`skill-plus`](../skill-plus)
+
 Cold-starting in an unfamiliar repo, every agent session re-mines the same facts. File-tree exploration. Finding entrypoints. Reading `package.json` / `pyproject.toml` / `Cargo.toml` / `go.mod`. Scanning the README. Detecting whether this is a Next.js app or a Django service.
 
 Session mining across real Claude Code transcripts showed **~67 grep + ~60 directory-discovery ops** per cold-start, almost all of it recovering facts a previous session already recovered, none of it cached anywhere the next session can see.
@@ -26,7 +28,7 @@ Default behaviour: analyze cwd, emit JSON to stdout.
 ```bash
 $ repo-analyze --pretty | head -40
 {
-  "tool": {"name": "repo-analyze", "version": "0.1.0"},
+  "tool": {"name": "repo-analyze", "version": "0.2.1"},
   "path": "/Users/me/checkout",
   "analyzedAt": "2026-04-28T12:34:56Z",
   "git": {"isRepo": true, "branch": "main", "remote": "https://github.com/me/repo", "headCommit": "abc1234"},

@@ -66,7 +66,7 @@ Every plugin directory has the same shape — preserve it:
 ```
 <plugin>/
 ├── .claude-plugin/plugin.json
-├── bin/<plugin>                  # stdlib Python 3, ~500 lines max
+├── bin/<plugin>                  # stdlib Python 3, single file (meta plugin is ~3k LoC; service wrappers usually 500–1500)
 ├── skills/<plugin>/SKILL.md      # how Claude uses it
 ├── README.md                     # how a human understands it
 ├── CHANGELOG.md                  # pain points and wins, most-recent-first
