@@ -1,6 +1,6 @@
 # skill-plus
 
-> Part of [**agent-plus**](../README.md) · siblings: [`agent-plus`](../agent-plus) · [`repo-analyze`](../repo-analyze) · [`diff-summary`](../diff-summary) · [`skill-feedback`](../skill-feedback)
+> Part of [**agent-plus**](../README.md) · siblings: [`agent-plus-meta`](../agent-plus-meta) · [`repo-analyze`](../repo-analyze) · [`diff-summary`](../diff-summary) · [`skill-feedback`](../skill-feedback)
 
 Authoring a good Claude skill isn't hard because of the boilerplate — it's hard because picking the **killer command** is guesswork. Repo-introspection ("you have postgres, want a postgres skill?") is shape-matching; it has no idea what you actually do.
 

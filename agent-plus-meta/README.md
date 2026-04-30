@@ -1,8 +1,6 @@
 # agent-plus-meta
 
 > Part of [**agent-plus**](../README.md) · siblings: [`repo-analyze`](../repo-analyze) · [`diff-summary`](../diff-summary) · [`skill-feedback`](../skill-feedback) · [`skill-plus`](../skill-plus)
->
-> The framework's meta plugin. Renamed from `agent-plus` → `agent-plus-meta` in 0.11.0 to resolve the naming collision with the framework itself. CLI commands changed from `agent-plus init/refresh/...` to `agent-plus-meta init/refresh/...`.
 
 Every fresh Claude Code session re-mines the same workspace facts: grep `.env`, `ls` plugin dirs, `git remote -v`, hand-roll `gh repo view`, paste a Vercel project ID, repeat. Session transcripts showed **~67 grep + ~60 ls operations** during cold-start context-gathering — most of them recovering facts the previous session also recovered.
 
@@ -181,7 +179,7 @@ The `source` field on every payload tells you which rule fired.
 2. project `.env.local` / `.env` (walked up from cwd)
 3. shell env
 
-Each plugin's required env-vars are checked by canonical prefix (`HERMES_*`, `COOLIFY_*`, `LANGFUSE_*`, …) — spec hardcoded in `bin/agent-plus#PLUGIN_ENV_SPEC` to keep drift visible.
+Each plugin's required env-vars are checked by canonical prefix (`HERMES_*`, `COOLIFY_*`, `LANGFUSE_*`, …) — spec hardcoded in `bin/agent-plus-meta#PLUGIN_ENV_SPEC` to keep drift visible.
 
 ## Extensions
 
@@ -271,7 +269,7 @@ claude --plugin-dir ./agent-plus
 
 ### Standalone
 
-`bin/agent-plus` is one stdlib Python 3 file. Copy to `$PATH`, run.
+`bin/agent-plus-meta` is one stdlib Python 3 file. Copy to `$PATH`, run.
 
 ## Tests
 
