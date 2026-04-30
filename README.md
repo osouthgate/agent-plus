@@ -6,6 +6,8 @@
 
 Five universal primitives (workspace bootstrap, repo orientation, diff triage, skill self-rating, session-log mining) plus a marketplace convention for publishing service wrappers under your GitHub handle. Mined from real Claude Code session transcripts, not guessed at. Stdlib Python, also runs standalone.
 
+![agent-plus 90-second tour](./assets/tour.gif)
+
 ```bash
 claude plugin marketplace add osouthgate/agent-plus
 claude plugin install repo-analyze@agent-plus
