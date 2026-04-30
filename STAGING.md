@@ -78,6 +78,7 @@ Wrapper-related topic adds (`github-remote`, `vercel-remote`, etc.) are no longe
 | v0.9.0 | `db7ff68` | 2026-04-28 | Marketplace install/update/list/remove + trust model (Phase 2) |
 | v0.9.1 | `abe11db` | 2026-04-30 | Papercut bundle: services.json cleanup, repo-analyze deque BFS, diff-summary public-API regex fix, slice-8 coverage |
 | v0.10.0 | `6f24782` | 2026-04-30 | skill-plus 0.1.0 (the fifth universal primitive — scan/propose/install-cron/scaffold/list/feedback/promote, 83 tests). agent-plus marketplace `search` + collision-resolution `prefer` (Phase 4). `core.autocrlf=false` pinned by `agent-plus init`. Wrappers deprecated from this repo's marketplace.json. Root + agent-plus README rewrite. PR #9. Topic `skill-plus` added to public repo. |
+| v0.10.1 | `5426207` | 2026-04-30 | README polish pass driven by re-audit (excitement 3→7): version drift normalised across 6 worked-example JSON blocks; sibling-nav strip on all 5 plugin READMEs; voice-consistency pass (skill-feedback 167→151, skill-plus 139→132, agent-plus 302→280); AGENTS.md `~500 lines` claim fixed. Cross-repo: agent-plus-skills wrappers aligned to rc=0 + `status: "unconfigured"` for refresh-handler contract parity. Extension-API canary design spec written (private). PR #10. |
 
 **Upcoming slices** (not yet shipped):
 
