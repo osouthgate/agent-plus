@@ -1,7 +1,7 @@
 {
   "name": "agent-plus-meta",
   "description": "The meta plugin for the agent-plus framework. Workspace bootstrap, env-var readiness, identity cache, marketplace lifecycle (install/list/update/remove/search/prefer), extensions. One call to `init` creates `.agent-plus/`; `envcheck` reports which sibling-plugin env vars are set (names only); `refresh` resolves project IDs and service handles into a per-workspace cache. Day-one context for free.",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "author": {
     "name": "Oliver Southgate",
     "url": "https://github.com/osouthgate"

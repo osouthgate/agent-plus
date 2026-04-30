@@ -4,6 +4,35 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.12.0 - 2026-04-30
+
+Persona-aware onboarding wizard. `agent-plus-meta init` is now interactive: detects user state, picks one of three first-run branches, offers cross-repo session mining, and ends with a coherent doctor verdict. `install.sh` chains into the wizard so `curl|sh` lands the user there immediately.
+
+### Added
+
+- **Persona-aware `init` wizard with state detection.** Detection inspects `~/.claude/projects/` history, `<repo>/.claude/skills/`, env-vars-ready count, presence of `.agent-plus/manifest.json`, and a new `homeless` flag (cwd has no git toplevel + no project markers + at or above home). Three branches with deterministic priority `skill_author > returning > new`: **NEW** runs `repo-analyze`, **RETURNING** runs `agent-plus-meta doctor`, **SKILL-AUTHOR** runs `skill-plus list --include-global`. Re-running is idempotent — legacy `.agent-plus/` bootstrap behaviour preserved.
+- **Cross-repo discovery.** Walks `~/.claude/projects/`, decodes subdir names back to repo paths (handles both Windows `C--dev-foo` and POSIX `-Users-bob-foo` encodings), filters dead paths and entries older than 30 days, surfaces top 4 by recency. Selection prompt accepts comma-separated indices, `[a]ll`, `[n]one`, or `[m]anual` for paste-in. Manual paths are validated for existence and warn (but accept) when no markers are detected. Each accepted repo is scanned via `skill-plus scan --all-projects --project <path>` with per-repo progress streamed.
+- **Homeless-context handling.** When cwd has no repo context, NEW branch skips the local first-win and pivots to cross-repo discovery first. If `~/.claude/projects/` is also empty, the wizard ends gracefully at doctor.
+- **Doctor finale.** Wizard's last step calls `cmd_doctor` in-process and renders pretty output inline. Wrapped in try/except — if doctor itself raises, the wizard prints a fallback hint and continues to envelope emission.
+- **`--non-interactive --auto` mode.** Skips all prompts, picks the branch deterministically, scans every auto-discovered repo silently (no manual paste), emits a frozen JSON envelope on stdout, exits 0 even on recoverable errors. For agent-driven installs. Schema documented in [README.md](./README.md#init) — frozen for v0.12.0; additive changes may land in v0.13.x+ without breaking; renames or removals require a major bump.
+- **8 stable error codes** in `envelope.errors[].code`: `consent_required`, `cross_repo_scan_failed`, `cross_repo_interrupted`, `stack_detect_unreadable_marker`, `doctor_unreachable`, `skill_plus_missing`, `auto_tie_break`, `install_sh_curl_failed`. Interactive runs print Tier-1 `<problem> - <cause> - <fix>` lines on stderr; `--auto` runs surface them as structured envelope entries.
+- **`install.sh --unattended` and `--no-init` flags.** `--unattended` skips prompts and accepts defaults, exits 0 even on partial primitive install. `--no-init` skips the chain into the wizard. Default behaviour after a 5/5 primitive install is to chain into `agent-plus-meta init` (interactive) or `agent-plus-meta init --non-interactive --auto` (under `--unattended`). `--dry-run` short-circuits the chain regardless. Failures surface a `[install_sh_curl_failed]` prefix on stderr.
+- **Observability:** each wizard run appends one JSON line to `<workspace>/.agent-plus/init.log` with `branch_chosen`, `detection`, `cross_repo_accepted`, `doctor_verdict`. Useful for "why did init pick this branch" debugging.
+
+### Changed
+
+- `agent-plus-meta init` envelope gains the v0.12.0 frozen-schema fields (`verdict`, `branch_chosen`, `tie_break_reason`, `detection`, `cross_repo_*`, `doctor_verdict`, `doctor_summary`, `first_win_*`, `ttl_total_ms`, `errors`). Legacy fields (`workspace`, `source`, `created`, `skipped`, `suggested_skills`) are preserved at the top level for back-compat.
+- `agent-plus-meta` SKILL.md: stale `# agent-plus` H1 corrected to `# agent-plus-meta`; "Three subcommands" claim updated to "Eight+ subcommands across init, envcheck, refresh, list, extensions, marketplace, doctor".
+
+### Companion change in skill-plus
+
+- **`skill-plus list --include-global`** ships in skill-plus 0.2.0 (same release date). Walks `~/.claude/skills/` in addition to `<repo>/.claude/skills/` and flags name collisions across scopes. Used by the wizard's SKILL-AUTHOR branch first-win. Default `skill-plus list` envelope shape unchanged — additive flag, no back-compat break.
+
+### Tests
+
+- 37 new tests in `TestInitWizard` covering all three branches, tie-break, homeless detection, cross-repo discovery (Windows + POSIX path decoders), manual paste validation, Ctrl+C tolerance, doctor failure rescue, and the `--auto` envelope shape. 4 new install.sh tests for `--unattended`, `--no-init`, the auto-chain, and the `--dry-run` short-circuit. 4 new skill-plus tests for `--include-global` (default-off shape, walks-both, collision flagging, empty-global-dir). Total: 303 passing across the framework (138 agent_plus + 28 marketplace_lifecycle + 37 wizard + 87 skill-plus + 9 install + 4 skill-plus include-global already counted in 87).
+- Cross-platform verified on Windows, macOS, Linux. `pathlib` everywhere, `shutil.which()` for executable checks, UTF-8 on every file I/O, ASCII-safe stderr fallback for cp1252 consoles.
+
 ## 0.11.0 - 2026-04-30
 
 **Breaking — plugin rename.** The meta plugin is now `agent-plus-meta` (previously: `agent-plus`).

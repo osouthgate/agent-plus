@@ -252,3 +252,78 @@ go
     skill = payload["skills"][0]
     assert all(skill["frontmatter"].values()), skill["frontmatter"]
     assert all(skill["body"].values()), skill["body"]
+
+
+# ─── --include-global tests (v0.12.0) ────────────────────────────────────────
+
+
+def _make_global_skill(home: Path, name: str, skill_md: str = GOOD_SKILL_MD) -> Path:
+    """Create a skill under <home>/.claude/skills/<name>/."""
+    global_skills = home / ".claude" / "skills"
+    global_skills.mkdir(parents=True, exist_ok=True)
+    return _make_skill(global_skills, name, skill_md,
+                       launcher_py_content=GOOD_SKILL_PY, with_cmd=True)
+
+
+def test_include_global_default_off_yields_only_project_scope(project: Path,
+                                                              tmp_path: Path):
+    fake_home = tmp_path / "fake-home"
+    _make_global_skill(fake_home, "global-only-skill")
+    res = _run("list", "--project", str(project),
+               env={"HOME": str(fake_home), "USERPROFILE": str(fake_home)})
+    payload = _payload(res)
+    # Without --include-global, the global skill is invisible. Existing
+    # envelope shape (no `scope`/`scopes`/`collisions` keys) is preserved
+    # so back-compat with all pre-v0.12.0 consumers holds.
+    assert payload["skillsTotal"] == 3
+    assert "scopes" not in payload
+    assert "collisions" not in payload
+    for s in payload["skills"]:
+        assert "scope" not in s
+
+
+def test_include_global_walks_both_scopes(project: Path, tmp_path: Path):
+    fake_home = tmp_path / "fake-home"
+    _make_global_skill(fake_home, "global-only-skill")
+    res = _run("list", "--include-global", "--project", str(project),
+               env={"HOME": str(fake_home), "USERPROFILE": str(fake_home)})
+    payload = _payload(res)
+    # 3 project + 1 global
+    assert payload["skillsTotal"] == 4
+    assert payload["scopes"]["project"]["count"] == 3
+    assert payload["scopes"]["global"]["count"] == 1
+    # Every row carries a scope tag.
+    by_name = {s["name"]: s for s in payload["skills"]}
+    assert by_name["global-only-skill"]["scope"] == "global"
+    assert by_name["good-skill"]["scope"] == "project"
+    assert payload["collisions"] == []  # no name overlap
+
+
+def test_include_global_flags_collisions(project: Path, tmp_path: Path):
+    fake_home = tmp_path / "fake-home"
+    # Same name in both scopes → collision.
+    _make_global_skill(fake_home, "good-skill")
+    _make_global_skill(fake_home, "another-global")
+    res = _run("list", "--include-global", "--project", str(project),
+               env={"HOME": str(fake_home), "USERPROFILE": str(fake_home)})
+    payload = _payload(res)
+    assert payload["collisions"] == ["good-skill"]
+    # Both rows for `good-skill` carry collision: true.
+    matches = [s for s in payload["skills"] if s["name"] == "good-skill"]
+    assert len(matches) == 2
+    assert all(s.get("collision") is True for s in matches)
+    # Non-colliding rows do NOT carry the flag.
+    non_colliding = [s for s in payload["skills"] if s["name"] == "another-global"]
+    assert len(non_colliding) == 1
+    assert "collision" not in non_colliding[0]
+
+
+def test_include_global_with_no_global_dir_is_empty(project: Path, tmp_path: Path):
+    fake_home = tmp_path / "fake-home-empty"
+    fake_home.mkdir()  # exists but no .claude/skills/ underneath
+    res = _run("list", "--include-global", "--project", str(project),
+               env={"HOME": str(fake_home), "USERPROFILE": str(fake_home)})
+    payload = _payload(res)
+    assert payload["scopes"]["global"]["count"] == 0
+    assert payload["scopes"]["project"]["count"] == 3
+    assert payload["collisions"] == []

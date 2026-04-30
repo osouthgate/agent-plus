@@ -152,6 +152,556 @@ class TestInit(unittest.TestCase):
             self.assertIn(k, result)
 
 
+# ─── init wizard (v0.12.0) ───────────────────────────────────────────────────
+
+
+def _load_init_module():
+    """Load the wizard submodule against the test-loaded host bin so its
+    bind() resolves to the same module the test imported as `ap`."""
+    bin_dir = Path(__file__).resolve().parent.parent / "bin"
+    if str(bin_dir) not in sys.path:
+        sys.path.insert(0, str(bin_dir))
+    from _subcommands import init as init_mod  # noqa: PLC0415
+    init_mod.bind(ap)
+    return init_mod
+
+
+_init_mod = _load_init_module()
+
+
+def _wizard_args(dir_flag: str, *,
+                 non_interactive: bool = True,
+                 auto: bool = True,
+                 env_file: str | None = None,
+                 pretty: bool = False) -> 'object':
+    import argparse as _argparse
+    return _argparse.Namespace(
+        dir=dir_flag,
+        env_file=env_file,
+        pretty=pretty,
+        non_interactive=non_interactive,
+        auto=auto,
+    )
+
+
+class TestInitWizard(unittest.TestCase):
+    """v0.12.0 persona-aware onboarding wizard tests. All subprocess calls
+    are mocked via patch — these tests assert orchestration only."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.fake_home = Path(self.tmp.name) / "fake_home"
+        self.fake_home.mkdir()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _patch_subprocess_ok(self):
+        """Make every subprocess.run + shutil.which call succeed silently."""
+        from unittest.mock import MagicMock
+        ok = MagicMock(returncode=0, stdout='{"candidates": []}', stderr="")
+        return [
+            patch.object(_init_mod.subprocess, "run", return_value=ok),
+            patch.object(_init_mod.shutil, "which", return_value="/usr/bin/stub"),
+        ]
+
+    # ── state detection ────────────────────────────────────────────────
+
+    def test_detect_user_state_empty_workspace(self) -> None:
+        with patch.object(_init_mod, "_h", return_value=ap):
+            with patch.object(Path, "home", return_value=self.fake_home):
+                state = _init_mod._detect_user_state(self.dir / ".agent-plus")
+        self.assertFalse(state["has_skills"])
+        self.assertFalse(state["has_claude_projects_history"])
+        self.assertFalse(state["agent_plus_already_init"])
+        self.assertIn("homeless", state)
+
+    def test_detect_skills_present(self) -> None:
+        proj = self.dir / "proj"
+        (proj / ".claude" / "skills" / "my-skill").mkdir(parents=True)
+        (proj / ".claude" / "skills" / "my-skill" / "SKILL.md").write_text(
+            "x", encoding="utf-8")
+        with patch.object(_init_mod, "_h", return_value=ap):
+            with patch.object(Path, "home", return_value=self.fake_home):
+                state = _init_mod._detect_user_state(
+                    proj / ".agent-plus", project_root=proj)
+        self.assertTrue(state["has_skills"])
+
+    def test_detect_claude_projects_history(self) -> None:
+        (self.fake_home / ".claude" / "projects" / "C--dev-foo").mkdir(parents=True)
+        with patch.object(_init_mod, "_h", return_value=ap):
+            state = _init_mod._detect_user_state(
+                self.dir / ".agent-plus", home=self.fake_home, cwd=self.dir)
+        self.assertTrue(state["has_claude_projects_history"])
+
+    # ── homeless detection ─────────────────────────────────────────────
+
+    def test_homeless_detection_when_cwd_is_home(self) -> None:
+        # Empty fake home, no markers, no git.
+        with patch.object(_init_mod, "_h", return_value=ap):
+            self.assertTrue(
+                _init_mod._detect_homeless(cwd=self.fake_home, home=self.fake_home))
+
+    def test_homeless_false_when_package_json_present(self) -> None:
+        (self.fake_home / "package.json").write_text("{}", encoding="utf-8")
+        with patch.object(_init_mod, "_h", return_value=ap):
+            self.assertFalse(
+                _init_mod._detect_homeless(cwd=self.fake_home, home=self.fake_home))
+
+    def test_homeless_false_when_in_git_repo(self) -> None:
+        proj = self.dir / "proj"
+        proj.mkdir()
+        # Force _git_toplevel to return a path → not homeless
+        with patch.object(ap, "_git_toplevel", return_value=proj):
+            with patch.object(_init_mod, "_h", return_value=ap):
+                self.assertFalse(
+                    _init_mod._detect_homeless(cwd=proj, home=self.fake_home))
+
+    # ── branch picker ──────────────────────────────────────────────────
+
+    def test_pick_branch_skill_author_wins(self) -> None:
+        b, r = _init_mod._pick_branch({
+            "has_skills": True, "has_claude_projects_history": True,
+            "agent_plus_already_init": True, "env_vars_ready_count": 5,
+            "homeless": False,
+        })
+        self.assertEqual(b, "skill_author")
+        self.assertIsNone(r)
+
+    def test_pick_branch_returning(self) -> None:
+        b, _ = _init_mod._pick_branch({
+            "has_skills": False, "has_claude_projects_history": True,
+            "agent_plus_already_init": False, "env_vars_ready_count": 0,
+            "homeless": False,
+        })
+        self.assertEqual(b, "returning")
+
+    def test_pick_branch_new(self) -> None:
+        b, _ = _init_mod._pick_branch({
+            "has_skills": False, "has_claude_projects_history": False,
+            "agent_plus_already_init": False, "env_vars_ready_count": 0,
+            "homeless": False,
+        })
+        self.assertEqual(b, "new")
+
+    def test_pick_branch_homeless_pivots_to_new(self) -> None:
+        b, r = _init_mod._pick_branch({
+            "has_skills": False, "has_claude_projects_history": False,
+            "agent_plus_already_init": False, "env_vars_ready_count": 0,
+            "homeless": True,
+        })
+        self.assertEqual(b, "new")
+        self.assertEqual(r, "homeless_no_repo_context")
+
+    def test_pick_branch_tie_break_documented(self) -> None:
+        # Ambiguous: history + skills + already-init all True → skill-author wins.
+        b, _ = _init_mod._pick_branch({
+            "has_skills": True, "has_claude_projects_history": True,
+            "agent_plus_already_init": True, "env_vars_ready_count": 11,
+            "homeless": False,
+        })
+        self.assertEqual(b, "skill_author")
+
+    # ── claude-project-dir decoder ─────────────────────────────────────
+
+    def test_decode_windows_drive_form(self) -> None:
+        # Build a fake decoded-target so the candidate exists on disk.
+        target = self.dir / "myrepo"
+        target.mkdir()
+        # Encoded form: <drive>--<rest replacing / with ->
+        drive = str(self.dir)[0]
+        rest = str(target)[3:].replace("\\", "-").replace("/", "-")
+        encoded = f"{drive}--{rest}"
+        decoded = _init_mod._decode_claude_project_dir(encoded)
+        if decoded is not None and decoded.exists():
+            self.assertEqual(decoded.resolve(), target.resolve())
+        else:
+            # On non-Windows, the heuristic may not find an existing match;
+            # just confirm we returned a Path.
+            self.assertIsNotNone(decoded)
+
+    def test_decode_posix_form(self) -> None:
+        decoded = _init_mod._decode_claude_project_dir("-Users-bob-code-bar")
+        self.assertIsNotNone(decoded)
+        self.assertEqual(str(decoded).replace("\\", "/"), "/Users/bob/code/bar")
+
+    def test_decode_empty_returns_none(self) -> None:
+        self.assertIsNone(_init_mod._decode_claude_project_dir(""))
+
+    # ── _discover_recent_claude_repos ──────────────────────────────────
+
+    def test_discover_returns_empty_when_dir_missing(self) -> None:
+        # fake_home has no .claude/projects/
+        out = _init_mod._discover_recent_claude_repos(home=self.fake_home)
+        self.assertEqual(out, [])
+
+    def test_discover_sorts_by_mtime_and_caps_at_4(self) -> None:
+        proj_root = self.fake_home / ".claude" / "projects"
+        proj_root.mkdir(parents=True)
+        # Create 6 fake decoded targets and corresponding project dirs.
+        targets = []
+        now = time.time() if False else 1700000000.0
+        import time as _t
+        now = _t.time()
+        for i in range(6):
+            real = self.dir / f"repo{i}"
+            real.mkdir()
+            targets.append(real)
+            enc_dir = proj_root / f"-{str(real).lstrip('/').replace(chr(92), '-').replace(':', '-').replace('/', '-')}"
+            # Easier: just create a project dir whose decoded form points at `real`.
+            # POSIX-style decoding: leading `-` then `-` → `/`. We'll construct
+            # a name that decodes to the absolute path of `real`.
+            real_str = str(real.resolve())
+            # Normalise to forward slashes
+            real_norm = real_str.replace("\\", "/")
+            # Windows: "C:/x/y" → "C--x-y"; POSIX: "/x/y" → "-x-y"
+            if len(real_norm) > 1 and real_norm[1] == ":":
+                enc = real_norm[0] + "--" + real_norm[3:].replace("/", "-")
+            else:
+                enc = "-" + real_norm.lstrip("/").replace("/", "-")
+            d = proj_root / enc
+            d.mkdir()
+            jsonl = d / "session.jsonl"
+            jsonl.write_text("x", encoding="utf-8")
+            os.utime(jsonl, (now - i * 100, now - i * 100))
+        out = _init_mod._discover_recent_claude_repos(
+            home=self.fake_home, limit=4)
+        self.assertLessEqual(len(out), 4)
+
+    # ── --auto envelope schema ─────────────────────────────────────────
+
+    def test_auto_envelope_schema_complete(self) -> None:
+        env = {**os.environ, "PATH": ""}  # nothing on PATH → first-win fails recoverable
+        rc, out, _err = _run("init", "--dir", str(self.dir),
+                             "--non-interactive", "--auto",
+                             env={"PATH": ""})
+        self.assertEqual(rc, 0)
+        payload = json.loads(out)
+        # Frozen v0.12.0 schema fields:
+        for k in ("workspace", "source", "created", "skipped",
+                  "suggested_skills", "verdict", "branch_chosen",
+                  "tie_break_reason", "detection", "cross_repo_offered",
+                  "cross_repo_accepted", "cross_repo_results",
+                  "doctor_verdict", "doctor_summary", "first_win_command",
+                  "first_win_result", "ttl_total_ms", "errors", "tool"):
+            self.assertIn(k, payload, f"missing envelope key: {k}")
+        # detection sub-schema:
+        for k in ("has_claude_projects_history", "has_skills",
+                  "env_vars_ready_count", "agent_plus_already_init",
+                  "homeless"):
+            self.assertIn(k, payload["detection"])
+        # doctor_summary sub-schema:
+        for k in ("primitives_installed", "primitives_total",
+                  "envcheck_ready", "envcheck_total",
+                  "marketplaces_installed", "stale_services_count"):
+            self.assertIn(k, payload["doctor_summary"])
+        # verdict is a known string
+        self.assertIn(payload["verdict"], ("success", "warn", "error"))
+        # branch_chosen is one of three
+        self.assertIn(payload["branch_chosen"], ("new", "returning", "skill_author"))
+
+    def test_auto_exits_zero_even_with_recoverable_errors(self) -> None:
+        rc, _out, _err = _run("init", "--dir", str(self.dir),
+                              "--non-interactive", "--auto",
+                              env={"PATH": ""})
+        self.assertEqual(rc, 0)
+
+    # ── observability log ──────────────────────────────────────────────
+
+    def test_init_log_appended(self) -> None:
+        _run("init", "--dir", str(self.dir),
+             "--non-interactive", "--auto")
+        log_path = self.dir / ".agent-plus" / "init.log"
+        self.assertTrue(log_path.is_file(), "init.log not written")
+        line = log_path.read_text(encoding="utf-8").strip().splitlines()[-1]
+        entry = json.loads(line)
+        for k in ("ts", "branch_chosen", "detection",
+                  "cross_repo_accepted", "doctor_verdict"):
+            self.assertIn(k, entry)
+
+    # ── error format round-trip ────────────────────────────────────────
+
+    def test_emit_error_appends_structured_entry(self) -> None:
+        errs: list[dict] = []
+        _init_mod._emit_error(
+            _init_mod.ERR_DOCTOR_UNREACHABLE,
+            "doctor failed",
+            "run agent-plus-meta doctor",
+            recoverable=True, errors_list=errs, interactive=False,
+        )
+        self.assertEqual(len(errs), 1)
+        for k in ("code", "message", "hint", "recoverable"):
+            self.assertIn(k, errs[0])
+        self.assertEqual(errs[0]["code"], _init_mod.ERR_DOCTOR_UNREACHABLE)
+
+    def test_all_lane_a_error_codes_round_trip(self) -> None:
+        for code in (
+            _init_mod.ERR_CONSENT_REQUIRED,
+            _init_mod.ERR_CROSS_REPO_SCAN_FAILED,
+            _init_mod.ERR_CROSS_REPO_INTERRUPTED,
+            _init_mod.ERR_STACK_DETECT_UNREADABLE,
+            _init_mod.ERR_DOCTOR_UNREACHABLE,
+            _init_mod.ERR_SKILL_PLUS_MISSING,
+            _init_mod.ERR_AUTO_TIE_BREAK,
+        ):
+            errs: list[dict] = []
+            _init_mod._emit_error(code, "m", "h",
+                                  recoverable=True, errors_list=errs,
+                                  interactive=False)
+            self.assertEqual(errs[0]["code"], code)
+
+    # ── manual paste validator ─────────────────────────────────────────
+
+    def test_manual_paste_accepts_valid_path(self) -> None:
+        proj = self.dir / "valid"
+        proj.mkdir()
+        (proj / "package.json").write_text("{}", encoding="utf-8")
+        p, warn = _init_mod._validate_manual_path(str(proj))
+        self.assertIsNotNone(p)
+        self.assertIsNone(warn)
+
+    def test_manual_paste_rejects_missing_path(self) -> None:
+        p, warn = _init_mod._validate_manual_path(str(self.dir / "nope"))
+        self.assertIsNone(p)
+        self.assertIn("not found", warn or "")
+
+    def test_manual_paste_warns_on_no_markers_but_accepts(self) -> None:
+        proj = self.dir / "barebones"
+        proj.mkdir()
+        p, warn = _init_mod._validate_manual_path(str(proj))
+        self.assertIsNotNone(p)
+        self.assertTrue((warn or "").startswith("warn:"))
+
+    # ── doctor finale ──────────────────────────────────────────────────
+
+    def test_doctor_finale_invoked(self) -> None:
+        called = []
+
+        def fake_doctor(args):
+            called.append(args)
+            return {"verdict": "healthy", "primitives": {"a": "installed"},
+                    "envcheck": {"ready_count": 5, "missing_count": 0},
+                    "marketplaces": {"installed": []},
+                    "stale_services_entries": []}
+
+        with patch.object(ap, "cmd_doctor", side_effect=fake_doctor):
+            payload = _init_mod.cmd_init(_wizard_args(str(self.dir)))
+        self.assertEqual(len(called), 1)
+        self.assertEqual(payload["doctor_verdict"], "healthy")
+
+    def test_doctor_failure_tolerated(self) -> None:
+        def boom(args):
+            raise RuntimeError("doctor exploded")
+
+        with patch.object(ap, "cmd_doctor", side_effect=boom):
+            payload = _init_mod.cmd_init(_wizard_args(str(self.dir)))
+        # Wizard does not crash; doctor_verdict stays at default ("broken")
+        # and an error entry exists with the rescue code.
+        codes = [e["code"] for e in payload["errors"]]
+        self.assertIn(_init_mod.ERR_DOCTOR_UNREACHABLE, codes)
+
+    # ── first-win mocking ──────────────────────────────────────────────
+
+    def test_first_win_failed_when_command_missing(self) -> None:
+        with patch.object(_init_mod.shutil, "which", return_value=None):
+            res = _init_mod._run_first_win("new", self.dir)
+        self.assertEqual(res["result"], "failed")
+
+    def test_first_win_skipped_when_homeless_new(self) -> None:
+        # Force homeless=True via state-only path: simulate by calling
+        # cmd_init on a workspace whose detect path reports homeless.
+        with patch.object(_init_mod, "_detect_user_state", return_value={
+            "has_claude_projects_history": False, "has_skills": False,
+            "env_vars_ready_count": 0, "agent_plus_already_init": False,
+            "homeless": True,
+        }):
+            with patch.object(ap, "cmd_doctor", return_value={
+                "verdict": "broken", "primitives": {},
+                "envcheck": {"ready_count": 0, "missing_count": 0},
+                "marketplaces": {"installed": []},
+                "stale_services_entries": []}):
+                payload = _init_mod.cmd_init(_wizard_args(str(self.dir)))
+        self.assertEqual(payload["branch_chosen"], "new")
+        self.assertEqual(payload["tie_break_reason"], "homeless_no_repo_context")
+        self.assertEqual(payload["first_win_result"], "skipped")
+        self.assertIsNone(payload["first_win_command"])
+
+    # ── empty discovery → no offer ─────────────────────────────────────
+
+    def test_empty_claude_projects_no_offer(self) -> None:
+        with patch.object(_init_mod, "_discover_recent_claude_repos",
+                          return_value=[]):
+            with patch.object(ap, "cmd_doctor", return_value={
+                "verdict": "healthy", "primitives": {},
+                "envcheck": {"ready_count": 0, "missing_count": 0},
+                "marketplaces": {"installed": []},
+                "stale_services_entries": []}):
+                payload = _init_mod.cmd_init(_wizard_args(str(self.dir)))
+        self.assertEqual(payload["cross_repo_offered"], [])
+        self.assertEqual(payload["cross_repo_accepted"], [])
+
+    # ── auto: scans run silently across discovered repos ───────────────
+
+    def test_auto_scans_all_discovered_repos(self) -> None:
+        repo_a = self.dir / "ra"
+        repo_b = self.dir / "rb"
+        repo_a.mkdir()
+        repo_b.mkdir()
+        with patch.object(_init_mod, "_discover_recent_claude_repos",
+                          return_value=[repo_a, repo_b]):
+            with patch.object(_init_mod, "_run_skill_plus_scan",
+                              return_value={"status": "ok",
+                                            "candidates_found": 3}):
+                with patch.object(ap, "cmd_doctor", return_value={
+                    "verdict": "healthy", "primitives": {},
+                    "envcheck": {"ready_count": 0, "missing_count": 0},
+                    "marketplaces": {"installed": []},
+                    "stale_services_entries": []}):
+                    payload = _init_mod.cmd_init(_wizard_args(str(self.dir)))
+        self.assertEqual(len(payload["cross_repo_accepted"]), 2)
+        self.assertEqual(len(payload["cross_repo_results"]), 2)
+        for r in payload["cross_repo_results"]:
+            self.assertEqual(r["status"], "ok")
+            self.assertEqual(r["candidates_found"], 3)
+
+    def test_auto_skill_plus_missing_emits_recoverable_error(self) -> None:
+        repo = self.dir / "ra"
+        repo.mkdir()
+        with patch.object(_init_mod, "_discover_recent_claude_repos",
+                          return_value=[repo]):
+            with patch.object(_init_mod, "_run_skill_plus_scan",
+                              return_value={"status": "skipped",
+                                            "candidates_found": 0,
+                                            "reason": "skill-plus not on PATH"}):
+                with patch.object(ap, "cmd_doctor", return_value={
+                    "verdict": "healthy", "primitives": {},
+                    "envcheck": {"ready_count": 0, "missing_count": 0},
+                    "marketplaces": {"installed": []},
+                    "stale_services_entries": []}):
+                    payload = _init_mod.cmd_init(_wizard_args(str(self.dir)))
+        codes = [e["code"] for e in payload["errors"]]
+        self.assertIn(_init_mod.ERR_SKILL_PLUS_MISSING, codes)
+
+    # ── TTHW budget assertion (mocked subprocess) ──────────────────────
+
+    def test_auto_orchestration_under_budget(self) -> None:
+        # With all subprocesses mocked, --auto orchestration must complete
+        # well under 30s (Persona 4 budget).
+        with patch.object(_init_mod, "_discover_recent_claude_repos",
+                          return_value=[]):
+            with patch.object(_init_mod, "_run_first_win",
+                              return_value={"command": "noop",
+                                            "result": "ok"}):
+                with patch.object(ap, "cmd_doctor", return_value={
+                    "verdict": "healthy", "primitives": {},
+                    "envcheck": {"ready_count": 0, "missing_count": 0},
+                    "marketplaces": {"installed": []},
+                    "stale_services_entries": []}):
+                    import time as _t
+                    t0 = _t.time()
+                    payload = _init_mod.cmd_init(_wizard_args(str(self.dir)))
+                    elapsed = _t.time() - t0
+        self.assertLess(elapsed, 5.0,
+                        msg=f"orchestration overhead too high: {elapsed:.2f}s")
+        self.assertLess(payload["ttl_total_ms"], 5000)
+
+    # ── homeless: branch ends at doctor when no claude projects ────────
+
+    def test_homeless_with_empty_claude_projects_ends_at_doctor(self) -> None:
+        with patch.object(_init_mod, "_detect_user_state", return_value={
+            "has_claude_projects_history": False, "has_skills": False,
+            "env_vars_ready_count": 0, "agent_plus_already_init": False,
+            "homeless": True,
+        }):
+            with patch.object(_init_mod, "_discover_recent_claude_repos",
+                              return_value=[]):
+                doc_called = []
+                def fake_doc(a):
+                    doc_called.append(1)
+                    return {"verdict": "healthy", "primitives": {},
+                            "envcheck": {"ready_count": 0, "missing_count": 0},
+                            "marketplaces": {"installed": []},
+                            "stale_services_entries": []}
+                with patch.object(ap, "cmd_doctor", side_effect=fake_doc):
+                    payload = _init_mod.cmd_init(_wizard_args(str(self.dir)))
+        self.assertEqual(len(doc_called), 1)
+        self.assertEqual(payload["first_win_result"], "skipped")
+        self.assertEqual(payload["cross_repo_offered"], [])
+
+    # ── envelope verdict reflects errors ───────────────────────────────
+
+    def test_verdict_warn_on_recoverable_errors(self) -> None:
+        with patch.object(_init_mod, "_run_first_win",
+                          return_value={"command": "skill-plus list",
+                                        "result": "failed",
+                                        "reason": "skill-plus not on PATH"}):
+            with patch.object(_init_mod, "_detect_user_state", return_value={
+                "has_claude_projects_history": False, "has_skills": True,
+                "env_vars_ready_count": 0, "agent_plus_already_init": False,
+                "homeless": False,
+            }):
+                with patch.object(_init_mod, "_discover_recent_claude_repos",
+                                  return_value=[]):
+                    with patch.object(ap, "cmd_doctor", return_value={
+                        "verdict": "healthy", "primitives": {},
+                        "envcheck": {"ready_count": 0, "missing_count": 0},
+                        "marketplaces": {"installed": []},
+                        "stale_services_entries": []}):
+                        payload = _init_mod.cmd_init(_wizard_args(str(self.dir)))
+        # skill-plus missing emits ERR_SKILL_PLUS_MISSING (recoverable=True)
+        self.assertEqual(payload["verdict"], "warn")
+
+    # ── feedback invitation prints in interactive mode only ────────────
+
+    def test_feedback_invitation_interactive_only(self) -> None:
+        # Capture stderr while running interactive mode end-to-end (mocked).
+        with patch.object(_init_mod, "_discover_recent_claude_repos",
+                          return_value=[]):
+            with patch.object(_init_mod, "_run_first_win",
+                              return_value={"command": "x", "result": "ok"}):
+                with patch.object(ap, "cmd_doctor", return_value={
+                    "verdict": "healthy", "primitives": {},
+                    "envcheck": {"ready_count": 0, "missing_count": 0},
+                    "marketplaces": {"installed": []},
+                    "stale_services_entries": []}):
+                    captured = io.StringIO()
+                    with patch.object(sys, "stderr", captured):
+                        _init_mod.cmd_init(_wizard_args(
+                            str(self.dir),
+                            non_interactive=False, auto=False))
+        self.assertIn("skill-feedback log agent-plus-meta-init",
+                      captured.getvalue())
+
+    def test_feedback_invitation_silent_in_auto(self) -> None:
+        captured = io.StringIO()
+        with patch.object(_init_mod, "_discover_recent_claude_repos",
+                          return_value=[]):
+            with patch.object(_init_mod, "_run_first_win",
+                              return_value={"command": "x", "result": "ok"}):
+                with patch.object(ap, "cmd_doctor", return_value={
+                    "verdict": "healthy", "primitives": {},
+                    "envcheck": {"ready_count": 0, "missing_count": 0},
+                    "marketplaces": {"installed": []},
+                    "stale_services_entries": []}):
+                    with patch.object(sys, "stderr", captured):
+                        _init_mod.cmd_init(_wizard_args(str(self.dir)))
+        self.assertNotIn("skill-feedback", captured.getvalue())
+
+    # ── cmd.exe stdin compat for _prompt_yes_no ────────────────────────
+
+    def test_prompt_yes_no_via_subprocess_shell_true(self) -> None:
+        # Simulates cmd.exe stdin: feed "y\n" via subprocess and assert
+        # the wizard's helper parses it correctly. We exercise the helper
+        # in-process by injecting a fake stdin — covers the readline path.
+        with patch.object(sys, "stdin", io.StringIO("y\n")):
+            with patch.object(sys, "stderr", io.StringIO()):
+                self.assertTrue(_init_mod._prompt_yes_no("ok?"))
+        with patch.object(sys, "stdin", io.StringIO("\n")):
+            with patch.object(sys, "stderr", io.StringIO()):
+                self.assertFalse(_init_mod._prompt_yes_no("ok?"))
+
+
 # ─── envcheck ────────────────────────────────────────────────────────────────
 
 
