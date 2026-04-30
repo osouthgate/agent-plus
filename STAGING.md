@@ -77,19 +77,20 @@ Wrapper-related topic adds (`github-remote`, `vercel-remote`, etc.) are no longe
 | v0.2.0 | `c923160` | 2026-04-28 | Status README + framework-only restructure |
 | v0.9.0 | `db7ff68` | 2026-04-28 | Marketplace install/update/list/remove + trust model (Phase 2) |
 | v0.9.1 | `abe11db` | 2026-04-30 | Papercut bundle: services.json cleanup, repo-analyze deque BFS, diff-summary public-API regex fix, slice-8 coverage |
+| v0.10.0 | `6f24782` | 2026-04-30 | skill-plus 0.1.0 (the fifth universal primitive — scan/propose/install-cron/scaffold/list/feedback/promote, 83 tests). agent-plus marketplace `search` + collision-resolution `prefer` (Phase 4). `core.autocrlf=false` pinned by `agent-plus init`. Wrappers deprecated from this repo's marketplace.json. Root + agent-plus README rewrite. PR #9. Topic `skill-plus` added to public repo. |
 
 **Upcoming slices** (not yet shipped):
 
 | Slice | Topic | Notes |
 |---|---|---|
-| A | `skill-plus` 0.1.0 — scan + propose | Per [`plans/todo/2026-04-28-skill-plus-plugin.md`](./plans/todo/2026-04-28-skill-plus-plugin.md). Triggers the `skill-plus` topic add. |
-| MP4 | marketplace `search` + collision-resolution `prefer` (Phase 4 of the convention) | Future. Phase 4 is ergonomics, not a trust-model gate — safe to ship later. |
+
+(Empty — promotion queue cleared 2026-04-30 with v0.10.0.)
 
 Note: slice 6 (`d9ce987`) is `STAGING.md` + staging banner — **PRIVATE ONLY, never cherry-pick**. Slice 7 (`1758144`) is `plans/todo/2026-04-28-backlog-status.md` — also private (the public repo doesn't track `plans/todo/`).
 
 ### Doc follow-ups noted but not yet shipped
 
-- `core.autocrlf=false` in test_init_repo for Windows safety. Not a blocker; worth adding eventually.
+(Empty — `core.autocrlf=false` shipped in v0.10.0.)
 
 ## What's intentionally NOT in this file
 
