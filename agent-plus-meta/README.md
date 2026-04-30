@@ -16,6 +16,10 @@ agent-plus-meta refresh    [--dir PATH] [--env-file PATH] [--plugin <name>]
 agent-plus-meta list       [--dir PATH] [--names-only] [--pretty]
 agent-plus-meta extensions list|validate|add|remove [--dir PATH] [--pretty]
 agent-plus-meta marketplace init|search|prefer ...
+agent-plus-meta upgrade-check [--force] [--snooze 24h|48h|7d|never] [--clear-snooze]
+                              [--timeout SEC] [--no-telemetry] [--json]
+agent-plus-meta upgrade    [--non-interactive] [--auto] [--user-choice yes|always|snooze|never]
+                              [--rollback] [--dry-run] [--no-telemetry] [--json]
 agent-plus-meta --version
 ```
 
@@ -261,6 +265,121 @@ agent-plus-meta marketplace prefer alice/agent-plus-skills --skill repo-analyze
 agent-plus-meta marketplace prefer --list --pretty
 agent-plus-meta marketplace prefer --clear --skill repo-analyze
 ```
+
+### `upgrade-check`
+
+Cached probe — answers "is there a newer agent-plus available?" without ever blocking a workflow. Reads the single-root [`VERSION`](../VERSION) file at `raw.githubusercontent.com/osouthgate/agent-plus/main/VERSION` (tag-bound, NOT derived from any plugin's `plugin.json`).
+
+```bash
+agent-plus-meta upgrade-check                  # default: read cache, probe network on miss
+agent-plus-meta upgrade-check --force          # bypass cache, always probe
+agent-plus-meta upgrade-check --snooze 24h     # advance the ladder: 24h → 48h → 7d → never
+agent-plus-meta upgrade-check --clear-snooze   # reset the snooze ladder to none
+agent-plus-meta upgrade-check --timeout 5      # network timeout in seconds (default 3, max 10)
+```
+
+Cache lives at `~/.agent-plus/upgrade/cache.json` — TTL 60min for `up_to_date`, 720min for `upgrade_available`. Snooze state at `~/.agent-plus/upgrade/snooze.json`. Both files reset automatically when a new latest version is detected.
+
+The probe is best-effort: any network failure (timeout, DNS, HTTP non-2xx, malformed body) degrades to verdict `unknown` and the workflow proceeds. Next probe in ~60min retries.
+
+#### `upgrade-check` envelope (frozen at v0.13.5)
+
+```json
+{
+  "tool": {"name": "agent-plus-meta", "version": "0.13.5"},
+  "verdict": "up_to_date" | "upgrade_available" | "just_upgraded" | "unknown",
+  "current_version": "0.13.5",
+  "latest_version": "0.13.5" | null,
+  "version_source": "root_VERSION_file",
+  "cache":   {"hit": true, "age_sec": 0, "ttl_sec": 3600},
+  "snooze":  {"active": false, "expires_ts": null, "ladder_step": "none"},
+  "config":  {"update_check": true, "silent_upgrade": false},
+  "network": {"attempted": false, "ok": false, "elapsed_ms": 0, "error": null},
+  "ttl_total_ms": 3,
+  "errors": []
+}
+```
+
+Frozen for v0.13.5. Additive enum widening (e.g., new `verdict` values) is non-breaking; field renames or removals require a major bump.
+
+### `upgrade`
+
+The action. Detects how agent-plus is installed (`global` for `~/.local/bin` or `$AGENT_PLUS_INSTALL_DIR`; `git_local` for clones), takes a per-bin `.bak` snapshot at `~/.agent-plus/.bak/<UTC-timestamp>/<bin>.bak`, downloads each of the 5 framework primitives from GitHub raw, atomically replaces them, runs any pending migrations, and gates on a post-test `cmd_doctor()` call. Verdict `broken` triggers automatic rollback from the `.bak` set.
+
+```bash
+agent-plus-meta upgrade                        # interactive 4-option prompt
+agent-plus-meta upgrade --non-interactive --auto       # pick the recommended option silently
+agent-plus-meta upgrade --user-choice yes              # explicit choice (also: always | snooze | never)
+agent-plus-meta upgrade --rollback                     # restore the most recent .bak set; no upgrade
+agent-plus-meta upgrade --dry-run                      # show what would happen, change nothing
+```
+
+#### 4-option prompt (interactive)
+
+The same shape as gstack's upgrade prompt:
+
+| Choice  | Action |
+|---------|--------|
+| **Yes**     | Apply this upgrade now. |
+| **Always**  | Sets `silent_upgrade: true` and applies. Future patch bumps land silently; minor/major still prompts. |
+| **Snooze**  | Advances the ladder (24h → 48h → 7d → never), no upgrade. |
+| **Never**   | Sets `update_check: false`, no upgrade. Re-enable with `agent-plus-meta upgrade-check --clear-snooze` plus a config edit. |
+
+#### `silent_upgrade` config vs `--auto` CLI flag
+
+These are two distinct concepts (the names look similar; they aren't):
+
+- **`silent_upgrade: bool`** in `~/.agent-plus/config.json` (default `false`) means *"skip the upgrade prompt entirely on patch bumps."* Hardcoded patch-only in v0.13.5 — minor and major bumps always prompt regardless. Set by choosing **Always** in the prompt, or by hand-editing `config.json`.
+- **`--auto`** CLI flag means *"non-interactive, pick the recommended option."* Used by automation (`install.sh --upgrade --auto`, `agent-plus-installer` skill). Under `--auto`, the recommended pick is **Yes** by default — or **Always** when `silent_upgrade=true` AND the bump is a patch (per T5).
+
+#### Migrations
+
+Each migration module under `agent-plus-meta/migrations/v*.py` exposes:
+
+```python
+from pathlib import Path
+def migrate(workspace: Path) -> dict:
+    return {"status": "ok" | "skipped" | "failed", "message": "...", "changes": [...]}
+```
+
+Idempotent. History persists at `~/.agent-plus/migrations.json` keyed by id (filename stem, e.g. `v0_13_5`). Empty on day one — see [migrations/README.md](./migrations/README.md) for the full contract.
+
+#### `upgrade` envelope (frozen at v0.13.5)
+
+```json
+{
+  "tool": {"name": "agent-plus-meta", "version": "0.13.5"},
+  "verdict": "success" | "noop" | "warn" | "error" | "rolled_back",
+  "from_version": "0.13.5",
+  "to_version": "0.13.5",
+  "install_type_detected": "global" | "git_local" | "unknown",
+  "bins_replaced": [
+    {"name": "agent-plus-meta", "from": "0.13.5", "to": "0.13.5",
+     "status": "ok" | "skipped" | "failed",
+     "backup_path": "/abs/path/to/.bak"}
+  ],
+  "migrations_applied": [
+    {"id": "v0_13_5", "status": "ok" | "skipped_already_applied" | "failed",
+     "duration_ms": 12}
+  ],
+  "post_test": {"doctor_verdict": "healthy" | "degraded" | "broken",
+                "rollback_triggered": false},
+  "user_choice": "yes" | "always" | "snooze" | "never" | "auto",
+  "ttl_total_ms": 142,
+  "errors": []
+}
+```
+
+#### Stable error codes (v0.13.5)
+
+Four codes, mirroring v0.12.0's pattern:
+
+1. `upgrade_check_network_failed` — curl/DNS/HTTP failure on the probe. Recoverable; next probe retries.
+2. `upgrade_partial_failure` — one or more primitives failed to replace. Auto-rollback fires.
+3. `upgrade_migration_failed` — a migration script raised. Rollback triggered.
+4. `upgrade_rollback_required` — post-upgrade doctor returned `broken`. Bins restored from `.bak`.
+
+User-declined runs are NOT errors — verdict `noop` plus `user_choice: "snooze" | "never"` carries that signal. Telemetry derives the declined-rate from `user_choice` distribution.
 
 ## What it doesn't do
 
