@@ -73,6 +73,26 @@ python3 -m pytest <plugin>/test/ -v
 
 Each plugin owns its own test suite. Cross-plugin contract tests live under `agent-plus-meta/test/contract/` and run automatically against the installed plugin set (resolved from `~/.claude/plugins/cache/agent-plus/` by default; override with `AGENT_PLUS_PLUGINS_DIR=<path>` to test the dev tree).
 
+## The tour GIF
+
+The animated demo at the top of the root README is rendered from a synthetic asciinema cast file checked in at `assets/tour.cast`. The cast is the source of truth — `assets/tour.gif` is a build artifact.
+
+Regenerate the cast (after adding a step to the tour or changing wording):
+
+```bash
+python3 assets/generate_tour_cast.py     # writes assets/tour.cast
+```
+
+Rebuild the GIF (needs `agg` on PATH or `docker` available):
+
+```bash
+bash assets/build_tour_gif.sh
+```
+
+The script uses [`agg`](https://github.com/asciinema/agg) directly when on PATH, falls back to the official `ghcr.io/asciinema/agg` Docker image otherwise. Install agg via `cargo install --git https://github.com/asciinema/agg` if you want the local-binary path.
+
+The cast is plain JSON (asciinema v2 format) — anyone with agg can render it without our build script.
+
 ## Doc-drift discipline
 
 When you modify `bin/<name>` or `skills/<name>/SKILL.md`, you must also update `README.md` and append a `CHANGELOG.md` entry **before** the commit. The repo's `.claude/hooks/check-readme-drift.sh` enforces this on every Stop event.
