@@ -429,7 +429,7 @@ PUBLIC_API_PATTERNS = [
     re.compile(r"^export\s+"),                       # TS/JS
     re.compile(r"^pub\s+(fn|struct|mod|enum|trait|const|static)\s+"),  # Rust
     re.compile(r"^func\s+[A-Z]"),                    # Go (capitalized = exported)
-    re.compile(r"^def\s+[a-z_][a-zA-Z0-9_]*\s*\("),  # Python top-level def
+    re.compile(r"^def\s+[a-z][a-zA-Z0-9_]*\s*\("),   # Python top-level def (public — leading `_` is private by convention)
     re.compile(r"^class\s+[A-Za-z_]"),               # Python/TS class
 ]
 

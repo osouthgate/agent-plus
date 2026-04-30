@@ -72,7 +72,7 @@ $ repo-analyze --pretty | head -40
 
 ## Performance
 
-Default caps target <2s on a typical 500-file repo. Skip-list is non-negotiable — if you're seeing slow runs, the cap is wrong, not the skip-list.
+Default caps target <2s on a typical 500-file repo. Skip-list is non-negotiable — if you're seeing slow runs, the cap is wrong, not the skip-list. Internal BFS uses `collections.deque` so traversal cost stays linear in node count regardless of cap depth.
 
 ## Offloading large responses
 
