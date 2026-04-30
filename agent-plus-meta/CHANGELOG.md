@@ -4,6 +4,33 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.15.1 - 2026-04-30
+
+Hotfix: install.sh on public main was fundamentally broken — the per-file `curl` loop downloaded only entrypoint scripts but missed each plugin's `_subcommands/` package directories and `plugin.json`, so every `from _subcommands import ...` ImportError'd at first invocation. Fresh installs reported `--version: unknown` and every wizard / upgrade / uninstall died on import. Plus 5 doc-drift fixes from the outside-opinion review and a doc-drift CI gate so this class of bug can't recur.
+
+### Fixed
+
+- **install.sh — tarball packaging (P0).** Switched from N single-file `curl` calls to one tarball download (`https://github.com/osouthgate/agent-plus/archive/refs/tags/<tag>.tar.gz`, falling back to `main` branch when no tag is set), extract, and copy each plugin's full tree to `$PREFIX/<plugin>/`. Tiny POSIX wrapper shims land in `$INSTALL_DIR/<plugin>` and `exec python3 $PREFIX/<plugin>/bin/<plugin> "$@"`. Result: `_subcommands/` and `plugin.json` ship correctly, every entrypoint imports cleanly, `--version` reports the running build instead of `unknown`. New `AGENT_PLUS_PREFIX` env (default `~/.local/share/agent-plus`); new `AGENT_PLUS_VERSION` to pin a specific tag; new `--source-dir=PATH` test-only flag for hermetic round-trip tests.
+- **install.sh test suite expanded.** 12 → 15 tests. Added `test_dryrun_mentions_tarball_url`, `test_dryrun_mentions_prefix_and_install_dir`, and `test_install_sh_round_trip_via_source_dir` (extracts the live staging tree via `--source-dir`, asserts wrappers + trees + `_subcommands/` + `plugin.json` all land correctly). Total framework test count: 399 → 405 (260 + 12 + 127 → 263 + 15 + 127).
+
+### Added
+
+- **`uninstall --auto`** — alias for `--non-interactive`. Restores parity with `init` and `upgrade` (lifecycle ring claim). Does NOT bypass `--purge` confirmation (T6 one-way door is preserved).
+- **`uninstall` removes `$PREFIX/<plugin>/` trees too.** New `kind: primitive_tree` in the manifest schema. Default scope now removes both the wrapper at `$INSTALL_DIR/<plugin>` AND the tree at `$PREFIX/<plugin>/` as one logical "primitive install" unit. Additive schema change — existing consumers parsing the envelope continue to work; new consumers can filter on the new `kind`.
+- **`uninstall --prefix PATH`** — explicit override mirroring `--install-dir`. Defaults to `AGENT_PLUS_PREFIX` env, then `~/.local/share/agent-plus`.
+- **Doc-drift CI gate.** `.github/scripts/doc-drift-check.py` + `.github/workflows/doc-drift.yml`. Asserts: `VERSION` file matches latest annotated git tag; root README badges match `VERSION`; each plugin's `plugin.json#version` is valid semver; the most recent CHANGELOG entry is dated within the last 7 days. Fails CI with line-precise errors. Catches the class of drift this hotfix is patching.
+- **Doc-drift content fixes (5 items from outside-opinion review).** Root README badges (`version-0.11.1` → `0.15.1`, `tests-377 passing` → `tests-419 passing`); `agent-plus-meta/README.md` "future v0.13.0 agent-plus-installer skill" → past tense (it shipped); per-plugin versioning explainer added to root README; envelope examples in `agent-plus-meta/README.md` get an explanatory note that `tool.version` reflects the running build (the schema literal `0.12.0` is illustrative); homeless-pivot wizard branch documented in the install section.
+
+### Changed
+
+- `install.sh` requires `tar` in addition to `curl` (POSIX-portable; both are present on every platform we target). Help text refreshed; `print_footer` now mentions both `$PREFIX` and `$INSTALL_DIR`.
+- `agent-plus-meta/.claude-plugin/plugin.json` version bumped 0.15.0 → 0.15.1.
+
+### Notes
+
+- Tarball install layout: `$PREFIX/<plugin>/{bin,*.claude-plugin,...}` + `$INSTALL_DIR/<plugin>` (wrapper). `python3 .../bin/<plugin>` works identically on Windows Git Bash, macOS, and Linux — the bin's `_HERE = Path(__file__).resolve().parent` resolves correctly because the bin lives next to its real `_subcommands/`.
+- Dogfood verification: a fresh end-to-end round-trip (extract live tree → install via `--source-dir` → wrapper exec'd → `--version` reports `0.15.0`/current — confirming the import path resolves) passed before this entry was written.
+
 ## 0.15.0 - 2026-04-30
 
 agent-plus uninstall slice. The framework finally owns its off-ramp end-to-end. Safe-by-default removal (5 bins; nothing else) with opt-in escalation flags, a self-contained `install.sh --uninstall` shell fallback for broken installs, and a frozen JSON envelope schema as public contract. Skips v0.14.0 (a skill-plus-only slice that didn't bump agent-plus-meta).

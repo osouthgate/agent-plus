@@ -3426,11 +3426,17 @@ def _build_parser() -> argparse.ArgumentParser:
                       action="store_true",
                       help="skip prompt; auto-accept the safe default OR explicitly-flagged "
                            "scope. Does NOT bypass --purge confirmation.")
+    s_un.add_argument("--auto", dest="non_interactive", action="store_true",
+                      help="alias for --non-interactive (mirrors init/upgrade idiom). "
+                           "Does NOT bypass --purge confirmation (T6 one-way door).")
     s_un.add_argument("--json", action="store_true",
                       help="emit JSON envelope only (suppress human preview)")
     s_un.add_argument("--install-dir", dest="install_dir",
                       help="explicit override for $INSTALL_DIR "
                            "(defaults to AGENT_PLUS_INSTALL_DIR or ~/.local/bin)")
+    s_un.add_argument("--prefix", dest="prefix",
+                      help="explicit override for $PREFIX (where plugin trees live; "
+                           "defaults to AGENT_PLUS_PREFIX or ~/.local/share/agent-plus)")
 
     s_refresh = sub.add_parser(
         "refresh",

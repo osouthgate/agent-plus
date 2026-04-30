@@ -1,13 +1,15 @@
 #!/bin/sh
 # install.sh — agent-plus framework one-shot installer.
 #
-# Downloads the five framework primitive bin files from GitHub raw, makes
-# them executable, and drops them into ~/.local/bin (or
-# $AGENT_PLUS_INSTALL_DIR if set). Pure POSIX shell — no bashisms.
+# Downloads a single tarball (release tag or main branch) and installs each of
+# the five framework primitives as a complete plugin tree under $PREFIX, with
+# small wrapper shims dropped into $INSTALL_DIR. Pure POSIX shell — no bashisms.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/osouthgate/agent-plus/main/install.sh | sh
 #   AGENT_PLUS_INSTALL_DIR=$HOME/bin sh install.sh
+#   AGENT_PLUS_PREFIX=$HOME/.local/share/ap sh install.sh
+#   AGENT_PLUS_VERSION=0.15.1 sh install.sh
 #   sh install.sh --dry-run        # print what would happen, install nothing
 #   sh install.sh --no-init        # skip the agent-plus-meta init chain (CI)
 #   sh install.sh --unattended     # no prompts, accept defaults, exit 0 on partial install
@@ -19,30 +21,17 @@ set -e
 
 # ─── config ──────────────────────────────────────────────────────────────────
 
-REPO_RAW="https://raw.githubusercontent.com/osouthgate/agent-plus/main"
+REPO_OWNER="osouthgate"
+REPO_NAME="agent-plus"
 INSTALL_DIR="${AGENT_PLUS_INSTALL_DIR:-$HOME/.local/bin}"
+PREFIX="${AGENT_PLUS_PREFIX:-$HOME/.local/share/agent-plus}"
 
 # Primitives shipped from the framework marketplace.
 PRIMITIVES="agent-plus-meta repo-analyze diff-summary skill-feedback skill-plus"
 
 # ─── verb dispatcher ─────────────────────────────────────────────────────────
-#
-# Generic --<verb> dispatch skeleton. v0.13.0 only implements VERB=install
-# (the existing behaviour, the default verb when none is specified). The
-# upgrade/uninstall branches exist as stubs that exit 2 — v0.13.5 fills in
-# `--upgrade`, v0.15.0 fills in `--uninstall`. This refactor is no-op for
-# every existing invocation.
-#
-# Today:   install.sh [--dry-run] [--no-init] [--unattended]
-#          install.sh --help
-#          install.sh                                      (default = install)
-# Future:  install.sh --upgrade [flags]                    (v0.13.5)
-#          install.sh --uninstall [flags]                  (v0.15.0)
 
 VERB="install"
-# Peek at the first arg only — verbs are positional-leading, never deep in
-# the flag list. This keeps the parser unambiguous and lets the install verb
-# preserve flag order exactly as before.
 case "${1:-}" in
     --upgrade)
         VERB="upgrade"
@@ -55,9 +44,6 @@ case "${1:-}" in
 esac
 
 dispatch_upgrade() {
-    # v0.13.5: delegate to `agent-plus-meta upgrade` when reachable.
-    # Fall back with a helpful pointer when the bin is broken/missing —
-    # re-running install.sh (without --upgrade) is the escape hatch.
     if command -v agent-plus-meta >/dev/null 2>&1; then
         exec agent-plus-meta upgrade "$@"
     fi
@@ -71,10 +57,6 @@ dispatch_upgrade() {
 }
 
 dispatch_uninstall() {
-    # v0.15.0: delegate to `agent-plus-meta uninstall` when reachable. When
-    # the bin is broken/partial, fall back to a self-contained POSIX shell
-    # path that removes ONLY the 5 primitive bins. Refuses expanded scopes
-    # in fallback mode (the canonical bin is the source of truth for those).
     if command -v agent-plus-meta >/dev/null 2>&1; then
         exec agent-plus-meta uninstall "$@"
     fi
@@ -94,7 +76,7 @@ dispatch_uninstall() {
             --dry-run)
                 fallback_dry=1
                 ;;
-            --non-interactive|--json)
+            --non-interactive|--auto|--json)
                 # Accepted but a no-op in fallback (we never prompt here).
                 ;;
             *)
@@ -104,26 +86,42 @@ dispatch_uninstall() {
         esac
     done
     fallback_dir="${AGENT_PLUS_INSTALL_DIR:-$HOME/.local/bin}"
-    echo "install.sh uninstall (fallback mode — bins only)"
-    echo "================================================="
+    fallback_prefix="${AGENT_PLUS_PREFIX:-$HOME/.local/share/agent-plus}"
+    echo "install.sh uninstall (fallback mode — wrappers + trees only)"
+    echo "============================================================"
     for primitive in $PRIMITIVES; do
-        target="$fallback_dir/$primitive"
+        wrapper="$fallback_dir/$primitive"
+        tree="$fallback_prefix/$primitive"
         if [ "$fallback_dry" -eq 1 ]; then
-            if [ -e "$target" ] || [ -L "$target" ]; then
-                echo "would remove: $target"
+            if [ -e "$wrapper" ] || [ -L "$wrapper" ]; then
+                echo "would remove: $wrapper"
             else
-                echo "missing:      $target"
+                echo "missing:      $wrapper"
+            fi
+            if [ -d "$tree" ]; then
+                echo "would remove: $tree"
+            else
+                echo "missing:      $tree"
             fi
             continue
         fi
-        if [ -e "$target" ] || [ -L "$target" ]; then
-            if rm -f "$target"; then
-                echo "removed: $target"
+        if [ -e "$wrapper" ] || [ -L "$wrapper" ]; then
+            if rm -f "$wrapper"; then
+                echo "removed: $wrapper"
             else
-                echo "error:   $target" >&2
+                echo "error:   $wrapper" >&2
             fi
         else
-            echo "missing: $target"
+            echo "missing: $wrapper"
+        fi
+        if [ -d "$tree" ]; then
+            if rm -rf "$tree"; then
+                echo "removed: $tree"
+            else
+                echo "error:   $tree" >&2
+            fi
+        else
+            echo "missing: $tree"
         fi
     done
     exit 0
@@ -138,6 +136,7 @@ esac
 DRY_RUN=0
 NO_INIT=0
 UNATTENDED=0
+SOURCE_DIR=""
 for arg in "$@"; do
     case "$arg" in
         --dry-run)
@@ -149,8 +148,12 @@ for arg in "$@"; do
         --unattended)
             UNATTENDED=1
             ;;
+        --source-dir=*)
+            # Test-only: bypass tarball download; copy from a local tree.
+            SOURCE_DIR="${arg#--source-dir=}"
+            ;;
         -h|--help)
-            sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -163,9 +166,49 @@ for arg in "$@"; do
     esac
 done
 
+# ─── version / tarball URL resolution ────────────────────────────────────────
+
+resolve_tag() {
+    # Resolve the tag to install. Default: AGENT_PLUS_VERSION env var, else
+    # latest GitHub release. Fall back to "main" if the API call fails.
+    if [ -n "${AGENT_PLUS_VERSION:-}" ]; then
+        echo "$AGENT_PLUS_VERSION"
+        return 0
+    fi
+    api="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest"
+    json=$(curl -fsSL "$api" 2>/dev/null || true)
+    if [ -z "$json" ]; then
+        echo "main"
+        return 0
+    fi
+    tag=$(echo "$json" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    if [ -z "$tag" ]; then
+        echo "main"
+        return 0
+    fi
+    echo "$tag"
+}
+
+tarball_url_for() {
+    # tag may be "main" (branch) or "v0.15.1" / "0.15.1" (tag).
+    tag="$1"
+    case "$tag" in
+        main|master)
+            echo "https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/heads/$tag.tar.gz"
+            ;;
+        v*)
+            echo "https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/tags/$tag.tar.gz"
+            ;;
+        *)
+            # Bare semver: prepend v.
+            echo "https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/tags/v$tag.tar.gz"
+            ;;
+    esac
+}
+
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
-# Count primitives portably (no arrays in /bin/sh).
 TOTAL=0
 for _p in $PRIMITIVES; do
     TOTAL=$((TOTAL + 1))
@@ -184,7 +227,10 @@ print_header() {
 
 print_footer() {
     echo ""
-    echo "Done. Add $INSTALL_DIR to PATH if it's not already:"
+    echo "Plugin trees installed under: $PREFIX"
+    echo "Wrapper shims installed under: $INSTALL_DIR"
+    echo ""
+    echo "Add $INSTALL_DIR to PATH if it's not already:"
     # shellcheck disable=SC2016
     echo "  echo 'export PATH=\$HOME/.local/bin:\$PATH' >> ~/.bashrc"
     echo ""
@@ -192,38 +238,48 @@ print_footer() {
     echo "  agent-plus-meta doctor --pretty"
 }
 
-install_one() {
+write_wrapper() {
     plugin="$1"
-    index="$2"
-    url="$REPO_RAW/$plugin/bin/$plugin"
     target="$INSTALL_DIR/$plugin"
+    cat > "$target" <<EOF
+#!/bin/sh
+# Auto-generated by agent-plus install.sh — do not edit.
+# Wrapper for $plugin. The real bin lives at:
+#   \$AGENT_PLUS_PREFIX/$plugin/bin/$plugin
+PREFIX="\${AGENT_PLUS_PREFIX:-\$HOME/.local/share/agent-plus}"
+exec python3 "\$PREFIX/$plugin/bin/$plugin" "\$@"
+EOF
+    chmod 755 "$target"
+}
 
-    if [ "$DRY_RUN" -eq 1 ]; then
-        printf "[%d/%d] %-18s would download %s -> %s\n" \
-            "$index" "$TOTAL" "$plugin" "$url" "$target"
-        return 0
-    fi
-
-    if ! curl -fsSL "$url" -o "$target.tmp"; then
-        printf "[%d/%d] %-18s FAILED to download %s\n" \
-            "$index" "$TOTAL" "$plugin" "$url" >&2
-        printf "[install_sh_curl_failed] %s: failed to download %s\n" \
-            "$plugin" "$url" >&2
-        rm -f "$target.tmp"
+install_from_src() {
+    src_root="$1"
+    i=0
+    failed_local=""
+    for plugin in $PRIMITIVES; do
+        i=$((i + 1))
+        src="$src_root/$plugin"
+        dst="$PREFIX/$plugin"
+        if [ ! -d "$src" ]; then
+            printf "[%d/%d] %-18s MISSING in source tree (%s)\n" \
+                "$i" "$TOTAL" "$plugin" "$src" >&2
+            printf "[install_sh_extract_failed] %s: missing in tarball\n" \
+                "$plugin" >&2
+            failed_local="$failed_local $plugin"
+            continue
+        fi
+        rm -rf "$dst"
+        # cp -r is portable; on Windows Git Bash this works fine.
+        cp -r "$src" "$dst"
+        write_wrapper "$plugin"
+        printf "[%d/%d] %-18s installed at %s (wrapper: %s)\n" \
+            "$i" "$TOTAL" "$plugin" "$dst" "$INSTALL_DIR/$plugin"
+    done
+    if [ -n "$failed_local" ]; then
+        echo "$failed_local"
         return 1
     fi
-
-    mv "$target.tmp" "$target"
-    if ! chmod 755 "$target" 2>/dev/null; then
-        printf "[%d/%d] %-18s FAILED to chmod %s\n" \
-            "$index" "$TOTAL" "$plugin" "$target" >&2
-        printf "[install_sh_curl_failed] %s: failed to chmod %s\n" \
-            "$plugin" "$target" >&2
-        rm -f "$target"
-        return 1
-    fi
-    printf "[%d/%d] %-18s installed at %s\n" \
-        "$index" "$TOTAL" "$plugin" "$target"
+    return 0
 }
 
 # Locate agent-plus-meta after install: prefer PATH, fall back to INSTALL_DIR.
@@ -243,57 +299,22 @@ locate_agent_plus_meta() {
 
 print_header
 
-if [ "$DRY_RUN" -eq 0 ]; then
-    if [ ! -d "$INSTALL_DIR" ]; then
-        mkdir -p "$INSTALL_DIR"
-    fi
-    if ! command -v curl >/dev/null 2>&1; then
-        echo "install.sh: curl is required but not found on PATH" >&2
-        if [ "$UNATTENDED" -eq 1 ]; then
-            echo "[install_sh_curl_failed] env: curl not on PATH" >&2
-            # In unattended mode we still exit 0; the caller inspects the
-            # summary line to decide what to do next.
-            echo "install.sh: unattended — no primitives could be installed" >&2
-            exit 0
-        fi
-        exit 1
-    fi
-fi
-
-i=0
-failed=""
-for plugin in $PRIMITIVES; do
-    i=$((i + 1))
-    if ! install_one "$plugin" "$i"; then
-        failed="$failed $plugin"
-    fi
-done
-
-if [ -n "$failed" ]; then
-    echo "" >&2
-    echo "install.sh: the following primitive(s) failed to install:$failed" >&2
-    if [ "$UNATTENDED" -eq 1 ]; then
-        echo "install.sh: unattended mode — exit 0 despite partial install." >&2
-        echo "install.sh: caller should parse [install_sh_curl_failed] lines for failures." >&2
-        # Fall through to the chain attempt; if agent-plus-meta itself failed,
-        # locate_agent_plus_meta will skip the chain cleanly.
-    else
-        echo "Re-run install.sh after fixing the network issue, or install missing pieces manually." >&2
-        exit 1
-    fi
-fi
-
-# ─── chain into agent-plus-meta init ────────────────────────────────────────
-#
-# Default: run the interactive wizard so a fresh `curl | sh` lands the user
-# straight into onboarding. Skipped on:
-#   - --no-init       (CI escape hatch)
-#   - --dry-run       (no side effects, ever)
-#   - agent-plus-meta unreachable (partial install under --unattended)
+TAG=$(resolve_tag)
+TARBALL=$(tarball_url_for "$TAG")
 
 if [ "$DRY_RUN" -eq 1 ]; then
-    # In dry-run, surface what *would* happen so users (and tests) can verify
-    # the chain is wired up without invoking it.
+    echo ""
+    echo "tag:          $TAG"
+    echo "tarball:      $TARBALL"
+    echo "prefix:       $PREFIX"
+    echo "install dir:  $INSTALL_DIR"
+    echo ""
+    i=0
+    for plugin in $PRIMITIVES; do
+        i=$((i + 1))
+        printf "[%d/%d] %-18s would install tree at %s and wrapper at %s\n" \
+            "$i" "$TOTAL" "$plugin" "$PREFIX/$plugin" "$INSTALL_DIR/$plugin"
+    done
     if [ "$NO_INIT" -eq 1 ]; then
         echo ""
         echo "(dry run) would skip agent-plus-meta init (--no-init)"
@@ -304,12 +325,90 @@ if [ "$DRY_RUN" -eq 1 ]; then
         echo ""
         echo "(dry run) would chain: agent-plus-meta init"
     fi
-    # Dry-run never executes; print footer and exit.
-    if [ -z "$failed" ]; then
-        print_footer
-    fi
     exit 0
 fi
+
+# Real install path: ensure deps available.
+if [ -z "$SOURCE_DIR" ]; then
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "install.sh: curl is required but not found on PATH" >&2
+        if [ "$UNATTENDED" -eq 1 ]; then
+            echo "[install_sh_curl_failed] env: curl not on PATH" >&2
+            echo "install.sh: unattended — no primitives could be installed" >&2
+            exit 0
+        fi
+        exit 1
+    fi
+fi
+if ! command -v tar >/dev/null 2>&1; then
+    echo "install.sh: tar is required but not found on PATH" >&2
+    if [ "$UNATTENDED" -eq 1 ]; then
+        echo "[install_sh_tar_failed] env: tar not on PATH" >&2
+        exit 0
+    fi
+    exit 1
+fi
+
+mkdir -p "$INSTALL_DIR" "$PREFIX"
+
+if [ -n "$SOURCE_DIR" ]; then
+    # Test-only path: copy directly from a pre-extracted tree.
+    src_root="$SOURCE_DIR"
+    if [ ! -d "$src_root" ]; then
+        echo "install.sh: --source-dir does not exist: $src_root" >&2
+        exit 1
+    fi
+    echo "Installing from local source: $src_root"
+else
+    TMPDIR=$(mktemp -d 2>/dev/null || mktemp -d -t agentplus)
+    trap 'rm -rf "$TMPDIR"' EXIT
+    echo ""
+    echo "Downloading $TARBALL ..."
+    if ! curl -fsSL "$TARBALL" -o "$TMPDIR/agent-plus.tar.gz"; then
+        echo "install.sh: tarball download failed: $TARBALL" >&2
+        echo "[install_sh_curl_failed] tarball: $TARBALL" >&2
+        if [ "$UNATTENDED" -eq 1 ]; then
+            exit 0
+        fi
+        exit 1
+    fi
+    if ! tar -xzf "$TMPDIR/agent-plus.tar.gz" -C "$TMPDIR"; then
+        echo "install.sh: tarball extraction failed" >&2
+        echo "[install_sh_extract_failed] tar -xzf failed" >&2
+        exit 1
+    fi
+    # Find the extracted top-level directory (single dir like "agent-plus-0.15.1").
+    src_root=""
+    for d in "$TMPDIR"/agent-plus-*/; do
+        if [ -d "$d" ]; then
+            src_root="${d%/}"
+            break
+        fi
+    done
+    if [ -z "$src_root" ]; then
+        echo "install.sh: could not find extracted directory under $TMPDIR" >&2
+        exit 1
+    fi
+fi
+
+failed=""
+if ! failed_list=$(install_from_src "$src_root"); then
+    failed="$failed_list"
+fi
+
+if [ -n "$failed" ]; then
+    echo "" >&2
+    echo "install.sh: the following primitive(s) failed to install:$failed" >&2
+    if [ "$UNATTENDED" -eq 1 ]; then
+        echo "install.sh: unattended mode — exit 0 despite partial install." >&2
+        echo "install.sh: caller should parse [install_sh_extract_failed] lines for failures." >&2
+    else
+        echo "Re-run install.sh after fixing the issue, or install missing pieces manually." >&2
+        exit 1
+    fi
+fi
+
+# ─── chain into agent-plus-meta init ────────────────────────────────────────
 
 if [ "$NO_INIT" -eq 1 ]; then
     echo ""
@@ -334,8 +433,6 @@ fi
 echo ""
 if [ "$UNATTENDED" -eq 1 ]; then
     echo "Running agent-plus-meta init --non-interactive --auto..."
-    # Don't let init's exit code take down the install script in unattended
-    # mode — the JSON envelope on stdout is the contract.
     "$apm_bin" init --non-interactive --auto || true
 else
     echo "Running agent-plus-meta init..."

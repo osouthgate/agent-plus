@@ -75,6 +75,21 @@ def _resolve_install_dir(args: argparse.Namespace) -> Path:
     return (Path.home() / ".local" / "bin").resolve()
 
 
+def _resolve_prefix(args: argparse.Namespace) -> Path:
+    """Resolve $PREFIX (where plugin trees live) with the precedence:
+    1. `--prefix PATH` flag (if present)
+    2. `AGENT_PLUS_PREFIX` env var
+    3. `~/.local/share/agent-plus`
+    """
+    explicit = getattr(args, "prefix", None)
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    env = os.environ.get("AGENT_PLUS_PREFIX")
+    if env:
+        return Path(env).expanduser().resolve()
+    return (Path.home() / ".local" / "share" / "agent-plus").resolve()
+
+
 def _user_workspace() -> Path:
     return (Path.home() / ".agent-plus").resolve()
 
@@ -199,18 +214,22 @@ def _list_marketplace_states() -> list[dict]:
     return out
 
 
-def build_manifest(*, scope: str, install_dir: Path) -> list[dict]:
+def build_manifest(*, scope: str, install_dir: Path,
+                   prefix: Optional[Path] = None) -> list[dict]:
     """Build the ordered `paths[]` list for the requested scope.
 
     Pure (no side effects). Each entry has a pre-execution status of either
     `would_remove`, `missing`, `skipped`, or `kept`. The executor mutates
     these post-attempt.
 
-    Ordering: default tier → workspace tier → marketplaces tier → out_of_scope.
+    Ordering: default tier (wrappers + trees) → workspace tier →
+    marketplaces tier → out_of_scope.
     """
     paths: list[dict] = []
 
-    # ── default tier: 5 primitive bins ──────────────────────────────────────
+    # ── default tier: 5 primitive wrappers + 5 primitive trees ──────────────
+    # Wrappers live at $INSTALL_DIR/<plugin>; the real plugin tree lives at
+    # $PREFIX/<plugin>/. Both are owned by install.sh and removed together.
     for name in PRIMITIVES:
         target = install_dir / name
         exists = target.is_file() or target.is_symlink()
@@ -220,6 +239,15 @@ def build_manifest(*, scope: str, install_dir: Path) -> list[dict]:
             "scope": "default",
             "status": "would_remove" if exists else "missing",
         })
+        if prefix is not None:
+            tree = prefix / name
+            tree_exists = tree.is_dir()
+            paths.append({
+                "path": str(tree),
+                "kind": "primitive_tree",
+                "scope": "default",
+                "status": "would_remove" if tree_exists else "missing",
+            })
 
     # ── workspace tier ──────────────────────────────────────────────────────
     in_workspace_scope = scope in ("workspace", "all", "purge")
@@ -406,6 +434,16 @@ def execute_removals(paths: list[dict]) -> list[dict]:
             else:
                 entry["status"] = "error"
                 entry["error"] = err
+        elif kind == "primitive_tree":
+            if not path.is_dir():
+                entry["status"] = "missing"
+                continue
+            try:
+                host._rmtree_force(path)  # noqa: SLF001
+                entry["status"] = "removed"
+            except OSError as e:
+                entry["status"] = "error"
+                entry["error"] = f"{type(e).__name__}: {e}"
         elif kind in ("workspace", "marketplace_state"):
             if not path.is_dir():
                 entry["status"] = "missing"
@@ -506,6 +544,7 @@ def _log_telemetry(mode: str, summary: dict) -> None:
 
 def cmd_uninstall(args: argparse.Namespace) -> dict:
     install_dir = _resolve_install_dir(args)
+    prefix = _resolve_prefix(args)
     scope = _scope_from_args(args)
     dry_run = bool(getattr(args, "dry_run", False))
     non_interactive = bool(getattr(args, "non_interactive", False))
@@ -513,7 +552,7 @@ def cmd_uninstall(args: argparse.Namespace) -> dict:
     interactive = not (non_interactive or json_only)
 
     # Build manifest first (pure; safe to print even on dry-run / abort).
-    paths = build_manifest(scope=scope, install_dir=install_dir)
+    paths = build_manifest(scope=scope, install_dir=install_dir, prefix=prefix)
     errors: list[dict] = []
 
     # ─── confirmation ───────────────────────────────────────────────────────
