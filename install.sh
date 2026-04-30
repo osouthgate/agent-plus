@@ -55,7 +55,18 @@ case "${1:-}" in
 esac
 
 dispatch_upgrade() {
-    echo "install.sh: agent-plus-meta upgrade not yet implemented; ships in v0.13.5" >&2
+    # v0.13.5: delegate to `agent-plus-meta upgrade` when reachable.
+    # Fall back with a helpful pointer when the bin is broken/missing —
+    # re-running install.sh (without --upgrade) is the escape hatch.
+    if command -v agent-plus-meta >/dev/null 2>&1; then
+        exec agent-plus-meta upgrade "$@"
+    fi
+    candidate="${AGENT_PLUS_INSTALL_DIR:-$HOME/.local/bin}/agent-plus-meta"
+    if [ -x "$candidate" ]; then
+        exec "$candidate" upgrade "$@"
+    fi
+    echo "install.sh: agent-plus-meta not on PATH or in $candidate" >&2
+    echo "install.sh: re-install via 'curl -fsSL .../install.sh | sh' first" >&2
     exit 2
 }
 

@@ -4,6 +4,40 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.13.5 - 2026-04-30
+
+agent-plus upgrade slice. Closes the framework's biggest current craft gap: every dogfooder pasted `curl … install.sh | sh` weeks ago and is on a stale install with no probe, no prompt, no migration path, no rollback. v0.13.5 ships all four — the cached probe, the upgrade action, the migration runner, and a per-bin `.bak` rollback — adapted from gstack's proven shape to agent-plus's multi-plugin reality.
+
+### Added
+
+- **`agent-plus-meta upgrade-check`** — cached probe at `_subcommands/upgrade_check.py`. Reads the single-root `VERSION` file at `raw.githubusercontent.com/osouthgate/agent-plus/main/VERSION` (T1 — tag-bound, NOT derived from any plugin.json). Cache at `~/.agent-plus/upgrade/cache.json` with TTL 60min for `up_to_date` / 720min for `upgrade_available`. Snooze ladder at `~/.agent-plus/upgrade/snooze.json` (24h → 48h → 7d → never), reset on new latest version. Fail-silent on every network failure mode (P4) — verdict degrades to `unknown`, the workflow proceeds, the next probe in 60min retries. Flags: `--check` (default), `--force`, `--snooze {24h,48h,7d,never}`, `--clear-snooze`, `--json`, `--non-interactive`, `--no-telemetry` (no-op stub for forward-compat), `--timeout SEC` (default 3, max 10).
+- **`agent-plus-meta upgrade`** — upgrade action at `_subcommands/upgrade.py`. Detects install type (`global` for `~/.local/bin` or `$AGENT_PLUS_INSTALL_DIR`; `git_local` for clones) — vendored branch deferred per /review C4. Five-bin `.bak` snapshot at `~/.agent-plus/.bak/<UTC-timestamp>/<bin>.bak` BEFORE replace. Atomic `tmp → rename` writes. Migration runner reads `agent-plus-meta/migrations/v*.py` modules (empty on day one — see Migration runner below). Post-test gate calls `cmd_doctor()` in-process; verdict=broken → automatic rollback from `.bak`. 4-option `AskUserQuestion` matching gstack: A) Yes upgrade, B) Always (sets `silent_upgrade: true`), C) Snooze (advances ladder), D) Never ask again (sets `update_check: false`). `--non-interactive --auto` picks A by default, B if config.silent_upgrade=true AND bump is patch (T5 — minor/major always prompts even under `--auto`). Flags: `--rollback` (standalone restore from most recent `.bak` set), `--dry-run`, `--user-choice`, `--no-telemetry` (no-op stub).
+- **Migration runner contract.** `agent-plus-meta/migrations/` ships empty on day one with `__init__.py` and `README.md`. Each module exposes `def migrate(workspace: Path) -> dict` returning `{status: "ok"|"skipped"|"failed", message, changes}`. Idempotent. History at `~/.agent-plus/migrations.json` keyed by id (e.g. `v0_13_5`). The runner ships, the directory exists, the contract is documented — first breaking change has somewhere to land.
+- **`install.sh --upgrade`** — wired into v0.13.0's verb dispatcher. Delegates to `agent-plus-meta upgrade` on PATH or in `$AGENT_PLUS_INSTALL_DIR`; falls back with a helpful pointer when the bin is broken (re-run install.sh).
+- **Single-root `VERSION` file at repo root** — single line `0.13.5\n`. Tag-bound (bumps on each `git tag v0.X.Y`, NOT derived from plugin.json). The CI gate added in this slice asserts `cat VERSION` matches the latest annotated git tag at release time so the probe never lies.
+- **Frozen JSON envelope schemas** — both `upgrade-check` and `upgrade` lock public contracts at v0.13.5. Documented in [agent-plus-meta/README.md](./README.md#upgrade-check). Additive enum widening is non-breaking; field renames or removals require a major bump. Per /review C5 the `telemetry` field is omitted (the `--no-telemetry` flag exists as a no-op for forward-compat — when a real telemetry endpoint ships in ~v0.16, the field is added additively).
+- **4 stable error codes** in `envelope.errors[].code`: `upgrade_check_network_failed`, `upgrade_partial_failure`, `upgrade_migration_failed`, `upgrade_rollback_required`. Per /review C2, user-declined runs are NOT errors — verdict `noop` plus `user_choice` carries the signal.
+- **VERSION-vs-tag CI gate** — `.github/workflows/ci.yml` gains a `version-tag-gate` job that runs on tag pushes and asserts `cat VERSION` matches the latest annotated git tag. Without this gate, a forgotten VERSION bump means the upgrade probe lies.
+- **~30 new tests** across `test_upgrade_check.py`, `test_upgrade.py`, `test_migrations.py`. Stdlib unittest, mocked `urllib.request.urlopen` and `subprocess.run` so the suite stays offline. TTHW invariants enforced: cache hit < 1s, network probe < 5s, dry-run < 3s, rollback < 2s.
+
+### Changed
+
+- `install.sh` `--upgrade` branch replaced its v0.13.0 stub with the live delegation. All 9 existing `test_install_script.py` assertions still pass.
+- `agent-plus-meta/.claude-plugin/plugin.json` version bumped 0.13.0 → 0.13.5.
+
+### Distinguished from `--auto` CLI flag (per /review C3)
+
+The config key `silent_upgrade: bool` (default false) means "skip the upgrade prompt entirely on patch bumps." The CLI flag `--auto` means "non-interactive, pick the recommended option." Two distinct concepts cleanly separated. README documents both with explicit cross-references.
+
+### Cuts honored
+
+- `--sentinel` mode for upgrade-check is CUT (defer to v0.16 — option (a) skill-preamble integration not shipping today).
+- `silent_upgrade_policy` config knob is CUT — hardcoded patch-only behaviour in v0.13.5.
+- `upgrade_user_declined` error code is CUT — verdict + user_choice carry the signal.
+- `telemetry` envelope field is CUT — flag is a no-op forward-compat stub.
+- Vendored install detector branch is CUT — install-type returns `global` or `git_local` only.
+- GitHub API fallback for VERSION is CUT — single-root `VERSION` file is the source of truth.
+
 ## 0.13.0 - 2026-04-30
 
 agent-plus-installer SKILL.md — trigger doctrine for Claude Code on *when* (and when NOT) to offer to install agent-plus on the user's behalf. Pure-markdown skill; the runtime is the existing `install.sh --unattended` one-liner shipped in v0.12.0. Plus: a no-op `--<verb>` dispatcher refactor of `install.sh` that gives v0.13.5 (`--upgrade`) and v0.15.0 (`--uninstall`) a clean plug-in surface.

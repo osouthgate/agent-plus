@@ -2,6 +2,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 jobs:
@@ -63,3 +64,41 @@ jobs:
           AGENT_PLUS_PLUGINS_DIR: ${{ github.workspace }}/plugins
         run: |
           python -m unittest framework/agent-plus-meta/test/contract/test_envelope_contract.py -v
+
+  # v0.13.5: VERSION-vs-tag gate. Without this, the upgrade probe lies on
+  # day one — the single-root VERSION file is the source of truth and MUST
+  # match the latest annotated git tag at release time. Runs on every tag
+  # push (the only time the assertion meaningfully holds) and is otherwise
+  # a no-op so PRs and main-branch pushes never trip it.
+  version-tag-gate:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Assert VERSION matches the pushed tag
+        run: |
+          set -e
+          if [ ! -f VERSION ]; then
+            echo "VERSION file missing at repo root" >&2
+            exit 1
+          fi
+          file_version=$(tr -d '[:space:]' < VERSION)
+          tag_ref="${GITHUB_REF#refs/tags/}"
+          tag_version="${tag_ref#v}"
+          if [ "$file_version" != "$tag_version" ]; then
+            echo "VERSION ($file_version) != tag ($tag_version)" >&2
+            echo "Bump VERSION before tagging, or re-tag to match." >&2
+            exit 1
+          fi
+          # Cross-check: the tag we're on should be the latest annotated tag
+          # too. If somebody pushed an older tag late, fail fast rather than
+          # let the probe lie.
+          latest_tag=$(git describe --tags --abbrev=0)
+          latest_version="${latest_tag#v}"
+          if [ "$file_version" != "$latest_version" ]; then
+            echo "VERSION ($file_version) != latest annotated tag ($latest_version)" >&2
+            exit 1
+          fi
+          echo "VERSION-vs-tag gate passed: $file_version"
