@@ -1,6 +1,6 @@
 # agent-plus
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Version](https://img.shields.io/badge/version-0.11.1-green.svg)](https://github.com/osouthgate/agent-plus/releases) [![CI](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml) [![Tests](https://img.shields.io/badge/tests-377%20passing-brightgreen.svg)](#) [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#) [![Stdlib only](https://img.shields.io/badge/stdlib-only-yellowgreen.svg)](#)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Version](https://img.shields.io/badge/version-0.15.1-green.svg)](https://github.com/osouthgate/agent-plus/releases) [![CI](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml) [![Tests](https://img.shields.io/badge/tests-405%20passing-brightgreen.svg)](#) [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#) [![Stdlib only](https://img.shields.io/badge/stdlib-only-yellowgreen.svg)](#)
 
 **Drop-in plugins that turn 30-tool-call dances into 1-tool-call answers.**
 
@@ -98,7 +98,7 @@ That installs all five primitives, then chains into `agent-plus-meta init`. The 
 
 The wizard adapts to one of three branches based on what it finds:
 
-- **NEW** — no skills, no session history, no env-vars: runs `repo-analyze` against your current repo as the first win.
+- **NEW** — no skills, no session history, no env-vars: runs `repo-analyze` against your current repo as the first win. If you run `install.sh` from outside any project (e.g., your home directory), the wizard pivots to cross-repo discovery instead of trying to analyze a non-project.
 - **RETURNING** — fresh machine, existing `.agent-plus/` markers or `~/.claude/projects/` history: runs `agent-plus-meta doctor` first to confirm the install.
 - **SKILL-AUTHOR** — `.claude/skills/` already populated: runs `skill-plus list --include-global` to surface your existing skills + collisions.
 
@@ -203,6 +203,10 @@ agent-plus-meta marketplace remove <user>/<repo>
 ```
 
 **Trust model — five gates enforced.** Install pins the commit SHA. Nothing in the cloned repo runs at install time. A first-run review is shown once per install (and re-armed on every accepted update). Updates are opt-in only — `--cron` is parsed only so it can be refused. When a marketplace declares `checksums`, install verifies them. Plugins from un-accepted marketplaces are skipped.
+
+### Versioning
+
+The umbrella `VERSION` file (and the badge above) is **tag-bound** — it tracks the framework release tag (e.g. `0.15.1`). Each plugin under `agent-plus-meta/`, `repo-analyze/`, `diff-summary/`, `skill-feedback/`, and `skill-plus/` carries its own `plugin.json#version` that bumps **independently** when that specific plugin changes. So `repo-analyze@0.2.1` shipping inside framework `0.15.1` is normal, not drift.
 
 ## Project status
 

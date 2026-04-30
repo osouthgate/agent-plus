@@ -55,9 +55,15 @@ Designed for agent harnesses (e.g. Claude Code's Bash tool calling the wizard on
 agent-plus-meta init --non-interactive --auto
 ```
 
-A future v0.13.0 `agent-plus-installer` skill will package the install + auto-init flow for Claude Code with a SKILL.md trigger spec.
+v0.13.0 ships the `agent-plus-installer` skill that packages the install + auto-init flow for Claude Code; see [skills/agent-plus-installer/SKILL.md](./skills/agent-plus-installer/SKILL.md).
 
 #### JSON envelope (frozen v0.12.0 public contract)
+
+> Note on `tool.version`: the schema below is **frozen at v0.12.0** — field
+> names, types, and ordering will not change without a major bump. The
+> `tool.version` field, however, reflects whichever build is running
+> (`0.15.1` today). The literal `"0.12.0"` in the examples is illustrative;
+> at runtime you'll see the current plugin version.
 
 ```json
 {

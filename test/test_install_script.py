@@ -87,6 +87,24 @@ class TestInstallScript(unittest.TestCase):
             self.assertIn(name, proc.stdout,
                           msg=f"primitive {name!r} not mentioned in dry-run output")
 
+    def test_dryrun_mentions_tarball_url(self) -> None:
+        proc = subprocess.run(
+            ["sh", str(SCRIPT), "--dry-run"],
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("archive/refs/", proc.stdout,
+                      msg=f"tarball URL not surfaced: {proc.stdout!r}")
+
+    def test_dryrun_mentions_prefix_and_install_dir(self) -> None:
+        proc = subprocess.run(
+            ["sh", str(SCRIPT), "--dry-run"],
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("prefix:", proc.stdout)
+        self.assertIn("install dir:", proc.stdout)
+
     def test_unknown_flag_exits_nonzero(self) -> None:
         proc = subprocess.run(
             ["sh", str(SCRIPT), "--this-does-not-exist"],
@@ -193,6 +211,9 @@ class TestInstallScript(unittest.TestCase):
                 (Path(td) / name).write_text("stub", encoding="utf-8")
             env = os.environ.copy()
             env["AGENT_PLUS_INSTALL_DIR"] = td
+            # Also point PREFIX somewhere we know is empty — we only stage
+            # wrappers in this test, no plugin trees.
+            env["AGENT_PLUS_PREFIX"] = str(Path(td) / "prefix-empty")
             # Keep coreutils (rm/sh/etc.) reachable but ensure no real
             # `agent-plus-meta` binary is on PATH. We rebuild PATH from
             # canonical system bins only.
@@ -209,6 +230,45 @@ class TestInstallScript(unittest.TestCase):
                     (Path(td) / name).is_file(),
                     msg=f"primitive {name} not removed by fallback",
                 )
+
+    def test_install_sh_round_trip_via_source_dir(self) -> None:
+        # End-to-end dogfood: install from the live tree via --source-dir,
+        # confirm wrappers + plugin trees land, version reports correctly.
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            install_dir = Path(td) / "bin"
+            prefix = Path(td) / "share"
+            env = os.environ.copy()
+            env["AGENT_PLUS_INSTALL_DIR"] = str(install_dir)
+            env["AGENT_PLUS_PREFIX"] = str(prefix)
+            proc = subprocess.run(
+                ["sh", str(SCRIPT),
+                 "--no-init",
+                 f"--source-dir={REPO_ROOT}"],
+                capture_output=True, text=True, timeout=60, env=env,
+            )
+            self.assertEqual(proc.returncode, 0,
+                             msg=f"round-trip failed: stderr={proc.stderr!r} stdout={proc.stdout!r}")
+            for name in PRIMITIVES:
+                wrapper = install_dir / name
+                tree = prefix / name
+                self.assertTrue(wrapper.is_file(),
+                                msg=f"wrapper missing: {wrapper}")
+                self.assertTrue(tree.is_dir(),
+                                msg=f"tree missing: {tree}")
+                # Verify the real bin landed in the tree.
+                real_bin = tree / "bin" / name
+                self.assertTrue(real_bin.is_file(),
+                                msg=f"real bin missing: {real_bin}")
+            # _subcommands/ landed for agent-plus-meta + skill-plus.
+            self.assertTrue((prefix / "agent-plus-meta" / "bin"
+                             / "_subcommands" / "init.py").is_file())
+            self.assertTrue((prefix / "skill-plus" / "bin"
+                             / "_subcommands" / "where.py").is_file())
+            # plugin.json landed.
+            self.assertTrue((prefix / "agent-plus-meta" / ".claude-plugin"
+                             / "plugin.json").is_file())
 
     def test_install_sh_uninstall_fallback_refuses_workspace_flag(self) -> None:
         import os

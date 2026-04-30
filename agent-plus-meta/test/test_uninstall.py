@@ -50,6 +50,7 @@ def _ns(**kw) -> argparse.Namespace:
         non_interactive=True,
         json=True,
         install_dir=None,
+        prefix=None,
     )
     defaults.update(kw)
     return argparse.Namespace(**defaults)
@@ -263,7 +264,7 @@ class TestUninstallEnvelope(_TempHome):
             "default", "workspace", "marketplaces", "all", "purge",
         })
         valid_kinds = {
-            "primitive_bin", "workspace", "marketplace_state",
+            "primitive_bin", "primitive_tree", "workspace", "marketplace_state",
             "marketplace_registry", "claude_plugin", "claude_session",
             "user_skill", "feedback_log", "analytics",
             "settings_hook", "daemon_pid", "migration_state",
@@ -366,6 +367,63 @@ class TestUninstallInstallDirOverride(_TempHome):
         self.assertEqual(out["install_dir"], str(alt.resolve()))
         for name in un.PRIMITIVES:
             self.assertFalse((alt / name).is_file())
+
+
+class TestUninstallPrimitiveTree(_TempHome):
+    def test_uninstall_removes_prefix_trees(self) -> None:
+        # Stage plugin trees under a fake $PREFIX and confirm they're removed
+        # alongside the wrappers under $INSTALL_DIR.
+        prefix = self.home / "prefix"
+        for name in un.PRIMITIVES:
+            tree = prefix / name / "bin"
+            tree.mkdir(parents=True, exist_ok=True)
+            (tree / name).write_text("stub", encoding="utf-8")
+        out = un.cmd_uninstall(_ns(prefix=str(prefix)))
+        # Trees gone.
+        for name in un.PRIMITIVES:
+            self.assertFalse((prefix / name).is_dir(),
+                             msg=f"tree {name} not removed")
+        # Manifest contains primitive_tree entries.
+        trees = [p for p in out["paths"] if p["kind"] == "primitive_tree"]
+        self.assertEqual(len(trees), 5)
+        for t in trees:
+            self.assertEqual(t["status"], "removed")
+
+    def test_uninstall_prefix_env_var(self) -> None:
+        prefix_env = self.home / "envprefix"
+        for name in un.PRIMITIVES:
+            (prefix_env / name).mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, "AGENT_PLUS_PREFIX": str(prefix_env)}
+        with patch.dict(os.environ, env, clear=False):
+            out = un.cmd_uninstall(_ns())
+            for name in un.PRIMITIVES:
+                self.assertFalse((prefix_env / name).is_dir())
+            trees = [p for p in out["paths"] if p["kind"] == "primitive_tree"]
+            self.assertEqual({t["status"] for t in trees}, {"removed"})
+
+
+class TestUninstallAutoFlag(unittest.TestCase):
+    """`--auto` is a CLI alias for `--non-interactive`. Verified at the
+    parser level via the bin's argparse."""
+
+    def test_auto_aliases_non_interactive(self) -> None:
+        # Re-create the parser the way the bin does, then assert --auto sets
+        # non_interactive=True.
+        parser = HOST._build_parser() if hasattr(HOST, "_build_parser") else None
+        if parser is None:
+            # Fall back: parse via the bin directly.
+            import subprocess
+            bin_path = _BIN_DIR / "agent-plus-meta"
+            proc = subprocess.run(
+                ["python3", str(bin_path), "uninstall", "--auto", "--dry-run"],
+                capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(proc.returncode, 0,
+                             msg=f"--auto rejected: {proc.stderr!r}")
+            return
+        ns = parser.parse_args(["uninstall", "--auto", "--dry-run"])
+        self.assertTrue(ns.non_interactive)
+        self.assertTrue(ns.dry_run)
 
 
 if __name__ == "__main__":
