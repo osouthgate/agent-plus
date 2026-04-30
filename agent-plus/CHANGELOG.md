@@ -6,6 +6,15 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.10.0 - 2026-04-30
+
+Marketplace discovery + preference (Phase 3 of the marketplace convention). Gate 4.
+
+### Added
+
+- **`agent-plus marketplace search [query]`** — shells to `gh search repos --topic agent-plus-skills --json name,owner,description,stargazerCount,updatedAt,url --limit 30`, optionally with a free-text query prepended. Ranks results by `stars + recency_boost` where `recency_boost = max(0, 30 - days_since_update) * 2` (so a freshly-updated 5-star repo can outrank a stale 30-star repo). Refuses cleanly when `gh` isn't on `PATH` (`error: gh_not_installed` with an install hint). Translates non-zero `gh` exits and timeouts into envelope errors (`gh_search_failed` / `gh_search_timeout` / `gh_search_unavailable`) with the last 400 chars of stderr — never raises. Each result carries `slug` (`<owner>/<name>`), `name`, `owner`, `description`, `stars`, `updatedAt`, `url`, and the computed `score`. List-form `subprocess.run` only — the user query is never interpolated into a shell string.
+- **`agent-plus marketplace prefer <user>/<repo> --skill <name>`** — records a per-skill marketplace preference in `~/.agent-plus/preferences.json` so when multiple installed marketplaces ship a skill of the same name, `<skill>` resolves unambiguously. `--list` inspects existing preferences; `--clear --skill <name>` removes one. Validates `<user>/<repo>` against `^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$` and `<skill>` against `^[a-z][a-z0-9-]{0,63}$`. Atomic write via `.tmp` → `os.replace`. `agent-plus refresh` now consults the preference when an accepted marketplace collision is detected, surfaces a `collisions: [{skill, candidates, chosen, reason}]` slot in the envelope (only when collisions occur), and falls back to deterministic first-wins (sorted iteration) when no preference exists. Non-colliding handlers behave exactly as before.
+
 ## 0.9.1 - 2026-04-29
 
 ### Fixed
