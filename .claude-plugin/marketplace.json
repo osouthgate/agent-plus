@@ -77,6 +77,11 @@
       "name": "skill-feedback",
       "source": "./skill-feedback",
       "description": "Local-first agent self-assessment for Claude Code skills. Agent appends a structured rating + friction note to .agent-plus/skill-feedback/<skill>.jsonl after each skill use. Skill authors aggregate locally with `report` or bundle entries into a GitHub issue body for the skill's source repo with `submit`. No SaaS, no SDK, scrub-on-write."
+    },
+    {
+      "name": "skill-plus",
+      "source": "./skill-plus",
+      "description": "Mine the Claude Code session log to find commands you keep typing by hand, scaffold them into project-scoped Claude skills under .claude/skills/<name>/, audit existing skills against the framework contract, close the loop with a cross-source feedback aggregator that joins skill-feedback ratings against implicit session-mining failure signals, and promote skills you keep using to your <user>/agent-plus-skills marketplace. Stdlib Python, local-only, no network. Consent-gated and secret-redacting before disk write."
     }
   ]
 }
