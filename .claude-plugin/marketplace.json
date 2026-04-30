@@ -9,9 +9,9 @@
   },
   "plugins": [
     {
-      "name": "agent-plus",
-      "source": "./agent-plus",
-      "description": "Workspace bootstrap for the agent-plus collection — init, envcheck, refresh services, marketplace lifecycle (init/install/list/update/remove/search/prefer), extensions. One call to discover what's installed, what's configured, and what services this checkout already knows about. Names only, no values."
+      "name": "agent-plus-meta",
+      "source": "./agent-plus-meta",
+      "description": "The meta plugin for the agent-plus framework. Workspace bootstrap, env-var readiness, identity cache, marketplace lifecycle (init/install/list/update/remove/search/prefer), extensions. One call to discover what's installed, what's configured, and what services this checkout already knows about. Names only, no values."
     },
     {
       "name": "repo-analyze",

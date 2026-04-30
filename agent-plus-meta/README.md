@@ -1,22 +1,24 @@
-# agent-plus
+# agent-plus-meta
 
 > Part of [**agent-plus**](../README.md) · siblings: [`repo-analyze`](../repo-analyze) · [`diff-summary`](../diff-summary) · [`skill-feedback`](../skill-feedback) · [`skill-plus`](../skill-plus)
+>
+> The framework's meta plugin. Renamed from `agent-plus` → `agent-plus-meta` in 0.11.0 to resolve the naming collision with the framework itself. CLI commands changed from `agent-plus init/refresh/...` to `agent-plus-meta init/refresh/...`.
 
 Every fresh Claude Code session re-mines the same workspace facts: grep `.env`, `ls` plugin dirs, `git remote -v`, hand-roll `gh repo view`, paste a Vercel project ID, repeat. Session transcripts showed **~67 grep + ~60 ls operations** during cold-start context-gathering — most of them recovering facts the previous session also recovered.
 
-`agent-plus init` + `agent-plus refresh` collapses that into two tool calls and writes the results to `.agent-plus/` so the next session reads them off disk. `list` covers the whole stack — github, vercel, supabase, railway, linear, langfuse — so one refresh resolves the infra surface. Stdlib-only Python 3, no SaaS, no SDK.
+`agent-plus-meta init` + `agent-plus-meta refresh` collapses that into two tool calls and writes the results to `.agent-plus/` so the next session reads them off disk. `list` covers the whole stack — github, vercel, supabase, railway, linear, langfuse — so one refresh resolves the infra surface. Stdlib-only Python 3, no SaaS, no SDK.
 
 ## Headline commands
 
 ```bash
-agent-plus init       [--dir PATH] [--pretty]
-agent-plus envcheck   [--dir PATH] [--env-file PATH] [--pretty]
-agent-plus refresh    [--dir PATH] [--env-file PATH] [--plugin <name>]
+agent-plus-meta init       [--dir PATH] [--pretty]
+agent-plus-meta envcheck   [--dir PATH] [--env-file PATH] [--pretty]
+agent-plus-meta refresh    [--dir PATH] [--env-file PATH] [--plugin <name>]
                       [--no-extensions | --extensions-only] [--pretty]
-agent-plus list       [--dir PATH] [--names-only] [--pretty]
-agent-plus extensions list|validate|add|remove [--dir PATH] [--pretty]
-agent-plus marketplace init|search|prefer ...
-agent-plus --version
+agent-plus-meta list       [--dir PATH] [--names-only] [--pretty]
+agent-plus-meta extensions list|validate|add|remove [--dir PATH] [--pretty]
+agent-plus-meta marketplace init|search|prefer ...
+agent-plus-meta --version
 ```
 
 All commands emit JSON wrapped in the standard `tool: {name, version}` envelope.
@@ -26,9 +28,9 @@ All commands emit JSON wrapped in the standard `tool: {name, version}` envelope.
 Creates `.agent-plus/` with three empty-but-valid JSON files. Idempotent — re-running leaves existing files untouched and reports `skipped:[...]`.
 
 ```bash
-$ agent-plus init --pretty
+$ agent-plus-meta init --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.10.0"},
+  "tool": {"name": "agent-plus-meta", "version": "0.11.0"},
   "workspace": "/path/to/repo/.agent-plus",
   "source": "git",
   "created": ["manifest.json", "services.json", "env-status.json"],
@@ -41,9 +43,9 @@ $ agent-plus init --pretty
 Walks every known plugin's required env-var prefixes. Reports which are set, which are missing, per-plugin readiness. **Names only — values never land on disk** (canary-tested). Result is also written to `.agent-plus/env-status.json`.
 
 ```bash
-$ agent-plus envcheck --pretty
+$ agent-plus-meta envcheck --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.10.0"},
+  "tool": {"name": "agent-plus-meta", "version": "0.11.0"},
   "workspace": "/path/to/repo/.agent-plus",
   "source": "git",
   "checked": ["COOLIFY_API_KEY", "COOLIFY_URL", "GITHUB_TOKEN", ...],
@@ -66,9 +68,9 @@ $ agent-plus envcheck --pretty
 Resolves project / repo identity for the lightest-cost endpoints in **github-remote, vercel-remote, supabase-remote, railway-ops, linear-remote, langfuse-remote** plus any registered extensions. Caches the result into `.agent-plus/services.json`. Each handler hits one read-only endpoint and keeps NAMES + IDs + URLs only — tokens never appear in stdout, stderr, or services.json (canary-tested).
 
 ```bash
-$ agent-plus refresh --pretty
+$ agent-plus-meta refresh --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.10.0"},
+  "tool": {"name": "agent-plus-meta", "version": "0.11.0"},
   "services": {
     "github-remote": {
       "plugin": "github-remote", "owner": "osouthgate", "repo": "agent-plus",
@@ -89,9 +91,9 @@ $ agent-plus refresh --pretty
 One call returns every plugin in `.claude-plugin/marketplace.json` plus a 400-char headline-commands preview pulled from each plugin's README. Cross-references `env-status.json` (when present) to surface a `ready` flag per plugin.
 
 ```bash
-$ agent-plus list --pretty
+$ agent-plus-meta list --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.10.0"},
+  "tool": {"name": "agent-plus-meta", "version": "0.11.0"},
   "plugins": [
     {
       "name": "github-remote",
@@ -105,7 +107,7 @@ $ agent-plus list --pretty
   "count": 12
 }
 
-$ agent-plus list --names-only
+$ agent-plus-meta list --names-only
 {"tool": {...}, "plugins": ["agent-plus", "hermes-remote", ...], "count": 12}
 ```
 
@@ -114,9 +116,9 @@ $ agent-plus list --names-only
 Scaffold a `<user>/agent-plus-skills` marketplace repo. The `name` portion of the slug **must** be `agent-plus-skills` for v1 — fixed convention so `gh search repos topic:agent-plus-skills` is unambiguous. Default target dir is `<cwd>/<name>/`; override with `--path`. Refuses to scaffold into a non-empty directory. Never runs `gh` itself — prints suggested invocations only.
 
 ```bash
-$ agent-plus marketplace init osouthgate/agent-plus-skills --pretty
+$ agent-plus-meta marketplace init osouthgate/agent-plus-skills --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.10.0"},
+  "tool": {"name": "agent-plus-meta", "version": "0.11.0"},
   "marketplace": {
     "path": "/path/to/agent-plus-skills",
     "owner": "osouthgate", "name": "agent-plus-skills",
@@ -138,9 +140,9 @@ $ agent-plus marketplace init osouthgate/agent-plus-skills --pretty
 Discover marketplaces published under the `agent-plus-skills` topic on GitHub. Shells to `gh search repos --topic agent-plus-skills --json ... --limit 30`, ranks by `stars + recency_boost (max(0, 30 - days_since_update) * 2)` so a freshly-updated 5-star repo can outrank a stale 30-star one.
 
 ```bash
-$ agent-plus marketplace search database --pretty
+$ agent-plus-meta marketplace search database --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.10.0"},
+  "tool": {"name": "agent-plus-meta", "version": "0.11.0"},
   "ok": true, "query": "database",
   "results": [
     {"slug": "alice/agent-plus-skills", "name": "agent-plus-skills", "owner": "alice",
@@ -154,12 +156,12 @@ Refuses cleanly when `gh` isn't on PATH (`error: gh_not_installed`). Translates 
 
 ### `marketplace prefer <user>/<repo> --skill <name>`
 
-Per-skill collision resolution. When two installed marketplaces ship a skill of the same name, this records which marketplace wins. Recorded atomically in `~/.agent-plus/preferences.json`. `agent-plus refresh` consults the preference on collisions and surfaces a `collisions: [{skill, candidates, chosen, reason: "first_wins" | "preference"}]` slot in the envelope. Without a preference, behaviour is deterministic first-wins (sorted iteration).
+Per-skill collision resolution. When two installed marketplaces ship a skill of the same name, this records which marketplace wins. Recorded atomically in `~/.agent-plus/preferences.json`. `agent-plus-meta refresh` consults the preference on collisions and surfaces a `collisions: [{skill, candidates, chosen, reason: "first_wins" | "preference"}]` slot in the envelope. Without a preference, behaviour is deterministic first-wins (sorted iteration).
 
 ```bash
-agent-plus marketplace prefer alice/agent-plus-skills --skill repo-analyze
-agent-plus marketplace prefer --list --pretty
-agent-plus marketplace prefer --clear --skill repo-analyze
+agent-plus-meta marketplace prefer alice/agent-plus-skills --skill repo-analyze
+agent-plus-meta marketplace prefer --list --pretty
+agent-plus-meta marketplace prefer --clear --skill repo-analyze
 ```
 
 ## Resolution
@@ -183,7 +185,7 @@ Each plugin's required env-vars are checked by canonical prefix (`HERMES_*`, `CO
 
 ## Extensions
 
-Without this, every workspace is locked to the 6 plugins that ship with `refresh`. With it, you drop a script into `extensions.json` and `agent-plus refresh` aggregates your own data the same way it aggregates the built-ins — same envelope, same `services.<name>` slot.
+Without this, every workspace is locked to the 6 plugins that ship with `refresh`. With it, you drop a script into `extensions.json` and `agent-plus-meta refresh` aggregates your own data the same way it aggregates the built-ins — same envelope, same `services.<name>` slot.
 
 ### The contract
 
@@ -222,28 +224,28 @@ else:
 Register it once:
 
 ```bash
-agent-plus extensions add --name releases \
+agent-plus-meta extensions add --name releases \
     --command python3 \
     --command-arg=.agent-plus/scripts/refresh-releases.py \
     --description "GitHub releases summary" \
     --timeout 15
 ```
 
-Every `agent-plus refresh` then populates `services.releases` alongside the built-ins.
+Every `agent-plus-meta refresh` then populates `services.releases` alongside the built-ins.
 
 ### Managing extensions
 
 ```bash
-agent-plus extensions list                       # show registered + on-disk check
-agent-plus extensions validate                   # dry-run validate (no script execution)
-agent-plus extensions add --name X --command Y   # append (atomic; rejects collisions)
-agent-plus extensions remove --name X            # remove (atomic; also drops services.<name>)
+agent-plus-meta extensions list                       # show registered + on-disk check
+agent-plus-meta extensions validate                   # dry-run validate (no script execution)
+agent-plus-meta extensions add --name X --command Y   # append (atomic; rejects collisions)
+agent-plus-meta extensions remove --name X            # remove (atomic; also drops services.<name>)
 
-agent-plus refresh --no-extensions               # skip extensions
-agent-plus refresh --extensions-only             # run only extensions
+agent-plus-meta refresh --no-extensions               # skip extensions
+agent-plus-meta refresh --extensions-only             # run only extensions
 ```
 
-`extensions list` and `agent-plus list` surface `command_hash` (sha256 of argv[0]) rather than the command itself — paths often contain usernames. Disabled extensions (`"enabled": false`) load but skip at refresh time. Names colliding with built-in plugin names are rejected at add/load time. `extensions remove` returns `services_cleaned: bool` so callers can confirm stale handler output didn't linger.
+`extensions list` and `agent-plus-meta list` surface `command_hash` (sha256 of argv[0]) rather than the command itself — paths often contain usernames. Disabled extensions (`"enabled": false`) load but skip at refresh time. Names colliding with built-in plugin names are rejected at add/load time. `extensions remove` returns `services_cleaned: bool` so callers can confirm stale handler output didn't linger.
 
 ## What it doesn't do
 
@@ -258,7 +260,7 @@ agent-plus refresh --extensions-only             # run only extensions
 
 ```bash
 claude plugin marketplace add osouthgate/agent-plus
-claude plugin install agent-plus@agent-plus
+claude plugin install agent-plus-meta@agent-plus
 ```
 
 ### Session-only

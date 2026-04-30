@@ -23,7 +23,7 @@ from unittest.mock import patch
 
 def _load_module():
     here = Path(__file__).resolve()
-    bin_path = here.parent.parent / "bin" / "agent-plus"
+    bin_path = here.parent.parent / "bin" / "agent-plus-meta"
     loader = SourceFileLoader("agent_plus", str(bin_path))
     spec = importlib.util.spec_from_loader("agent_plus", loader)
     assert spec
@@ -33,7 +33,7 @@ def _load_module():
 
 
 ap = _load_module()
-BIN = Path(__file__).resolve().parent.parent / "bin" / "agent-plus"
+BIN = Path(__file__).resolve().parent.parent / "bin" / "agent-plus-meta"
 
 
 def _run(*args: str, env: dict | None = None, cwd: str | None = None) -> tuple[int, str, str]:
@@ -55,13 +55,13 @@ class TestEnvelope(unittest.TestCase):
 
     def test_tool_meta_shape(self) -> None:
         meta = ap._tool_meta()
-        self.assertEqual(meta["name"], "agent-plus")
+        self.assertEqual(meta["name"], "agent-plus-meta")
         self.assertIsInstance(meta["version"], str)
 
     def test_with_tool_meta_dict(self) -> None:
         out = ap._with_tool_meta({"foo": "bar"})
         self.assertIn("tool", out)
-        self.assertEqual(out["tool"]["name"], "agent-plus")
+        self.assertEqual(out["tool"]["name"], "agent-plus-meta")
         self.assertEqual(out["foo"], "bar")
 
     def test_with_tool_meta_passthrough_for_non_dict(self) -> None:
@@ -115,7 +115,7 @@ class TestInit(unittest.TestCase):
     def test_init_envelope_present(self) -> None:
         result = self._init()
         self.assertIn("tool", result)
-        self.assertEqual(result["tool"]["name"], "agent-plus")
+        self.assertEqual(result["tool"]["name"], "agent-plus-meta")
 
     def test_init_idempotent_skips_existing_files(self) -> None:
         self._init()
@@ -211,7 +211,7 @@ class TestEnvcheck(unittest.TestCase):
 
     def test_envcheck_envelope_present(self) -> None:
         result = self._envcheck()
-        self.assertEqual(result["tool"]["name"], "agent-plus")
+        self.assertEqual(result["tool"]["name"], "agent-plus-meta")
 
     def test_envcheck_per_plugin_ready(self) -> None:
         result = self._envcheck(env_extra={
@@ -541,7 +541,7 @@ class TestList(unittest.TestCase):
         rc, out, err = _run("list")
         self.assertEqual(rc, 0, msg=err)
         result = json.loads(out)
-        self.assertEqual(result["tool"]["name"], "agent-plus")
+        self.assertEqual(result["tool"]["name"], "agent-plus-meta")
         self.assertIsInstance(result["plugins"], list)
         # Framework-only repo ships 5 universal primitives (agent-plus,
         # repo-analyze, diff-summary, skill-feedback, skill-plus). The 10
@@ -562,20 +562,20 @@ class TestList(unittest.TestCase):
         rc, out, err = _run("list", "--names-only")
         self.assertEqual(rc, 0, msg=err)
         result = json.loads(out)
-        self.assertEqual(result["tool"]["name"], "agent-plus")
+        self.assertEqual(result["tool"]["name"], "agent-plus-meta")
         self.assertIsInstance(result["plugins"], list)
         for n in result["plugins"]:
             self.assertIsInstance(n, str)
-        self.assertIn("agent-plus", result["plugins"])
+        self.assertIn("agent-plus-meta", result["plugins"])
 
     def test_list_extracts_some_headline_for_known_plugin(self) -> None:
-        # agent-plus's own README has a "Headline commands" section, so
+        # agent-plus-meta's own README has a "Headline commands" section, so
         # the preview should be non-null and contain the words.
         rc, out, _ = _run("list")
         result = json.loads(out)
-        agentplus = next(p for p in result["plugins"] if p["name"] == "agent-plus")
-        self.assertIsNotNone(agentplus["headline_commands"])
-        self.assertIn("Headline commands", agentplus["headline_commands"])
+        meta = next(p for p in result["plugins"] if p["name"] == "agent-plus-meta")
+        self.assertIsNotNone(meta["headline_commands"])
+        self.assertIn("Headline commands", meta["headline_commands"])
 
     def test_list_handles_missing_readme(self) -> None:
         # Build a fake repo with one plugin that has no README.
@@ -1244,7 +1244,7 @@ class TestMarketplaceInit(unittest.TestCase):
         rc, out, err = self._init("testuser/agent-plus-skills")
         self.assertEqual(rc, 0, msg=err)
         result = json.loads(out)
-        self.assertEqual(result["tool"]["name"], "agent-plus")
+        self.assertEqual(result["tool"]["name"], "agent-plus-meta")
         m = result["marketplace"]
         self.assertEqual(m["owner"], "testuser")
         self.assertEqual(m["name"], "agent-plus-skills")
@@ -1352,7 +1352,7 @@ class TestMarketplaceInit(unittest.TestCase):
         rc, out, _ = self._init("testuser/agent-plus-skills")
         result = json.loads(out)
         self.assertIn("tool", result)
-        self.assertEqual(result["tool"]["name"], "agent-plus")
+        self.assertEqual(result["tool"]["name"], "agent-plus-meta")
         self.assertIsInstance(result["tool"]["version"], str)
 
     def test_pretty_flag_emits_indented_json(self) -> None:
@@ -1611,7 +1611,7 @@ class TestMarketplaceSearch(unittest.TestCase):
              patch.object(ap.subprocess, "run", return_value=fake):
             payload = ap.cmd_marketplace_search(_ns(query=""))
         wrapped = ap._with_tool_meta(payload)
-        self.assertEqual(wrapped["tool"]["name"], "agent-plus")
+        self.assertEqual(wrapped["tool"]["name"], "agent-plus-meta")
         self.assertIsInstance(wrapped["tool"]["version"], str)
 
 
