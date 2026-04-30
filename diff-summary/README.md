@@ -1,6 +1,6 @@
 # diff-summary
 
-> Part of [**agent-plus**](../README.md) · siblings: [`agent-plus`](../agent-plus) · [`repo-analyze`](../repo-analyze) · [`skill-feedback`](../skill-feedback) · [`skill-plus`](../skill-plus)
+> Part of [**agent-plus**](../README.md) · siblings: [`agent-plus-meta`](../agent-plus-meta) · [`repo-analyze`](../repo-analyze) · [`skill-feedback`](../skill-feedback) · [`skill-plus`](../skill-plus)
 
 Triaging a PR or asking "what changed in this branch", an agent reads each modified file individually — five, ten, twenty Read calls — to figure out: is this a test or source? a config or a migration? did the public API change? were tests updated alongside? is this a 300-line refactor or a one-line typo fix?
 
