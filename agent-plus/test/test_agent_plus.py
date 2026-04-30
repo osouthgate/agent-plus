@@ -543,7 +543,10 @@ class TestList(unittest.TestCase):
         result = json.loads(out)
         self.assertEqual(result["tool"]["name"], "agent-plus")
         self.assertIsInstance(result["plugins"], list)
-        self.assertGreaterEqual(result["count"], 11)
+        # Framework-only repo ships 5 universal primitives (agent-plus,
+        # repo-analyze, diff-summary, skill-feedback, skill-plus). The 10
+        # service wrappers extracted to osouthgate/agent-plus-skills.
+        self.assertGreaterEqual(result["count"], 5)
 
     def test_list_each_plugin_has_name_and_description(self) -> None:
         rc, out, _ = _run("list")

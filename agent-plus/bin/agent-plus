@@ -1787,6 +1787,19 @@ def _git_init_in(path: Path) -> tuple[bool, Optional[str]]:
     if proc.returncode != 0:
         msg = (proc.stderr or proc.stdout or "").strip()
         return False, f"git init exited {proc.returncode}: {msg[:160]}"
+    # Windows hygiene: pin core.autocrlf=false on the new repo so files we
+    # write later (skill bins with shebangs, JSON manifests Python re-reads)
+    # don't get CRLF-mangled on checkout. Best-effort — git is already
+    # confirmed present and exit code is captured but not surfaced as a
+    # hard error since the init itself succeeded.
+    try:
+        subprocess.run(
+            ["git", "config", "--local", "core.autocrlf", "false"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(path), check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
     return True, None
 
 
