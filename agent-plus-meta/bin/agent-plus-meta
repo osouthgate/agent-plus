@@ -409,6 +409,15 @@ def cmd_upgrade_check(args: argparse.Namespace) -> dict:
     return _uc_mod.cmd_upgrade_check(args)
 
 
+def cmd_uninstall(args: argparse.Namespace) -> dict:
+    """v0.15.0 — the uninstall action. Safe-by-default (5 bins only); opt-in
+    `--workspace`, `--marketplaces`, `--all`, `--purge` escalate scope. See
+    `_subcommands/uninstall.py` for the full implementation."""
+    from _subcommands import uninstall as _un_mod  # noqa: PLC0415 — lazy
+    _un_mod.bind(sys.modules[__name__])
+    return _un_mod.cmd_uninstall(args)
+
+
 def cmd_upgrade(args: argparse.Namespace) -> dict:
     """v0.13.5 — the upgrade action. Detect install type, replace bins,
     run migrations, post-test gate, rollback on failure. See
@@ -3395,6 +3404,34 @@ def _build_parser() -> argparse.ArgumentParser:
     s_up.add_argument("--no-telemetry", dest="no_telemetry", action="store_true",
                       help="disable the placeholder telemetry ping (no-op today)")
 
+    # ── uninstall (v0.15.0) ────────────────────────────────────────────────
+    s_un = sub.add_parser(
+        "uninstall",
+        help="uninstall agent-plus framework primitives (default: 5 bins only); "
+             "opt-in --workspace / --marketplaces / --all / --purge escalate scope",
+        parents=[pretty_parent],
+    )
+    s_un.add_argument("--workspace", action="store_true",
+                      help="also remove <repo>/.agent-plus/ AND ~/.agent-plus/")
+    s_un.add_argument("--marketplaces", action="store_true",
+                      help="also remove ~/.agent-plus/marketplaces/ state directories")
+    s_un.add_argument("--all", action="store_true",
+                      help="bins + workspace + marketplaces (does NOT include --purge)")
+    s_un.add_argument("--purge", action="store_true",
+                      help="--all PLUS any other agent-plus state we own; ALWAYS prompts "
+                           "(literal 'PURGE' typed) even under --non-interactive")
+    s_un.add_argument("--dry-run", dest="dry_run", action="store_true",
+                      help="print manifest + envelope; remove nothing")
+    s_un.add_argument("--non-interactive", dest="non_interactive",
+                      action="store_true",
+                      help="skip prompt; auto-accept the safe default OR explicitly-flagged "
+                           "scope. Does NOT bypass --purge confirmation.")
+    s_un.add_argument("--json", action="store_true",
+                      help="emit JSON envelope only (suppress human preview)")
+    s_un.add_argument("--install-dir", dest="install_dir",
+                      help="explicit override for $INSTALL_DIR "
+                           "(defaults to AGENT_PLUS_INSTALL_DIR or ~/.local/bin)")
+
     s_refresh = sub.add_parser(
         "refresh",
         help="resolve identity for supported plugins into services.json",
@@ -3548,6 +3585,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "marketplace": cmd_marketplace,
         "upgrade-check": cmd_upgrade_check,
         "upgrade": cmd_upgrade,
+        "uninstall": cmd_uninstall,
     }
     if args.cmd not in handlers:
         parser.print_help()

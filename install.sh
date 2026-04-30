@@ -71,13 +71,67 @@ dispatch_upgrade() {
 }
 
 dispatch_uninstall() {
-    echo "install.sh: agent-plus-meta uninstall not yet implemented; ships in v0.15.0" >&2
-    exit 2
+    # v0.15.0: delegate to `agent-plus-meta uninstall` when reachable. When
+    # the bin is broken/partial, fall back to a self-contained POSIX shell
+    # path that removes ONLY the 5 primitive bins. Refuses expanded scopes
+    # in fallback mode (the canonical bin is the source of truth for those).
+    if command -v agent-plus-meta >/dev/null 2>&1; then
+        exec agent-plus-meta uninstall "$@"
+    fi
+    candidate="${AGENT_PLUS_INSTALL_DIR:-$HOME/.local/bin}/agent-plus-meta"
+    if [ -x "$candidate" ]; then
+        exec "$candidate" uninstall "$@"
+    fi
+    # ── self-contained fallback ────────────────────────────────────────────
+    fallback_dry=0
+    for arg in "$@"; do
+        case "$arg" in
+            --workspace|--marketplaces|--all|--purge)
+                echo "install.sh: agent-plus-meta not reachable; --workspace/--marketplaces/--all/--purge unavailable in fallback mode." >&2
+                echo "Hint: re-install first (sh install.sh), then run: agent-plus-meta uninstall <flags>" >&2
+                exit 3
+                ;;
+            --dry-run)
+                fallback_dry=1
+                ;;
+            --non-interactive|--json)
+                # Accepted but a no-op in fallback (we never prompt here).
+                ;;
+            *)
+                echo "install.sh: unknown uninstall argument: $arg" >&2
+                exit 2
+                ;;
+        esac
+    done
+    fallback_dir="${AGENT_PLUS_INSTALL_DIR:-$HOME/.local/bin}"
+    echo "install.sh uninstall (fallback mode — bins only)"
+    echo "================================================="
+    for primitive in $PRIMITIVES; do
+        target="$fallback_dir/$primitive"
+        if [ "$fallback_dry" -eq 1 ]; then
+            if [ -e "$target" ] || [ -L "$target" ]; then
+                echo "would remove: $target"
+            else
+                echo "missing:      $target"
+            fi
+            continue
+        fi
+        if [ -e "$target" ] || [ -L "$target" ]; then
+            if rm -f "$target"; then
+                echo "removed: $target"
+            else
+                echo "error:   $target" >&2
+            fi
+        else
+            echo "missing: $target"
+        fi
+    done
+    exit 0
 }
 
 case "$VERB" in
-    upgrade)   dispatch_upgrade ;;
-    uninstall) dispatch_uninstall ;;
+    upgrade)   dispatch_upgrade "$@" ;;
+    uninstall) dispatch_uninstall "$@" ;;
     install)   : ;; # fall through to existing install parser below
 esac
 

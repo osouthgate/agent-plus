@@ -118,6 +118,10 @@ agent-plus-meta init --non-interactive --auto          # deterministic JSON enve
 
 The `--non-interactive --auto` envelope is a frozen public contract — see [`agent-plus-meta/README.md`](./agent-plus-meta/README.md#init).
 
+### Uninstalling
+
+agent-plus owns its off-ramp end-to-end. `install.sh --uninstall` (or `agent-plus-meta uninstall`) removes the 5 primitive bins by default and KEEPS your workspaces, marketplaces, plugins, sessions, and skills unless you opt in with `--workspace`, `--marketplaces`, `--all`, or `--purge`. Full flag matrix and the JSON envelope schema: see [`agent-plus-meta/README.md`](./agent-plus-meta/README.md#uninstall).
+
 ### Manual install
 
 ```bash

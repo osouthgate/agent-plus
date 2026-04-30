@@ -381,6 +381,82 @@ Four codes, mirroring v0.12.0's pattern:
 
 User-declined runs are NOT errors — verdict `noop` plus `user_choice: "snooze" | "never"` carries that signal. Telemetry derives the declined-rate from `user_choice` distribution.
 
+### `uninstall`
+
+Safe-by-default uninstall. Default scope removes ONLY the 5 framework primitive bins. Workspace, marketplaces, plugins, sessions, and skills are KEPT and listed with hints. Opt-in flags escalate scope explicitly.
+
+```bash
+agent-plus-meta uninstall                 # 5 bins only — interactive y/N
+agent-plus-meta uninstall --workspace     # also remove .agent-plus/ workspaces
+agent-plus-meta uninstall --marketplaces  # also unregister marketplace state
+agent-plus-meta uninstall --all           # bins + workspace + marketplaces
+agent-plus-meta uninstall --purge         # all + everything we own; ALWAYS prompts 'PURGE'
+agent-plus-meta uninstall --dry-run       # preview manifest, remove nothing
+agent-plus-meta uninstall --json          # JSON envelope only (script mode)
+```
+
+The `install.sh --uninstall` shim delegates to this command when `agent-plus-meta` is reachable. When it's not (broken/partial install), `install.sh` falls back to a self-contained POSIX shell path that removes the 5 bins only — expanded scopes are refused with exit 3 in fallback mode.
+
+#### Flag matrix
+
+| Flag                 | Adds to default                                            |
+|----------------------|------------------------------------------------------------|
+| (none)               | — 5 bins only.                                             |
+| `--workspace`        | `<repo>/.agent-plus/` AND `~/.agent-plus/`                  |
+| `--marketplaces`     | `~/.agent-plus/marketplaces/<owner>-<name>/` registrations  |
+| `--all`              | bins + workspace + marketplaces (does NOT include `--purge`) |
+| `--purge`            | `--all` PLUS any other agent-plus state we own. ALWAYS prompts `PURGE`. |
+| `--dry-run`          | preview only; remove nothing                                |
+| `--non-interactive`  | skip y/N prompt; does NOT bypass `--purge` confirmation     |
+| `--json`             | suppress human preview; emit JSON envelope on stdout        |
+| `--install-dir PATH` | override `$INSTALL_DIR` (defaults to `AGENT_PLUS_INSTALL_DIR` or `~/.local/bin`) |
+
+#### What the uninstall NEVER touches
+
+- `~/.claude/projects/` — Claude Code session history (user-owned).
+- `~/.claude/skills/` — your authored skills (user-owned).
+- `<repo>/.claude/skills/` — per-repo authored skills (user-owned).
+- `~/.claude/plugins/cache/` — Claude Code plugin cache. We list `@agent-plus`-tagged entries with `claude plugin uninstall <name>@agent-plus` hints, but we never delete from this path. Claude Code owns it.
+
+#### `uninstall` envelope (frozen at v0.15.0)
+
+Public contract; full schema reference in [docs/uninstall-envelope.md](./docs/uninstall-envelope.md).
+
+```jsonc
+{
+  "tool": {"name": "agent-plus-meta", "version": "0.15.0"},
+  "action": "uninstall",
+  "mode": "default | workspace | marketplaces | all | purge",
+  "dry_run": false,
+  "interactive": true,
+  "user_confirmed": true,
+  "install_dir": "/home/user/.local/bin",
+  "paths": [
+    {"path": "...", "kind": "primitive_bin", "scope": "default", "status": "removed"},
+    {"path": "...", "kind": "workspace", "scope": "workspace", "status": "skipped",
+     "note": "Pass --workspace to remove."},
+    {"path": "...", "kind": "marketplace_state", "scope": "marketplaces",
+     "slug": "alice/agent-plus-skills", "status": "skipped"},
+    {"path": "...", "kind": "claude_plugin", "scope": "out_of_scope", "status": "kept",
+     "hint": "claude plugin uninstall github-remote@agent-plus"}
+  ],
+  "summary": {"removed": 5, "missing": 0, "skipped": 2, "kept": 3, "errors": 0},
+  "claude_plugin_hints": ["claude plugin uninstall github-remote@agent-plus"],
+  "next_steps": ["Re-install: curl -fsSL .../install.sh | sh"],
+  "errors": []
+}
+```
+
+The `kind` enum reserves slots for future additive use (`settings_hook`, `daemon_pid`, `migration_state`) so v0.16+ can extend without breaking the contract. Adding fields is non-breaking; renaming or removing `tool/action/mode/paths/summary/status/kind/scope` requires a major bump.
+
+#### Stable error codes (v0.15.0)
+
+`uninstall_partial_failure` — one or more removals failed (permission, locked file). Recoverable; check filesystem permissions and re-run.
+
+#### `--purge` is the one-way door
+
+Every other mode is recoverable via re-install. `--purge` removes user data we own (`.agent-plus/` workspace, feedback logs, marketplace state). It always prompts for the literal word `PURGE` — even under `--non-interactive`. Typing anything else aborts. The friction is intentional. PATH cleanup is NOT performed; if you added `~/.local/bin` to your shell rc, removing it is up to you.
+
 ## What it doesn't do
 
 - **`refresh` is data-driven.** Each wrapper declares a `refresh_handler` block in its `plugin.json`; plugins without one are silently skipped. Extensions add your own.
