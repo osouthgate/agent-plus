@@ -641,7 +641,7 @@ class TestRefreshGating(unittest.TestCase):
         # Now invoke discovery directly with the override root.
         os.environ["AGENT_PLUS_MARKETPLACES_ROOT"] = str(self.root)
         try:
-            handlers, errors, skipped = ap._discover_marketplace_refresh_handlers()
+            handlers, errors, skipped, _collisions = ap._discover_marketplace_refresh_handlers()
         finally:
             del os.environ["AGENT_PLUS_MARKETPLACES_ROOT"]
         self.assertNotIn("demo", handlers)
@@ -655,7 +655,7 @@ class TestRefreshGating(unittest.TestCase):
         )
         os.environ["AGENT_PLUS_MARKETPLACES_ROOT"] = str(self.root)
         try:
-            handlers, errors, skipped = ap._discover_marketplace_refresh_handlers()
+            handlers, errors, skipped, _collisions = ap._discover_marketplace_refresh_handlers()
         finally:
             del os.environ["AGENT_PLUS_MARKETPLACES_ROOT"]
         self.assertIn("demo", handlers)

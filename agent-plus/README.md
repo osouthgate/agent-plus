@@ -34,7 +34,7 @@ Creates `.agent-plus/` with three empty-but-valid JSON files. Idempotent — re-
 ```bash
 $ agent-plus init --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.1.0"},
+  "tool": {"name": "agent-plus", "version": "0.10.0"},
   "workspace": "/path/to/repo/.agent-plus",
   "source": "git",
   "created": ["manifest.json", "services.json", "env-status.json"],
@@ -49,7 +49,7 @@ Walks every known plugin's required env-var prefixes. Reports which are set, whi
 ```bash
 $ agent-plus envcheck --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.1.0"},
+  "tool": {"name": "agent-plus", "version": "0.10.0"},
   "workspace": "/path/to/repo/.agent-plus",
   "source": "git",
   "checked": ["COOLIFY_API_KEY", "COOLIFY_URL", "GITHUB_TOKEN", ...],
@@ -74,7 +74,7 @@ Resolves project / repo identity for the lightest-cost endpoints in **github-rem
 ```bash
 $ agent-plus refresh --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.1.0"},
+  "tool": {"name": "agent-plus", "version": "0.10.0"},
   "services": {
     "github-remote": {
       "plugin": "github-remote",
@@ -103,7 +103,7 @@ Discoverability — one call returns every plugin in `.claude-plugin/marketplace
 ```bash
 $ agent-plus list --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.2.0"},
+  "tool": {"name": "agent-plus", "version": "0.10.0"},
   "plugins": [
     {
       "name": "github-remote",
@@ -146,7 +146,7 @@ Each plugin's required env-vars are checked by their canonical prefix (`HERMES_*
 
 Deliberately out of scope:
 
-- **No `refresh` built-in for coolify-remote, hcloud-remote, hermes-remote, openrouter-remote, skill-feedback.** Six of the eleven plugins are wired. The remaining five are `unconfigured` from envcheck's POV — the per-plugin CLIs are unchanged. (Plug your own gap with an extension; see below.)
+- **`refresh` is data-driven.** Each wrapper declares a `refresh_handler` block in its `plugin.json`; plugins without one are silently skipped. Add your own with an extension — see below.
 - **No SessionStart hook.** Bootstrap is on the agent / user; `agent-plus init` is idempotent so it's cheap to run on every session start.
 - **No edit / generic file ops.** `.agent-plus/*.json` is plain JSON. Use `jq` or an editor.
 - **No secret values anywhere.** Names only; values stay in your shell / `.env`. Verified by a canary test.
@@ -226,7 +226,7 @@ Scaffold a new `<user>/agent-plus-skills` marketplace repo following the marketp
 ```bash
 $ agent-plus marketplace init osouthgate/agent-plus-skills --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.5.0"},
+  "tool": {"name": "agent-plus", "version": "0.10.0"},
   "marketplace": {
     "path": "/path/to/agent-plus-skills",
     "owner": "osouthgate",
@@ -243,6 +243,40 @@ $ agent-plus marketplace init osouthgate/agent-plus-skills --pretty
 ```
 
 The `name` portion of the slug **must** be `agent-plus-skills` for v1 — the convention is fixed so `gh search repos topic:agent-plus-skills` is unambiguous. Default target dir is `<cwd>/<name>/`; override with `--path`. Refuses to scaffold into a non-empty directory. `agent-plus marketplace init` never runs `gh` itself — it prints suggested invocations only, keeping the scaffold pure and avoiding a `gh` auth dependency.
+
+`init` also pins `core.autocrlf=false` on the new repo's local config so subsequent skill-bin / JSON-manifest writes don't get CRLF-mangled on Windows checkouts. Best-effort — never fails the init.
+
+## `marketplace search [query]`
+
+Discover marketplaces published under the `agent-plus-skills` topic on GitHub. Shells to `gh search repos --topic agent-plus-skills --json ... --limit 30`, ranks results by `stars + recency_boost (max(0, 30 - days_since_update) * 2)` so a freshly-updated 5-star repo can outrank a stale 30-star one.
+
+```bash
+$ agent-plus marketplace search database --pretty
+{
+  "tool": {"name": "agent-plus", "version": "0.10.0"},
+  "ok": true,
+  "query": "database",
+  "results": [
+    {"slug": "alice/agent-plus-skills", "name": "agent-plus-skills", "owner": "alice",
+     "description": "Postgres + ClickHouse skills", "stars": 12, "updatedAt": "2026-04-22T...",
+     "url": "https://github.com/alice/agent-plus-skills", "score": 28.0}
+  ]
+}
+```
+
+Refuses cleanly when `gh` isn't on `PATH` (`error: gh_not_installed`). Translates timeouts and non-zero exits into envelope errors (`gh_search_timeout`, `gh_search_unavailable`, `gh_search_failed`). User query is never interpolated into a shell string — list-form `subprocess.run` only.
+
+## `marketplace prefer <user>/<repo> --skill <name>`
+
+Per-skill collision resolution. When two installed marketplaces ship a skill of the same name, this records which marketplace wins for that name. Recorded atomically in `~/.agent-plus/preferences.json`.
+
+```bash
+$ agent-plus marketplace prefer alice/agent-plus-skills --skill repo-analyze
+$ agent-plus marketplace prefer --list --pretty       # inspect
+$ agent-plus marketplace prefer --clear --skill repo-analyze
+```
+
+`agent-plus refresh` consults the preference on collisions and surfaces a `collisions: [{skill, candidates, chosen, reason: "first_wins" | "preference"}]` slot in the envelope when collisions occur. Without a preference, behaviour is deterministic first-wins (sorted iteration). Non-colliding handlers behave exactly as before.
 
 ## Install
 

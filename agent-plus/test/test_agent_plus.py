@@ -543,7 +543,10 @@ class TestList(unittest.TestCase):
         result = json.loads(out)
         self.assertEqual(result["tool"]["name"], "agent-plus")
         self.assertIsInstance(result["plugins"], list)
-        self.assertGreaterEqual(result["count"], 11)
+        # Framework-only repo ships 5 universal primitives (agent-plus,
+        # repo-analyze, diff-summary, skill-feedback, skill-plus). The 10
+        # service wrappers extracted to osouthgate/agent-plus-skills.
+        self.assertGreaterEqual(result["count"], 5)
 
     def test_list_each_plugin_has_name_and_description(self) -> None:
         rc, out, _ = _run("list")
@@ -1495,6 +1498,341 @@ class TestSuggestedSkills(unittest.TestCase):
         self.assertEqual(rc, 0, msg=err)
         # No "Suggested skills" header on empty.
         self.assertNotIn("Suggested skills", err)
+
+
+# ─── marketplace search ──────────────────────────────────────────────────────
+
+
+class _FakeProc:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _ns(**kwargs):
+    import argparse as _ap
+    return _ap.Namespace(**kwargs)
+
+
+class TestMarketplaceSearch(unittest.TestCase):
+    """Gate 4.1: `agent-plus marketplace search [query]`."""
+
+    def test_search_no_gh_returns_clear_error(self) -> None:
+        with patch.object(ap.shutil, "which", return_value=None):
+            out = ap.cmd_marketplace_search(_ns(query=""))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"], "gh_not_installed")
+        self.assertIn("cli.github.com", out["hint"])
+
+    def test_search_happy_path_ranks_by_stars_and_recency(self) -> None:
+        import datetime as dt
+        now = dt.datetime.now(dt.timezone.utc)
+        fresh = (now - dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        old = (now - dt.timedelta(days=400)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        repos = [
+            {"name": "low", "owner": {"login": "a"}, "description": "x",
+             "stargazerCount": 10, "updatedAt": old, "url": "u1"},
+            {"name": "fresh", "owner": {"login": "b"}, "description": "y",
+             "stargazerCount": 5, "updatedAt": fresh, "url": "u2"},
+            {"name": "mid", "owner": {"login": "c"}, "description": "z",
+             "stargazerCount": 20, "updatedAt": old, "url": "u3"},
+        ]
+        fake = _FakeProc(0, json.dumps(repos), "")
+        with patch.object(ap.shutil, "which", return_value="/usr/bin/gh"), \
+             patch.object(ap.subprocess, "run", return_value=fake):
+            out = ap.cmd_marketplace_search(_ns(query=""))
+        self.assertTrue(out["ok"])
+        slugs = [r["slug"] for r in out["results"]]
+        # 'fresh' (5 + ~58 boost) > 'mid' (20) > 'low' (10).
+        self.assertEqual(slugs, ["b/fresh", "c/mid", "a/low"])
+        for r in out["results"]:
+            self.assertIn("score", r)
+            self.assertIn("stars", r)
+
+    def test_search_with_query_passes_through_to_gh(self) -> None:
+        captured: dict = {}
+
+        def fake_run(cmd, **kwargs):  # noqa: ARG001
+            captured["cmd"] = cmd
+            return _FakeProc(0, "[]", "")
+
+        with patch.object(ap.shutil, "which", return_value="/usr/bin/gh"), \
+             patch.object(ap.subprocess, "run", side_effect=fake_run):
+            out = ap.cmd_marketplace_search(_ns(query="database"))
+        self.assertTrue(out["ok"])
+        cmd = captured["cmd"]
+        # query is the first positional after `gh search repos`.
+        self.assertEqual(cmd[:4], ["gh", "search", "repos", "database"])
+        self.assertIn("--topic", cmd)
+        topic_idx = cmd.index("--topic")
+        self.assertEqual(cmd[topic_idx + 1], "agent-plus-skills")
+        self.assertIn("--json", cmd)
+        self.assertIn("--limit", cmd)
+
+    def test_search_gh_returns_nonzero(self) -> None:
+        fake = _FakeProc(1, "", "boom: rate limited")
+        with patch.object(ap.shutil, "which", return_value="/usr/bin/gh"), \
+             patch.object(ap.subprocess, "run", return_value=fake):
+            out = ap.cmd_marketplace_search(_ns(query=""))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"], "gh_search_failed")
+        self.assertIn("rate limited", out["stderr"])
+
+    def test_search_timeout_returns_clear_error(self) -> None:
+        def _raise_timeout(*_a, **_k):
+            raise ap.subprocess.TimeoutExpired(cmd=["gh"], timeout=20)
+        with patch.object(ap.shutil, "which", return_value="/usr/bin/gh"), \
+             patch.object(ap.subprocess, "run", side_effect=_raise_timeout):
+            out = ap.cmd_marketplace_search(_ns(query=""))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"], "gh_search_timeout")
+
+    def test_search_oserror_returns_clear_error(self) -> None:
+        def _raise_os(*_a, **_k):
+            raise OSError("No such file or directory: 'gh'")
+        with patch.object(ap.shutil, "which", return_value="/usr/bin/gh"), \
+             patch.object(ap.subprocess, "run", side_effect=_raise_os):
+            out = ap.cmd_marketplace_search(_ns(query=""))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"], "gh_search_unavailable")
+
+    def test_search_malformed_json_returns_clear_error(self) -> None:
+        fake = _FakeProc(0, "this is not json", "")
+        with patch.object(ap.shutil, "which", return_value="/usr/bin/gh"), \
+             patch.object(ap.subprocess, "run", return_value=fake):
+            out = ap.cmd_marketplace_search(_ns(query=""))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error"], "gh_search_failed")
+
+    def test_search_envelope_has_tool_meta(self) -> None:
+        fake = _FakeProc(0, "[]", "")
+        with patch.object(ap.shutil, "which", return_value="/usr/bin/gh"), \
+             patch.object(ap.subprocess, "run", return_value=fake):
+            payload = ap.cmd_marketplace_search(_ns(query=""))
+        wrapped = ap._with_tool_meta(payload)
+        self.assertEqual(wrapped["tool"]["name"], "agent-plus")
+        self.assertIsInstance(wrapped["tool"]["version"], str)
+
+
+# ─── marketplace prefer ──────────────────────────────────────────────────────
+
+
+def _ns_pref(**kw):
+    """argparse.Namespace builder for cmd_marketplace_prefer."""
+    import argparse as _argparse
+    defaults = {
+        "user_repo": None,
+        "skill": None,
+        "list_prefs": False,
+        "clear": False,
+    }
+    defaults.update(kw)
+    return _argparse.Namespace(**defaults)
+
+
+class TestMarketplacePrefer(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self.tmp.name)
+        self.prefs_path = self.tmpdir / "preferences.json"
+        os.environ["AGENT_PLUS_PREFERENCES_PATH"] = str(self.prefs_path)
+
+    def tearDown(self) -> None:
+        os.environ.pop("AGENT_PLUS_PREFERENCES_PATH", None)
+        self.tmp.cleanup()
+
+    def test_prefer_sets_and_persists(self) -> None:
+        out = ap.cmd_marketplace_prefer(_ns_pref(
+            user_repo="osouthgate/agent-plus-skills",
+            skill="repo-analyze",
+        ))
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["skill"], "repo-analyze")
+        self.assertEqual(out["preferredMarketplace"], "osouthgate/agent-plus-skills")
+        self.assertIsNone(out["previousPreference"])
+        self.assertEqual(out["preferencesPath"], str(self.prefs_path.resolve()))
+        # File on disk has the right shape.
+        data = json.loads(self.prefs_path.read_text(encoding="utf-8"))
+        entry = data["skillPreferences"]["repo-analyze"]
+        self.assertEqual(entry["preferredMarketplace"],
+                         "osouthgate/agent-plus-skills")
+        self.assertIsInstance(entry["setAt"], str)
+        self.assertTrue(entry["setAt"].endswith("Z") or "T" in entry["setAt"])
+
+    def test_prefer_overwrites_with_previousPreference_in_envelope(self) -> None:
+        ap.cmd_marketplace_prefer(_ns_pref(
+            user_repo="alice/agent-plus-skills", skill="repo-analyze",
+        ))
+        out2 = ap.cmd_marketplace_prefer(_ns_pref(
+            user_repo="bob/agent-plus-skills", skill="repo-analyze",
+        ))
+        self.assertEqual(out2["previousPreference"], "alice/agent-plus-skills")
+        self.assertEqual(out2["preferredMarketplace"], "bob/agent-plus-skills")
+
+    def test_prefer_validates_user_repo_format(self) -> None:
+        out = ap.cmd_marketplace_prefer(_ns_pref(
+            user_repo="bad slug", skill="repo-analyze",
+        ))
+        self.assertIn("error", out)
+        self.assertIn("user/repo", out["error"])
+        # Must not have written anything.
+        self.assertFalse(self.prefs_path.exists())
+
+    def test_prefer_validates_skill_name_format(self) -> None:
+        out = ap.cmd_marketplace_prefer(_ns_pref(
+            user_repo="alice/agent-plus-skills", skill="Bad_Name",
+        ))
+        self.assertIn("error", out)
+        self.assertIn("--skill", out["error"])
+        self.assertFalse(self.prefs_path.exists())
+
+    def test_prefer_list(self) -> None:
+        ap.cmd_marketplace_prefer(_ns_pref(
+            user_repo="alice/agent-plus-skills", skill="repo-analyze",
+        ))
+        # Snapshot mtime — list must not modify.
+        mtime_before = self.prefs_path.stat().st_mtime_ns
+        out = ap.cmd_marketplace_prefer(_ns_pref(list_prefs=True))
+        self.assertTrue(out["ok"])
+        self.assertIn("repo-analyze", out["skillPreferences"])
+        self.assertEqual(
+            out["skillPreferences"]["repo-analyze"]["preferredMarketplace"],
+            "alice/agent-plus-skills",
+        )
+        self.assertEqual(out["preferencesPath"], str(self.prefs_path.resolve()))
+        self.assertEqual(self.prefs_path.stat().st_mtime_ns, mtime_before)
+
+    def test_prefer_list_when_file_absent(self) -> None:
+        out = ap.cmd_marketplace_prefer(_ns_pref(list_prefs=True))
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["skillPreferences"], {})
+
+    def test_prefer_clear_skill_present(self) -> None:
+        ap.cmd_marketplace_prefer(_ns_pref(
+            user_repo="alice/agent-plus-skills", skill="repo-analyze",
+        ))
+        out = ap.cmd_marketplace_prefer(_ns_pref(
+            clear=True, skill="repo-analyze",
+        ))
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["cleared"])
+        self.assertTrue(out["wasPresent"])
+        data = json.loads(self.prefs_path.read_text(encoding="utf-8"))
+        self.assertNotIn("repo-analyze", data["skillPreferences"])
+
+    def test_prefer_clear_skill_absent(self) -> None:
+        out = ap.cmd_marketplace_prefer(_ns_pref(
+            clear=True, skill="ghost-skill",
+        ))
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["wasPresent"])
+
+    def test_prefer_clear_requires_skill(self) -> None:
+        out = ap.cmd_marketplace_prefer(_ns_pref(clear=True))
+        self.assertIn("error", out)
+
+    def test_prefer_set_requires_both_args(self) -> None:
+        out = ap.cmd_marketplace_prefer(_ns_pref(
+            user_repo="alice/agent-plus-skills",
+        ))
+        self.assertIn("error", out)
+        out2 = ap.cmd_marketplace_prefer(_ns_pref(skill="repo-analyze"))
+        self.assertIn("error", out2)
+
+
+# ─── refresh collision resolution via prefer ─────────────────────────────────
+
+
+class TestRefreshCollisionResolution(unittest.TestCase):
+    """Two installed marketplaces both declare `demo` — preference picks one."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self.tmp.name)
+        self.mp_root = self.tmpdir / "marketplaces"
+        self.mp_root.mkdir()
+        self.prefs_path = self.tmpdir / "preferences.json"
+        os.environ["AGENT_PLUS_MARKETPLACES_ROOT"] = str(self.mp_root)
+        os.environ["AGENT_PLUS_PREFERENCES_PATH"] = str(self.prefs_path)
+
+    def tearDown(self) -> None:
+        os.environ.pop("AGENT_PLUS_MARKETPLACES_ROOT", None)
+        os.environ.pop("AGENT_PLUS_PREFERENCES_PATH", None)
+        self.tmp.cleanup()
+
+    def _make_marketplace(self, owner: str, *, command: str) -> None:
+        mdir = self.mp_root / f"{owner}-agent-plus-skills"
+        plugin_dir = mdir / "demo" / ".claude-plugin"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.json").write_text(
+            json.dumps({
+                "name": "demo",
+                "version": "0.1.0",
+                "refresh_handler": {
+                    "command": command,
+                    "timeout_seconds": 5,
+                    "identity_keys": [],
+                    "failure_mode": "soft",
+                },
+            }) + "\n",
+            encoding="utf-8",
+        )
+        (mdir / "marketplace.json").write_text(
+            json.dumps({
+                "name": "agent-plus-skills",
+                "owner": owner,
+                "version": "0.1.0",
+                "agent_plus_version": ">=0.5",
+                "surface": "claude-code",
+                "skills": [{"name": "demo", "version": "0.1.0", "path": "demo/"}],
+            }) + "\n",
+            encoding="utf-8",
+        )
+        # Mark accepted.
+        (mdir / ".agent-plus-meta.json").write_text(
+            json.dumps({"accepted_first_run": True, "pinned_sha": "x"}) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_collision_first_wins_when_no_preference(self) -> None:
+        self._make_marketplace("alice", command="echo {}")
+        self._make_marketplace("bob", command="echo {}")
+        handlers, _errors, _skipped, collisions = (
+            ap._discover_marketplace_refresh_handlers()
+        )
+        self.assertIn("demo", handlers)
+        self.assertEqual(len(collisions), 1)
+        self.assertEqual(collisions[0]["skill"], "demo")
+        self.assertEqual(collisions[0]["reason"], "first_wins")
+        # Sorted iteration → alice before bob.
+        self.assertEqual(collisions[0]["chosen"], "alice/agent-plus-skills")
+        self.assertEqual(
+            sorted(collisions[0]["candidates"]),
+            ["alice/agent-plus-skills", "bob/agent-plus-skills"],
+        )
+
+    def test_refresh_resolves_collision_using_preference(self) -> None:
+        self._make_marketplace("alice", command="echo {}")
+        self._make_marketplace("bob", command="echo {}")
+        # Set preference to bob — the non-default.
+        ap.cmd_marketplace_prefer(_ns_pref(
+            user_repo="bob/agent-plus-skills", skill="demo",
+        ))
+        handlers, _errors, _skipped, collisions = (
+            ap._discover_marketplace_refresh_handlers()
+        )
+        self.assertEqual(len(collisions), 1)
+        self.assertEqual(collisions[0]["reason"], "preference")
+        self.assertEqual(collisions[0]["chosen"], "bob/agent-plus-skills")
+
+    def test_no_collision_means_no_collisions_slot(self) -> None:
+        self._make_marketplace("alice", command="echo {}")
+        handlers, _errors, _skipped, collisions = (
+            ap._discover_marketplace_refresh_handlers()
+        )
+        self.assertIn("demo", handlers)
+        self.assertEqual(collisions, [])
 
 
 if __name__ == "__main__":

@@ -5,68 +5,13 @@
     "url": "https://github.com/osouthgate"
   },
   "metadata": {
-    "description": "Make AI agents dramatically cheaper at running your infrastructure. Drop-in Claude Code plugins that collapse slow, multi-step API dances into one fast call — deploys, databases, cloud, billing, logs. Zero install pain: single-file Python, also runs standalone."
+    "description": "Make AI agents dramatically cheaper at running your infrastructure. Drop-in Claude Code plugins that collapse slow, multi-step API dances into one fast call. Zero install pain: single-file Python, also runs standalone. Universal primitives only — service wrappers (github-remote, vercel-remote, supabase-remote, railway-ops, etc.) live in osouthgate/agent-plus-skills."
   },
   "plugins": [
     {
       "name": "agent-plus",
       "source": "./agent-plus",
-      "description": "Workspace bootstrap for the agent-plus collection — init, envcheck, refresh services. One call to discover what's installed, what's configured, and what services this checkout already knows about. Names only, no values."
-    },
-    {
-      "name": "hermes-remote",
-      "source": "./hermes-remote",
-      "description": "Remote CLI for managing a Hermes Agent deployment — cron jobs, env, status, model, config, and one-shot chat via /v1/chat/completions."
-    },
-    {
-      "name": "coolify-remote",
-      "source": "./coolify-remote",
-      "description": "Remote CLI for Coolify PaaS — apps, env vars with post-write verification, domains, TLS, deploys with --wait, and app exec via SSH + docker exec."
-    },
-    {
-      "name": "diff-summary",
-      "source": "./diff-summary",
-      "description": "One-call structured triage of a git diff — per-file role classification (source/test/config/doc/generated/build/fixture/migration), risk tier with reasons, public-API touch detection, co-changed-test detection, secret-risk path flagging. Replaces the 5–20 Read calls an agent burns reading each modified file to figure out 'what kind of change is this'. Stdlib only, no network, stateless."
-    },
-    {
-      "name": "hcloud-remote",
-      "source": "./hcloud-remote",
-      "description": "Minimal Hetzner Cloud CLI — server list/show/reboot, snapshot create/list, ssh by name. Deliberately narrow (no volumes, networks, or LBs)."
-    },
-    {
-      "name": "openrouter-remote",
-      "source": "./openrouter-remote",
-      "description": "OpenRouter CLI — balance with cron-friendly --alert-below, per-key usage stats, model catalogue search, per-provider endpoints, and API key management."
-    },
-    {
-      "name": "langfuse-remote",
-      "source": "./langfuse-remote",
-      "description": "Langfuse CLI — export/import prompts for backup and cross-env migration, smoke-test traces, health checks across multiple named instances."
-    },
-    {
-      "name": "railway-ops",
-      "source": "./railway-ops",
-      "description": "Read-first Railway CLI wrapper — single-call env overviews (services, deploy status, errors, env var NAMES-only) for fast incident triage."
-    },
-    {
-      "name": "supabase-remote",
-      "source": "./supabase-remote",
-      "description": "Supabase CLI wrapper — strips the agent-envelope preamble from sql queries, single-call rls-audit across every table, gen-types into one command."
-    },
-    {
-      "name": "vercel-remote",
-      "source": "./vercel-remote",
-      "description": "Read-first Vercel REST API wrapper — single-call project overviews (deployments with commit metadata, domain verification, env var NAMES-only), name-resolved projects, Deploy Hook triggers with --wait, zero env-value leakage."
-    },
-    {
-      "name": "github-remote",
-      "source": "./github-remote",
-      "description": "Read-first GitHub REST API wrapper — single-call PR/branch overviews (state + checks + reviews + workflow runs + mergeable), name-resolved PRs/issues/runs by branch or title, run wait with branch-resolution, log fetch with redirect fallback. One write surface (pr comment)."
-    },
-    {
-      "name": "linear-remote",
-      "source": "./linear-remote",
-      "description": "Read-first Linear GraphQL API wrapper — issues get/list/search/create/update/move/assign, project overviews with state-bucketed issues, name-resolved teams/states/labels/assignees, --from-markdown YAML frontmatter issue creation, zero API-key leakage."
+      "description": "Workspace bootstrap for the agent-plus collection — init, envcheck, refresh services, marketplace lifecycle (init/install/list/update/remove/search/prefer), extensions. One call to discover what's installed, what's configured, and what services this checkout already knows about. Names only, no values."
     },
     {
       "name": "repo-analyze",
@@ -74,9 +19,19 @@
       "description": "One-call cold-start orientation for an unfamiliar repo — file tree (capped), language mix, framework + build-tool detection, top-level deps, entrypoints, README highlights. Replaces ~67-grep + ~60-ls cold-start dance with one structured JSON blob. Stdlib only, no network, stateless."
     },
     {
+      "name": "diff-summary",
+      "source": "./diff-summary",
+      "description": "One-call structured triage of a git diff — per-file role classification (source/test/config/doc/generated/build/fixture/migration), risk tier with reasons, public-API touch detection, co-changed-test detection, secret-risk path flagging. Replaces the 5–20 Read calls an agent burns reading each modified file to figure out 'what kind of change is this'. Stdlib only, no network, stateless."
+    },
+    {
       "name": "skill-feedback",
       "source": "./skill-feedback",
       "description": "Local-first agent self-assessment for Claude Code skills. Agent appends a structured rating + friction note to .agent-plus/skill-feedback/<skill>.jsonl after each skill use. Skill authors aggregate locally with `report` or bundle entries into a GitHub issue body for the skill's source repo with `submit`. No SaaS, no SDK, scrub-on-write."
+    },
+    {
+      "name": "skill-plus",
+      "source": "./skill-plus",
+      "description": "Mine the Claude Code session log to find commands you keep typing by hand, scaffold them into project-scoped Claude skills under .claude/skills/<name>/, audit existing skills against the framework contract, close the loop with a cross-source feedback aggregator that joins skill-feedback ratings against implicit session-mining failure signals, and promote skills you keep using to your <user>/agent-plus-skills marketplace. Stdlib Python, local-only, no network. Consent-gated and secret-redacting before disk write."
     }
   ]
 }

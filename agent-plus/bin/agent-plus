@@ -655,9 +655,20 @@ def _discover_refresh_handlers(
     return handlers, errors
 
 
+def _marketplace_dirname_to_slug(dirname: str) -> str:
+    """`alice-agent-plus-skills` -> `alice/agent-plus-skills`. Marketplaces
+    are laid out as `<owner>-<name>/` on disk; the marketplace name is
+    always `agent-plus-skills` for v1, so split on the first `-`."""
+    if "-" in dirname:
+        owner, _, rest = dirname.partition("-")
+        if rest:
+            return f"{owner}/{rest}"
+    return dirname
+
+
 def _discover_marketplace_refresh_handlers(
     root: Optional[Path] = None,
-) -> tuple[dict, list, list]:
+) -> tuple[dict, list, list, list]:
     """Walk ~/.agent-plus/marketplaces/<owner-name>/ for refresh handlers.
 
     Trust gate 2 enforced here: a marketplace whose `.agent-plus-meta.json`
@@ -665,15 +676,24 @@ def _discover_marketplace_refresh_handlers(
     entirely. Its plugin names are returned in the third tuple slot so the
     caller can warn the user.
 
+    When two accepted marketplaces declare the same skill name, the
+    `~/.agent-plus/preferences.json` file is consulted; on a hit the
+    preferred marketplace wins, otherwise the first marketplace seen wins
+    (sorted iteration → deterministic). The fourth tuple slot lists each
+    collision: `{skill, candidates: [...slugs], chosen, reason}`.
+
     Returns ({plugin_name: refresh_handler_block}, [load_errors],
-             [skipped_unaccepted_marketplaces]).
+             [skipped_unaccepted_marketplaces], [collisions]).
     """
     base = root if root is not None else _marketplaces_root()
     handlers: dict = {}
     errors: list = []
     skipped: list = []
+    collisions: list = []
+    # skill_name -> list[(marketplace_slug, normalized_block)]
+    candidates: dict[str, list[tuple[str, dict]]] = {}
     if not base.is_dir():
-        return handlers, errors, skipped
+        return handlers, errors, skipped, collisions
 
     for mdir in sorted(p for p in base.iterdir() if p.is_dir()):
         if not (mdir / MARKETPLACE_META_FILENAME).is_file():
@@ -690,6 +710,7 @@ def _discover_marketplace_refresh_handlers(
         skills = mjd.get("skills") if isinstance(mjd, dict) else None
         if not isinstance(skills, list):
             continue
+        slug = _marketplace_dirname_to_slug(mdir.name)
         for s in skills:
             if not isinstance(s, dict):
                 continue
@@ -717,8 +738,35 @@ def _discover_marketplace_refresh_handlers(
             if err:
                 errors.append(err)
                 continue
-            handlers[sname] = normalized
-    return handlers, errors, skipped
+            candidates.setdefault(sname, []).append((slug, normalized))
+
+    # Resolve candidates → handlers, recording collisions.
+    for sname, cands in candidates.items():
+        if len(cands) == 1:
+            handlers[sname] = cands[0][1]
+            continue
+        slugs = [c[0] for c in cands]
+        preferred = _preferred_marketplace_for_skill(sname)
+        chosen_slug: str
+        chosen_block: dict
+        reason: str
+        if preferred and preferred in slugs:
+            for slug, blk in cands:
+                if slug == preferred:
+                    chosen_slug, chosen_block = slug, blk
+                    break
+            reason = "preference"
+        else:
+            chosen_slug, chosen_block = cands[0]
+            reason = "first_wins"
+        handlers[sname] = chosen_block
+        collisions.append({
+            "skill": sname,
+            "candidates": slugs,
+            "chosen": chosen_slug,
+            "reason": reason,
+        })
+    return handlers, errors, skipped, collisions
 
 
 def _run_refresh_handler(
@@ -1110,7 +1158,9 @@ def cmd_refresh(args: argparse.Namespace) -> dict:
     # Also walk installed marketplaces under ~/.agent-plus/marketplaces/.
     # Trust gate 2: skip any marketplace whose first-run prompt has not been
     # accepted, and surface the names so the agent can inform the user.
-    mp_handlers, mp_errors, mp_skipped = _discover_marketplace_refresh_handlers()
+    mp_handlers, mp_errors, mp_skipped, mp_collisions = (
+        _discover_marketplace_refresh_handlers()
+    )
     for k, v in mp_handlers.items():
         # Don't shadow a Claude-Code-cached handler with the same name.
         discovered.setdefault(k, v)
@@ -1180,6 +1230,8 @@ def cmd_refresh(args: argparse.Namespace) -> dict:
         payload["handler_discovery_errors"] = discovery_errors
     if mp_skipped:
         payload["marketplaces_skipped_unaccepted"] = mp_skipped
+    if mp_collisions:
+        payload["collisions"] = mp_collisions
 
     # Merge into services.json if the workspace exists.
     services_path = workspace / "services.json"
@@ -1735,6 +1787,19 @@ def _git_init_in(path: Path) -> tuple[bool, Optional[str]]:
     if proc.returncode != 0:
         msg = (proc.stderr or proc.stdout or "").strip()
         return False, f"git init exited {proc.returncode}: {msg[:160]}"
+    # Windows hygiene: pin core.autocrlf=false on the new repo so files we
+    # write later (skill bins with shebangs, JSON manifests Python re-reads)
+    # don't get CRLF-mangled on checkout. Best-effort — git is already
+    # confirmed present and exit code is captured but not surfaced as a
+    # hard error since the init itself succeeded.
+    try:
+        subprocess.run(
+            ["git", "config", "--local", "core.autocrlf", "false"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(path), check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
     return True, None
 
 
@@ -2383,6 +2448,114 @@ def cmd_marketplace_list(args: argparse.Namespace) -> dict:  # noqa: ARG001
     return out
 
 
+def _recency_boost(updated_at: str) -> float:
+    """Boost = max(0, 30 - days_since_update) * 2. Empty/unparseable → 0."""
+    if not isinstance(updated_at, str) or not updated_at:
+        return 0.0
+    s = updated_at.replace("Z", "+00:00")
+    try:
+        dt = _dt.datetime.fromisoformat(s)
+    except ValueError:
+        return 0.0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_dt.timezone.utc)
+    now = _dt.datetime.now(_dt.timezone.utc)
+    days = (now - dt).total_seconds() / 86400.0
+    return max(0.0, 30.0 - days) * 2.0
+
+
+def cmd_marketplace_search(args: argparse.Namespace) -> dict:
+    """Search GitHub for `topic:agent-plus-skills` repos via `gh`.
+
+    Ranks by `stars + recency_boost(updatedAt)`. Stdlib only, list-form
+    subprocess. The query is never interpolated into a shell string.
+    """
+    query = (getattr(args, "query", "") or "").strip()
+    if shutil.which("gh") is None:
+        return {
+            "ok": False,
+            "error": "gh_not_installed",
+            "hint": "install GitHub CLI: https://cli.github.com/",
+        }
+
+    cmd: list[str] = ["gh", "search", "repos"]
+    if query:
+        cmd.append(query)
+    cmd += [
+        "--topic", "agent-plus-skills",
+        "--json", "name,owner,description,stargazerCount,updatedAt,url",
+        "--limit", "30",
+    ]
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=20, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False, "error": "gh_search_timeout",
+            "query": query, "timeout_seconds": 20,
+        }
+    except OSError as e:
+        return {
+            "ok": False, "error": "gh_search_unavailable",
+            "query": query, "detail": str(e),
+        }
+
+    if proc.returncode != 0:
+        return {
+            "ok": False,
+            "error": "gh_search_failed",
+            "query": query,
+            "exit_code": proc.returncode,
+            "stderr": (proc.stderr or "").strip()[-400:],
+        }
+
+    try:
+        raw = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError as e:
+        return {
+            "ok": False,
+            "error": "gh_search_failed",
+            "query": query,
+            "stderr": f"unparseable JSON from gh: {e}",
+        }
+    if not isinstance(raw, list):
+        raw = []
+
+    results: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        owner_obj = item.get("owner") or {}
+        owner = ""
+        if isinstance(owner_obj, dict):
+            owner = owner_obj.get("login") or owner_obj.get("name") or ""
+        elif isinstance(owner_obj, str):
+            owner = owner_obj
+        name = item.get("name") or ""
+        if not (owner and name):
+            continue
+        stars = item.get("stargazerCount") or 0
+        if not isinstance(stars, (int, float)):
+            stars = 0
+        updated_at = item.get("updatedAt") or ""
+        score = float(stars) + _recency_boost(updated_at)
+        results.append({
+            "slug": f"{owner}/{name}",
+            "name": name,
+            "owner": owner,
+            "description": item.get("description") or "",
+            "stars": int(stars),
+            "updatedAt": updated_at,
+            "url": item.get("url") or "",
+            "score": round(score, 2),
+        })
+
+    results.sort(key=lambda r: r["score"], reverse=True)
+    return {"ok": True, "query": query, "results": results}
+
+
 def _diff_skill_lists(
     old: list[dict], new: list[dict],
 ) -> dict[str, list[str]]:
@@ -2692,6 +2865,155 @@ def _rmtree_force(path: Path) -> None:
         shutil.rmtree(path, onerror=_onerror)
 
 
+# ─── prefer ──────────────────────────────────────────────────────────────────
+#
+# Per-skill marketplace preference for collision resolution. When two
+# installed marketplaces ship a skill of the same name, `cmd_refresh`
+# consults `~/.agent-plus/preferences.json` to choose unambiguously.
+
+PREFER_USER_REPO_RE = re.compile(r"^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$")
+PREFER_SKILL_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+
+
+def _preferences_path() -> Path:
+    """Path to ~/.agent-plus/preferences.json. Override via
+    AGENT_PLUS_PREFERENCES_PATH for tests."""
+    override = os.environ.get("AGENT_PLUS_PREFERENCES_PATH")
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path.home() / ".agent-plus" / "preferences.json").resolve()
+
+
+def _read_preferences() -> dict:
+    p = _preferences_path()
+    if not p.is_file():
+        return {"skillPreferences": {}}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"skillPreferences": {}}
+    if not isinstance(data, dict):
+        return {"skillPreferences": {}}
+    sp = data.get("skillPreferences")
+    if not isinstance(sp, dict):
+        data["skillPreferences"] = {}
+    return data
+
+
+def _write_preferences_atomic(data: dict) -> Path:
+    p = _preferences_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    body = json.dumps(data, indent=2) + "\n"
+    fd, tmp_path = tempfile.mkstemp(prefix=".preferences.", suffix=".tmp",
+                                    dir=str(p.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.replace(tmp_path, p)
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return p
+
+
+def _preferred_marketplace_for_skill(skill: str) -> Optional[str]:
+    """Return the preferred `<owner>/<name>` slug for a skill, or None."""
+    prefs = _read_preferences()
+    sp = prefs.get("skillPreferences") or {}
+    entry = sp.get(skill)
+    if not isinstance(entry, dict):
+        return None
+    pref = entry.get("preferredMarketplace")
+    return pref if isinstance(pref, str) else None
+
+
+def cmd_marketplace_prefer(args: argparse.Namespace) -> dict:
+    list_prefs = bool(getattr(args, "list_prefs", False))
+    clear = bool(getattr(args, "clear", False))
+    skill = getattr(args, "skill", None)
+    user_repo = getattr(args, "user_repo", None)
+    prefs_path = _preferences_path()
+
+    if list_prefs:
+        prefs = _read_preferences()
+        return {
+            "ok": True,
+            "skillPreferences": prefs.get("skillPreferences") or {},
+            "preferencesPath": str(prefs_path),
+        }
+
+    if clear:
+        if not skill:
+            return {"error": "--clear requires --skill <name>"}
+        if not PREFER_SKILL_NAME_RE.match(skill):
+            return {
+                "error": (
+                    f"invalid --skill {skill!r}; expected lowercase, "
+                    "starts with a letter, [a-z0-9-]{1,64}"
+                ),
+            }
+        prefs = _read_preferences()
+        sp = prefs.setdefault("skillPreferences", {})
+        was_present = skill in sp
+        if was_present:
+            del sp[skill]
+            _write_preferences_atomic(prefs)
+        return {
+            "ok": True,
+            "cleared": True,
+            "skill": skill,
+            "wasPresent": was_present,
+            "preferencesPath": str(prefs_path),
+        }
+
+    # Set path: both positional + --skill required.
+    if not user_repo or not skill:
+        return {
+            "error": (
+                "marketplace prefer requires `<user>/<repo>` and "
+                "`--skill <name>` (or use --list / --clear)"
+            ),
+        }
+    if not PREFER_USER_REPO_RE.match(user_repo):
+        return {
+            "error": (
+                f"invalid user/repo {user_repo!r}; expected "
+                "`<user>/<repo>` matching ^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$"
+            ),
+        }
+    if not PREFER_SKILL_NAME_RE.match(skill):
+        return {
+            "error": (
+                f"invalid --skill {skill!r}; expected lowercase, "
+                "starts with a letter, [a-z0-9-]{1,64}"
+            ),
+        }
+
+    prefs = _read_preferences()
+    sp = prefs.setdefault("skillPreferences", {})
+    prev = sp.get(skill)
+    previous_pref: Optional[str] = None
+    if isinstance(prev, dict):
+        pp = prev.get("preferredMarketplace")
+        if isinstance(pp, str):
+            previous_pref = pp
+    sp[skill] = {
+        "preferredMarketplace": user_repo,
+        "setAt": _now_iso(),
+    }
+    written = _write_preferences_atomic(prefs)
+    return {
+        "ok": True,
+        "skill": skill,
+        "preferredMarketplace": user_repo,
+        "preferencesPath": str(written),
+        "previousPreference": previous_pref,
+    }
+
+
 def cmd_marketplace(args: argparse.Namespace) -> dict:
     sub = getattr(args, "marketplace_cmd", None)
     if sub == "init":
@@ -2704,8 +3026,12 @@ def cmd_marketplace(args: argparse.Namespace) -> dict:
         return cmd_marketplace_update(args)
     if sub == "remove":
         return cmd_marketplace_remove(args)
+    if sub == "search":
+        return cmd_marketplace_search(args)
+    if sub == "prefer":
+        return cmd_marketplace_prefer(args)
     return {
-        "error": "marketplace subcommand required: init|install|list|update|remove",
+        "error": "marketplace subcommand required: init|install|list|update|remove|search|prefer",
     }
 
 
@@ -2792,7 +3118,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── marketplace ────────────────────────────────────────────────────────
     s_market = sub.add_parser(
         "marketplace",
-        help="manage agent-plus marketplaces (Phase 1: `init` only)",
+        help="manage agent-plus marketplaces (init/install/list/update/remove/search/prefer)",
         parents=[pretty_parent],
     )
     market_sub = s_market.add_subparsers(dest="marketplace_cmd")
@@ -2836,6 +3162,28 @@ def _build_parser() -> argparse.ArgumentParser:
         parents=[pretty_parent],
     )
     s_mrm.add_argument("slug", help="`<user>/<name>` slug")
+
+    s_msearch = market_sub.add_parser(
+        "search",
+        help="search GitHub for marketplaces (topic:agent-plus-skills); ranks by stars + recent activity",
+        parents=[pretty_parent],
+    )
+    s_msearch.add_argument("query", nargs="?", default="",
+                           help="optional search keyword (e.g. 'database', 'aws')")
+
+    s_mpref = market_sub.add_parser(
+        "prefer",
+        help="set or inspect per-skill marketplace preference for collision resolution",
+        parents=[pretty_parent],
+    )
+    s_mpref.add_argument("user_repo", nargs="?", default=None,
+                         help="`<user>/<repo>` slug to prefer for the named skill")
+    s_mpref.add_argument("--skill", default=None,
+                         help="skill name; required unless --list")
+    s_mpref.add_argument("--list", dest="list_prefs", action="store_true",
+                         help="show current preferences and exit")
+    s_mpref.add_argument("--clear", action="store_true",
+                         help="clear the preference for --skill")
 
     return p
 
