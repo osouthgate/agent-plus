@@ -1,8 +1,10 @@
 # agent-plus
 
-**Make Claude Code dramatically cheaper at running your infrastructure.**
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Version](https://img.shields.io/badge/version-0.11.1-green.svg)](https://github.com/osouthgate/agent-plus/releases) [![CI](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml) [![Tests](https://img.shields.io/badge/tests-377%20passing-brightgreen.svg)](#) [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#) [![Stdlib only](https://img.shields.io/badge/stdlib-only-yellowgreen.svg)](#)
 
-Drop-in plugins that collapse slow, multi-step API dances into one fast call — deploys, databases, cloud, billing, logs, repo orientation, diff triage. Mined from real session transcripts, not guessed at. Stdlib Python, also runs standalone.
+**Drop-in plugins that turn 30-tool-call dances into 1-tool-call answers.**
+
+Five universal primitives (workspace bootstrap, repo orientation, diff triage, skill self-rating, session-log mining) plus a marketplace convention for publishing service wrappers under your GitHub handle. Mined from real Claude Code session transcripts, not guessed at. Stdlib Python, also runs standalone.
 
 ```bash
 claude plugin marketplace add osouthgate/agent-plus
@@ -10,6 +12,8 @@ claude plugin install repo-analyze@agent-plus
 ```
 
 That's it. No SDK, no config file, no auth dance.
+
+**Jump to:** [Tour](#a-90-second-tour) · [Install](#install) · [Before / after](#before--after) · [Marketplace](#the-marketplace-convention) · [Status](#project-status) · [Contributing](#contributing)
 
 ---
 
@@ -129,6 +133,25 @@ Standalone (no Claude Code): every `bin/<plugin>` is one stdlib Python 3 file. C
 ## The marketplace convention
 
 `<user>/agent-plus-skills` is the convention. Anyone can publish their own collection at their GitHub handle. agent-plus's tooling discovers, installs, and updates them by that naming pattern — borrowed from Homebrew taps and the GitHub Actions marketplace. **No central registry to run.**
+
+```text
+                  ┌─────────────────────────────────────┐
+                  │   osouthgate/agent-plus  (this repo)│
+                  │   The 5 universal primitives        │
+                  └────────────────┬────────────────────┘
+                                   │
+                  agent-plus-meta marketplace install
+                                   │
+                                   ▼
+        ┌────────────────────────────────────────────────────┐
+        │  <user>/agent-plus-skills  (anyone can publish)    │
+        │  github-remote, vercel-remote, supabase-remote,    │
+        │  railway-ops, linear-remote, openrouter-remote,    │
+        │  langfuse-remote, hermes-remote, coolify-remote,   │
+        │  hcloud-remote  (the reference marketplace)        │
+        │  + your own at <your-handle>/agent-plus-skills     │
+        └────────────────────────────────────────────────────┘
+```
 
 ```bash
 agent-plus-meta marketplace search          # gh search repos topic:agent-plus-skills

@@ -3035,6 +3035,264 @@ def cmd_marketplace(args: argparse.Namespace) -> dict:
     }
 
 
+# ─── doctor ──────────────────────────────────────────────────────────────────
+
+# The five framework primitives shipped from this repo's marketplace.json.
+# Ordered for stable doctor output; `agent-plus-meta` is the meta plugin
+# itself and is included so its on_path state is visible in the report.
+FRAMEWORK_PRIMITIVES: tuple[str, ...] = (
+    "agent-plus-meta",
+    "repo-analyze",
+    "diff-summary",
+    "skill-feedback",
+    "skill-plus",
+)
+
+
+def cmd_doctor(args: argparse.Namespace) -> dict:
+    """Read-only diagnostic: self-check, workspace, sibling primitives, env
+    readiness, installed marketplaces, stale services.json. Aggregates into
+    one envelope with a verdict (healthy|degraded|broken) plus an issues
+    list. Never writes to disk."""
+    issues: list[dict[str, str]] = []
+    checks_run = 0
+
+    # 1. Self-check ────────────────────────────────────────────────────────
+    checks_run += 1
+    on_path = shutil.which(TOOL_NAME)
+    bin_path = Path(__file__).resolve()
+    # `shutil.which` already verifies the candidate is executable on POSIX.
+    # If it found us on PATH, trust that. Otherwise fall back to a direct
+    # X_OK check against the bin file we're running from — but tolerate
+    # source-tree checkouts where the executable bit isn't set yet
+    # (e.g. fresh CI clones with core.fileMode=false): if the file exists
+    # and is readable, treat as effectively-executable since we're
+    # demonstrably running it.
+    if on_path is not None:
+        executable = True
+    else:
+        try:
+            executable = (
+                os.access(str(bin_path), os.X_OK)
+                or bin_path.is_file()
+            )
+        except OSError:
+            executable = False
+    self_version = _plugin_version()
+    # `version_known` is true when plugin.json was readable at runtime.
+    # We don't compare against an external version, just confirm the manifest
+    # was reachable — a False here means a broken or stale install.
+    version_known = self_version != "unknown"
+    self_section = {
+        "on_path": on_path is not None,
+        "on_path_location": on_path,
+        "version_known": version_known,
+        "executable": executable,
+        "version": self_version,
+        "bin_path": str(bin_path),
+    }
+    if on_path is None:
+        issues.append({
+            "severity": "warn",
+            "category": "self",
+            "message": f"{TOOL_NAME} not found on PATH; install via install.sh or symlink the bin",
+        })
+    if not executable:
+        issues.append({
+            "severity": "error",
+            "category": "self",
+            "message": f"{TOOL_NAME} bin at {bin_path} is not executable; chmod 755 to fix",
+        })
+    if not version_known:
+        issues.append({
+            "severity": "error",
+            "category": "self",
+            "message": "could not read plugin.json#version (manifest missing or unreadable)",
+        })
+
+    # 2. Workspace ─────────────────────────────────────────────────────────
+    checks_run += 1
+    workspace, source = _resolve_for_read(getattr(args, "dir", None))
+    ws_exists = workspace.is_dir()
+    files_status: dict[str, dict] = {}
+    expected_files = ("manifest.json", "services.json", "env-status.json")
+    for fname in expected_files:
+        fpath = workspace / fname
+        if not fpath.is_file():
+            files_status[fname] = {"present": False, "valid_json": False}
+            continue
+        valid = True
+        try:
+            json.loads(fpath.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            valid = False
+        files_status[fname] = {"present": True, "valid_json": valid}
+        if not valid:
+            issues.append({
+                "severity": "error",
+                "category": "workspace",
+                "message": f"{fname} is not valid JSON",
+            })
+    workspace_section = {
+        "exists": ws_exists,
+        "path": str(workspace),
+        "source": source,
+        "files": files_status,
+    }
+    if not ws_exists:
+        issues.append({
+            "severity": "error",
+            "category": "workspace",
+            "message": f"workspace not initialised at {workspace}; run `agent-plus-meta init`",
+        })
+
+    # 3. Sibling primitives on PATH ────────────────────────────────────────
+    checks_run += 1
+    primitives_section: dict[str, str] = {}
+    for prim in FRAMEWORK_PRIMITIVES:
+        primitives_section[prim] = "installed" if shutil.which(prim) else "missing"
+        if primitives_section[prim] == "missing":
+            issues.append({
+                "severity": "warn",
+                "category": "primitives",
+                "message": f"{prim} not installed; some patterns won't work",
+            })
+
+    # 4. Env vars (reuse envcheck logic) ───────────────────────────────────
+    checks_run += 1
+    cfg = load_env(getattr(args, "env_file", None))
+    envcheck_plugins: dict[str, dict] = {}
+    ready_count = 0
+    missing_count = 0
+    for plugin, spec in sorted(PLUGIN_ENV_SPEC.items()):
+        plugin_missing_req: list[str] = []
+        for name in spec["required"]:
+            if not cfg.get(name, "").strip():
+                plugin_missing_req.append(name)
+        bin_name = PLUGIN_BINARY_REQUIREMENT.get(plugin)
+        bin_ok = True
+        if bin_name:
+            bin_ok = shutil.which(bin_name) is not None
+        ready = (not plugin_missing_req) and bin_ok
+        envcheck_plugins[plugin] = {
+            "ready": ready,
+            "missing_required": plugin_missing_req,
+        }
+        if ready:
+            ready_count += 1
+        else:
+            missing_count += 1
+            if plugin_missing_req:
+                issues.append({
+                    "severity": "warn",
+                    "category": "envcheck",
+                    "message": f"{plugin}: missing required env vars: {','.join(plugin_missing_req)}",
+                })
+            elif bin_name and not bin_ok:
+                issues.append({
+                    "severity": "warn",
+                    "category": "envcheck",
+                    "message": f"{plugin}: required CLI `{bin_name}` not on PATH",
+                })
+    envcheck_section = {
+        "ready_count": ready_count,
+        "missing_count": missing_count,
+        "plugins": envcheck_plugins,
+    }
+
+    # 5. Installed marketplaces ────────────────────────────────────────────
+    checks_run += 1
+    mp_root = _marketplaces_root()
+    mp_installed: list[dict] = []
+    if mp_root.is_dir():
+        for child in sorted(mp_root.iterdir()):
+            if not child.is_dir():
+                continue
+            meta = _read_marketplace_meta(child)
+            if meta is None:
+                continue
+            mp_installed.append({
+                "owner": meta.get("owner"),
+                "name": meta.get("name"),
+                "accepted": bool(meta.get("accepted_first_run")),
+            })
+    marketplaces_section = {"root": str(mp_root), "installed": mp_installed}
+
+    # 6. Stale services.json entries ───────────────────────────────────────
+    checks_run += 1
+    stale_entries: list[str] = []
+    services_path = workspace / "services.json"
+    if services_path.is_file():
+        try:
+            sj = json.loads(services_path.read_text(encoding="utf-8"))
+            services = sj.get("services") if isinstance(sj, dict) else None
+            if isinstance(services, dict):
+                installed_set = set(PLUGIN_ENV_SPEC.keys()) | set(FRAMEWORK_PRIMITIVES)
+                for key in services.keys():
+                    if key not in installed_set:
+                        stale_entries.append(key)
+        except (OSError, json.JSONDecodeError):
+            pass
+    if stale_entries:
+        issues.append({
+            "severity": "warn",
+            "category": "services",
+            "message": f"services.json has stale entries for plugins not installed: {','.join(stale_entries)}; run `agent-plus-meta refresh`",
+        })
+
+    # 7. Verdict ───────────────────────────────────────────────────────────
+    self_broken = (not self_section["executable"]) or (not version_known)
+    if self_broken or not ws_exists:
+        verdict = "broken"
+    elif any(i["severity"] == "error" for i in issues) or missing_count > 0 or stale_entries:
+        verdict = "degraded"
+    else:
+        verdict = "healthy"
+
+    return {
+        "verdict": verdict,
+        "self": self_section,
+        "workspace": workspace_section,
+        "primitives": primitives_section,
+        "envcheck": envcheck_section,
+        "marketplaces": marketplaces_section,
+        "stale_services_entries": stale_entries,
+        "checks_run": checks_run,
+        "issues": issues,
+    }
+
+
+def _render_doctor_pretty(payload: dict) -> str:
+    """Human-readable summary appended to stderr when --pretty is set."""
+    lines: list[str] = []
+    verdict = payload.get("verdict", "unknown")
+    lines.append("")
+    lines.append(f"agent-plus-meta doctor: {verdict.upper()}")
+    lines.append("=" * (24 + len(verdict)))
+    self_s = payload.get("self") or {}
+    lines.append(f"  self        : on_path={self_s.get('on_path')} version={self_s.get('version')}")
+    ws = payload.get("workspace") or {}
+    lines.append(f"  workspace   : exists={ws.get('exists')} path={ws.get('path')}")
+    prims = payload.get("primitives") or {}
+    missing_prims = [k for k, v in prims.items() if v == "missing"]
+    lines.append(f"  primitives  : {len(prims) - len(missing_prims)}/{len(prims)} installed"
+                 + (f" (missing: {', '.join(missing_prims)})" if missing_prims else ""))
+    ec = payload.get("envcheck") or {}
+    lines.append(f"  envcheck    : {ec.get('ready_count', 0)} ready, {ec.get('missing_count', 0)} not ready")
+    mp = payload.get("marketplaces") or {}
+    lines.append(f"  marketplaces: {len(mp.get('installed') or [])} installed")
+    issues = payload.get("issues") or []
+    if issues:
+        lines.append("")
+        lines.append("Issues:")
+        for it in issues:
+            lines.append(f"  - [{it.get('severity')}] {it.get('category')}: {it.get('message')}")
+    else:
+        lines.append("")
+        lines.append("No issues detected.")
+    return "\n".join(lines)
+
+
 # ─── argparse ────────────────────────────────────────────────────────────────
 
 
@@ -3062,6 +3320,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("envcheck", help="report which plugin env vars are set "
                                     "(names only)",
+                   parents=[pretty_parent])
+
+    sub.add_parser("doctor", help="diagnose install + workspace + env-var "
+                                  "+ marketplace state (read-only)",
                    parents=[pretty_parent])
 
     s_refresh = sub.add_parser(
@@ -3206,6 +3468,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     handlers = {
         "init": cmd_init,
         "envcheck": cmd_envcheck,
+        "doctor": cmd_doctor,
         "refresh": cmd_refresh,
         "list": cmd_list,
         "extensions": cmd_extensions,
@@ -3234,6 +3497,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         section = _render_suggestions_section(out.get("suggested_skills") or [])
         if section:
             sys.stderr.write(section + "\n")
+
+    # doctor --pretty: append the human-readable verdict + issues summary to
+    # stderr, leaving the JSON envelope untouched on stdout.
+    if args.cmd == "doctor" and getattr(args, "pretty", False) and isinstance(out, dict):
+        sys.stderr.write(_render_doctor_pretty(out) + "\n")
     return 0
 
 
