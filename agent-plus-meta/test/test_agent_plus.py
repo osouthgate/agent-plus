@@ -306,20 +306,26 @@ class TestInitWizard(unittest.TestCase):
     # ── claude-project-dir decoder ─────────────────────────────────────
 
     def test_decode_windows_drive_form(self) -> None:
-        # Build a fake decoded-target so the candidate exists on disk.
-        target = self.dir / "myrepo"
-        target.mkdir()
-        # Encoded form: <drive>--<rest replacing / with ->
-        drive = str(self.dir)[0]
-        rest = str(target)[3:].replace("\\", "-").replace("/", "-")
-        encoded = f"{drive}--{rest}"
-        decoded = _init_mod._decode_claude_project_dir(encoded)
-        if decoded is not None and decoded.exists():
-            self.assertEqual(decoded.resolve(), target.resolve())
-        else:
-            # On non-Windows, the heuristic may not find an existing match;
-            # just confirm we returned a Path.
-            self.assertIsNotNone(decoded)
+        # Verify the Windows-encoding heuristic (single drive letter +
+        # `--` separator + `-` → `/`). Use a synthetic encoded name with
+        # a fake drive letter — the decoder returns the most-likely
+        # candidate even when no real path exists on disk (per the
+        # docstring: "if none exist, returns first candidate so caller
+        # can decide"). Caller `_discover_recent_claude_repos` filters
+        # via `_safe_exists`. So this test exercises the heuristic
+        # itself, NOT the existence filter, and works identically on
+        # Windows + macOS + Linux.
+        decoded = _init_mod._decode_claude_project_dir("C--dev-myrepo")
+        self.assertIsNotNone(decoded)
+        # The decoder produces `C:/dev/myrepo`. Path normalises to
+        # `C:\dev\myrepo` on Windows (with backslash) or `C:/dev/myrepo`
+        # on POSIX (Path treats colon as a normal char on POSIX). Either
+        # way: drive letter "C" appears, "dev" and "myrepo" appear as
+        # path segments after the drive.
+        s = str(decoded).replace("\\", "/")
+        self.assertTrue(s.startswith("C:"), f"unexpected decode: {s}")
+        self.assertIn("dev", s)
+        self.assertIn("myrepo", s)
 
     def test_decode_posix_form(self) -> None:
         decoded = _init_mod._decode_claude_project_dir("-Users-bob-code-bar")
