@@ -1,58 +1,59 @@
 # agent-plus
 
-A framework for building deterministic CLI tools that [Claude Code](https://claude.com/claude-code) shells out to. Wraps the slow, multi-step API dances agents otherwise burn round-trips on into single-call structured output. Ships an envelope contract, a handful of universal primitives, and a marketplace convention that lets users publish their own plugin collections under a discoverable name.
+**Make Claude Code dramatically cheaper at running your infrastructure.**
 
-> **Status: pre-1.0.** This repo is the framework. A reference marketplace built using it lives at [`osouthgate/agent-plus-skills`](https://github.com/osouthgate/agent-plus-skills) — install it directly, fork it, or use it as a template. You can publish your own marketplace at `<your-handle>/agent-plus-skills` and your team or the public can install your skills the same way.
-
-## What this is
-
-agent-plus is the framework. It defines:
-
-- The **envelope contract** every plugin emits (`tool: {name, version}`, large-payload offload via `payloadPath`, NAMES-only secret discipline).
-- The **seven patterns** (below) that make an LLM-friendly CLI tool actually save tokens.
-- A handful of **universal primitives** that apply to any project regardless of stack: workspace bootstrap, repo orientation, diff triage, skill self-assessment.
-- The **marketplace convention** — `<user>/agent-plus-skills` — for publishing service-specific wrappers (GitHub, Vercel, Supabase, Railway, etc.) that build on the framework.
-
-It does *not* ship wrappers for specific services. Those live in marketplaces.
-
-## What this is for
-
-**Claude Code** (CLI, IDE extensions, desktop). The framework's native target — Bash execution, filesystem access, plugin loader, env-file resolution all work as designed.
-
-## What this is NOT for
-
-**claude.ai (web Skills)** and **Claude Cowork**. Those surfaces run prompt-template skills, not deterministic CLI tools — they don't have Bash execution, can't shell out to a `bin/<name>` Python launcher, and can't tail logs or trigger deploys against external services.
-
-For prompt-template skill generation, see [`claude-reflect`](https://github.com/cnocon/claude-reflect)'s `/reflect-skills` command — it complements agent-plus rather than competes with it. agent-plus = action skills (deterministic CLIs that act on services). claude-reflect = thinking skills (slash commands that shape how Claude reasons).
-
-The marketplace convention's `marketplace.json` schema reserves a `surface` field (default: `claude-code`) so a parallel prompt-template ecosystem could grow under the same naming convention later. For now, treat agent-plus as Claude Code-native.
-
-## Universal primitives (ships in this repo)
-
-The four plugins that apply to any Claude Code project:
-
-| Plugin | Purpose | Headline |
-| :--- | :--- | :--- |
-| [`agent-plus`](./agent-plus) | The meta plugin — workspace bootstrap, env-var readiness, identity cache, marketplace lifecycle. | `init`, `envcheck`, `refresh`, `list`, `extensions`, `marketplace init|install|list|update|remove` |
-| [`repo-analyze`](./repo-analyze) | Cold-start orientation in any unfamiliar repo. Replaces the ~67 grep + ~60 ls dance with one structured payload. | `repo-analyze [--max-tree-files] [--max-tree-depth] [--output] [--shape-depth] [--pretty]` |
-| [`diff-summary`](./diff-summary) | Per-file role + risk classification of a git diff. Replaces 5–20 Read calls with one structured triage. | `diff-summary [--staged \| --base BRANCH \| --range A..B] [--include-patches] [--public-api-only] [--risk MIN] [--output] [--pretty]` |
-| [`skill-feedback`](./skill-feedback) | Local-first agent self-assessment for any Claude Code skill. Append-only JSONL, optional bundle-into-GitHub-issue submit. | `log <skill> --rating --outcome [--friction]`, `show`, `report`, `submit` |
-| [`skill-plus`](./skill-plus) | Mine real Claude Code session JSONL for repeated Bash patterns; scaffold them into project skills; audit existing skills against the framework contract; cross-source feedback aggregator joining `skill-feedback` ratings against implicit session-mining failure signals; promote to a `<user>/agent-plus-skills` marketplace. Stdlib, local-only, consent-gated. | `scan`, `propose`, `install-cron`, `scaffold <name>`, `list`, `feedback`, `promote <name>` |
-
-## Service wrappers (live in `osouthgate/agent-plus-skills`)
-
-The 10 service-specific wrappers (`github-remote`, `vercel-remote`, `supabase-remote`, `railway-ops`, `linear-remote`, `openrouter-remote`, `langfuse-remote`, `hermes-remote`, `coolify-remote`, `hcloud-remote`) previously shipped here. They now live in the reference skills marketplace — `osouthgate/agent-plus-skills` — installed via Claude Code's native plugin marketplace command (see Install).
-
-The full pre-extraction snapshot is preserved at `plans-agent-plus-archive/` for reference during migration.
-
-## The marketplace convention
-
-`<user>/agent-plus-skills` is the convention. Anyone can publish their own collection at `<their-github-username>/agent-plus-skills`; agent-plus's tooling discovers, installs, and updates them by that naming pattern.
-
-The pattern is borrowed from Homebrew taps (`<user>/homebrew-<tap>`) and GitHub Actions Marketplace — naming-convention-as-discovery, no central registry to run.
+Drop-in plugins that collapse slow, multi-step API dances into one fast call — deploys, databases, cloud, billing, logs, repo orientation, diff triage. Mined from real session transcripts, not guessed at. Stdlib Python, also runs standalone.
 
 ```bash
-# Install the framework's universal primitives (uses Claude Code's native marketplace)
+claude plugin marketplace add osouthgate/agent-plus
+claude plugin install repo-analyze@agent-plus
+```
+
+That's it. No SDK, no config file, no auth dance.
+
+---
+
+## What it does
+
+Every cold start in an unfamiliar repo, the same dance: ~67 grep ops, ~60 ls / directory walks, a sweep through `package.json` / `pyproject.toml` / `Cargo.toml` / `go.mod`, a README scan. Mined across real Claude Code transcripts, every time.
+
+`repo-analyze` collapses that into one call:
+
+```bash
+$ repo-analyze --pretty | head -25
+{
+  "tool": {"name": "repo-analyze", "version": "0.2.1"},
+  "languages": {"typescript": {"files": 142, "loc": 18203, "percent": 71.4}, ...},
+  "frameworks": [
+    {"name": "Next.js",     "evidence": "package.json:next",      "confidence": "high"},
+    {"name": "TailwindCSS", "evidence": "package.json:tailwindcss", "confidence": "high"}
+  ],
+  "buildTools": [{"name": "pnpm", "evidence": "pnpm-lock.yaml"}, {"name": "Docker", ...}],
+  "deps": { ... },
+  "entrypoints": ["src/app/page.tsx", "manage.py", ...],
+  "tree": { ... },
+  "readme": {"title": "...", "headings": [...]}
+}
+```
+
+One JSON blob. ~127 tool calls collapsed into 1. The agent stops re-discovering what it already discovered last session.
+
+That's one plugin. The framework ships **five universal primitives**:
+
+| Plugin | What it collapses | Killer command |
+| :--- | :--- | :--- |
+| [`agent-plus`](./agent-plus) | "What's installed, what's configured, what does this checkout know?" | `init`, `envcheck`, `refresh`, `marketplace install\|search\|prefer` |
+| [`repo-analyze`](./repo-analyze) | The ~67-grep + ~60-ls cold-start dance for unfamiliar repos | `repo-analyze [--output] [--shape-depth] [--pretty]` |
+| [`diff-summary`](./diff-summary) | The 5–20 Read calls to triage a PR ("test? source? config? did the public API change?") | `diff-summary [--staged \| --base BRANCH \| --range A..B] [--public-api-only] [--risk MIN]` |
+| [`skill-feedback`](./skill-feedback) | "Was that skill any good?" — agent self-rates, JSONL on disk, optional bundle into a GitHub issue | `log <skill> --rating --outcome [--friction]`, `report`, `submit` |
+| [`skill-plus`](./skill-plus) | "I keep typing this by hand" → mine the session log, scaffold a real skill, promote it to your marketplace | `scan`, `propose`, `scaffold <name> --from-candidate <id>`, `list`, `feedback`, `promote <name>` |
+
+Plus a **marketplace convention** — `<user>/agent-plus-skills` — for publishing your own service-specific wrappers (GitHub, Vercel, Supabase, Railway, Linear, OpenRouter, Coolify, Hetzner, Hermes, Langfuse, etc.). Reference marketplace lives at [`osouthgate/agent-plus-skills`](https://github.com/osouthgate/agent-plus-skills) — install it, fork it, or use it as a template.
+
+## Install
+
+```bash
+# Framework primitives (recommended)
 claude plugin marketplace add osouthgate/agent-plus
 claude plugin install agent-plus@agent-plus
 claude plugin install repo-analyze@agent-plus
@@ -60,131 +61,95 @@ claude plugin install diff-summary@agent-plus
 claude plugin install skill-feedback@agent-plus
 claude plugin install skill-plus@agent-plus
 
-# Install the reference skills marketplace (also via Claude Code's native command)
-claude plugin marketplace add osouthgate/agent-plus-skills
-claude plugin install github-remote@agent-plus-skills
-claude plugin install vercel-remote@agent-plus-skills
-# ... etc
+# Reference service-wrapper marketplace (commit-pinned, first-run review)
+agent-plus marketplace install osouthgate/agent-plus-skills
 
-# Scaffold your own skills marketplace
-agent-plus marketplace init <your-github-user>/agent-plus-skills
+# Or scaffold your own marketplace
+agent-plus marketplace init <your-handle>/agent-plus-skills
 
-# Install someone else's skills marketplace (commit-pinned, with first-run review)
-agent-plus marketplace install <user>/agent-plus-skills
-agent-plus marketplace list
-agent-plus marketplace update [<user>/<name>]
-agent-plus marketplace remove <user>/<name>
+# Discover other people's marketplaces
+agent-plus marketplace search [query]
 ```
 
-Each marketplace declares a `marketplace.json` at its root with: skills it ships, minimum agent-plus version, optional commit pinning for verify-on-install, and a `surface` field (`claude-code` for now). Spec: [`plans/todo/2026-04-28-marketplace-convention.md`](./plans/todo/2026-04-28-marketplace-convention.md).
+Standalone (no Claude Code): every `bin/<plugin>` is one stdlib Python 3 file. Copy to `$PATH`, run.
 
-**Trust model — all five gates enforced.** Install pins the commit SHA; nothing in the cloned repo runs at install time; a first-run review prompt is shown once per install (and re-armed on every accepted update); updates are opt-in only (`--cron` is parsed only so it can be refused); when a marketplace declares `checksums`, install verifies them. Plugins from un-accepted marketplaces are **skipped** by `agent-plus refresh` and surfaced under `marketplaces_skipped_unaccepted[]` in the envelope.
+## Before / after
 
-## The seven patterns
+| Without agent-plus | With agent-plus |
+|---|---|
+| `~67 grep + ~60 ls` per cold start | `repo-analyze` — 1 call |
+| `git diff` + 5–20 Reads to triage a PR | `diff-summary --staged` — 1 call with role + risk per file |
+| Manual `gh pr view --json` + `gh run list` + `gh pr checks` triage | `github-remote pr <name>` — one structured overview |
+| "Did that skill work? Should I keep using it?" — never tracked | `skill-feedback log` after each use; aggregated reports + GitHub-issue submit |
+| "I keep typing this by hand" — stays manual forever | `skill-plus scan` mines the session log, `scaffold` writes the skill |
+| UUID-shaped IDs leaking into the agent's context | Name-resolved IDs everywhere; UUIDs never enter the transcript |
+| Env-var values, tokens, secrets in command output | NAMES-only — values stripped on read paths, scrub-on-write on log paths |
 
-Every plugin built on this framework should reinforce at least one. Don't write a plugin without first asking which of these it's solving for.
+## How it works — the seven patterns
 
-1. **Aggregate server-side, return one blob.** N endpoints in parallel under the hood, one structured payload back to the agent. The agent sees one tool call.
+Every plugin reinforces at least one. Don't write a plugin without first asking which of these it's solving for.
+
+1. **Aggregate server-side, return one blob.** N endpoints in parallel under the hood, one structured payload back. The agent sees one tool call.
 2. **Resolve by name, not ID.** `coolify-remote deploy hermes` — not `coolify-remote deploy b1c6e2f0-4a3d-…`. UUIDs never touch the agent's context.
-3. **`--wait` on every async mutation.** Deploys, cron triggers, backups — if it returns an action ID, the CLI polls. No hand-rolled `until` loops in the agent's session.
-4. **`--json` on every list / show.** Structured output into `jq` is the default. Human-formatted output is for interactive use.
-5. **Strip values the agent shouldn't see.** Env-var values, secrets, large blobs — if the agent doesn't need it to decide the next step, it doesn't enter the transcript.
-6. **Self-diagnosing output.** Every JSON payload carries a top-level `tool: {name, version}` field read from the plugin manifest at runtime. Stale plugin caches and PATH pinning are visible from the output alone — no extra subprocess call. Every plugin also exposes `--version`.
-7. **Stay in your lane.** Each plugin's SKILL.md explicitly lists the cases where the agent should drop to the raw CLI / API instead of looping on a rejection. Wrappers cover the 80% that's cheap to make fast; writes, admin ops, and anything narrowly out-of-scope belong to the upstream tool.
+3. **`--wait` on every async mutation.** Deploys, cron triggers, backups — if it returns an action ID, the CLI polls. No hand-rolled `until` loops in prompts.
+4. **`--json` on every list / show.** Structured output is the default; human-formatted output is for interactive use only.
+5. **Strip values the agent shouldn't see.** Env-var values, secrets, large blobs — if the agent doesn't need them to decide, they don't enter the transcript.
+6. **Self-diagnosing output.** Every payload carries `tool: {name, version}` from the manifest at runtime. Stale plugin caches and PATH pinning are visible from the output alone — no extra subprocess call.
+7. **Stay in your lane.** Each plugin's SKILL.md lists the cases where the agent should drop to the raw CLI / API instead of looping on a rejection.
 
-## Envelope contract
+## The envelope contract
 
-Every plugin's `--json` output uses the same outer shape so an agent can parse, version-check, and offload large payloads identically across plugins.
+Every `--json` output uses the same outer shape so an agent can parse, version-check, and offload large payloads identically across plugins.
 
-**Top-level keys.** Every JSON payload is an object with at minimum:
+- `tool.name` / `tool.version` — read from `<plugin>/.claude-plugin/plugin.json` at runtime.
+- `--output PATH` writes the full payload to disk; stdout returns a compact summary (`payloadPath`, `bytes`, `payloadKeys`, `payloadShape`).
+- `--shape-depth 1|2|3` — recursion depth for `payloadShape` (default 3). Lets the agent decide whether to read the file.
+- Universal flags: `--json`, `--pretty`, `--version`, `--output`, `--shape-depth`.
+- **No env-var values, no secrets, no tokens.** Names and IDs only.
 
-- `tool.name` — plugin name, read from `<plugin>/.claude-plugin/plugin.json` at runtime.
-- `tool.version` — plugin version, same source. Falls back to `"unknown"` if the manifest is unreadable; never raises.
-- The plugin's actual payload alongside (e.g. `pr`, `services`, `deployments`).
+## The marketplace convention
 
-**Large-payload offload.** When a command supports `--output PATH`, the full payload is written to disk. Stdout returns a compact envelope:
+`<user>/agent-plus-skills` is the convention. Anyone can publish their own collection at their GitHub handle. agent-plus's tooling discovers, installs, and updates them by that naming pattern — borrowed from Homebrew taps and the GitHub Actions marketplace. **No central registry to run.**
 
-- `payloadPath` — absolute path of the written file.
-- `payloadShape` — recursive shape descriptor (keys + types + sizes, no values), so the agent can decide whether to read the file. Recursion depth controlled by `--shape-depth N` (default 3, valid 1–3).
+```bash
+agent-plus marketplace search          # gh search repos topic:agent-plus-skills
+agent-plus marketplace install <user>/agent-plus-skills    # commit-pinned + first-run review
+agent-plus marketplace list
+agent-plus marketplace update [<user>/<repo>]
+agent-plus marketplace prefer <user>/<repo> --skill <name>  # collision resolution
+agent-plus marketplace remove <user>/<repo>
+```
 
-> **Note:** the `payloadPath` field was renamed from the earlier `savedTo` during the framework extraction (slice A0, 2026-04-28 — coordinated minor bump across `agent-plus`, `repo-analyze`, `diff-summary`, `skill-feedback`). Wrapper plugins on `osouthgate/agent-plus-skills` migrate independently.
+**Trust model — five gates enforced.** Install pins the commit SHA. Nothing in the cloned repo runs at install time. A first-run review is shown once per install (and re-armed on every accepted update). Updates are opt-in only — `--cron` is parsed only so it can be refused. When a marketplace declares `checksums`, install verifies them. Plugins from un-accepted marketplaces are skipped.
 
-**Universal flags.**
+Spec: [`plans/todo/2026-04-28-marketplace-convention.md`](./plans/todo/2026-04-28-marketplace-convention.md).
 
-- `--json` — structured output; default mode.
-- `--version` — print `tool.version` and exit 0.
-- `--pretty` — indented JSON.
-- `--output PATH` — offload large payloads; emit compact envelope on stdout.
-- `--shape-depth 1|2|3` — recursion depth for `payloadShape`.
+## Philosophy
 
-**What is not in the envelope.** No env-var values, no secrets, no tokens. Names and IDs only (Pattern 5).
+**Deterministic work belongs in scripts, not prompts.** The LLM orchestrates; the code does. Every plugin ships a `SKILL.md` that teaches Claude *when* to reach for the script, not how to reinvent it in a prompt.
 
-**Stability.** Plugin authors should treat these field names as a public contract. Backward-incompatible renames bump the major plugin version. New optional fields are fine.
+That's the whole game. If a plugin's bin script starts embedding LLM calls, something's wrong — the prompting belongs in the caller (Claude Code session, Hermes cron), the determinism belongs in the CLI.
 
-## Shared conventions across framework plugins
+## Project status
+
+Pre-1.0. The four core primitives (`agent-plus`, `repo-analyze`, `diff-summary`, `skill-feedback`) and the marketplace lifecycle have been dogfooded for months. `skill-plus` is the latest addition (0.1.0). The framework is for **Claude Code** — claude.ai web Skills and Cowork are out of scope (no Bash, no filesystem, no plugin loader). For prompt-template skill generation, see [`claude-reflect`](https://github.com/cnocon/claude-reflect)'s `/reflect-skills` — it complements agent-plus rather than competes with it.
+
+Service wrappers — `github-remote`, `vercel-remote`, `supabase-remote`, `railway-ops`, `linear-remote`, `openrouter-remote`, `langfuse-remote`, `hermes-remote`, `coolify-remote`, `hcloud-remote` — live in [`osouthgate/agent-plus-skills`](https://github.com/osouthgate/agent-plus-skills).
+
+## Conventions across framework plugins
 
 - **Stdlib-only Python 3.** No `pip install`, no venvs. `bin/<plugin>` is one file — copy it anywhere on `$PATH` and run standalone.
 - **Layered `.env` autoload**, highest precedence first: `--env-file` → project `.env.local` / `.env` (walked up from cwd) → `~/.agent-plus/.env` → shell env. **Project `.env` wins over shell.**
 - **Per-plugin `CHANGELOG.md`** for release notes. Short: what changed, why it matters, date.
 
-## Install
-
-### Recommended — marketplace install (via Claude Code's native command)
-
-```bash
-claude plugin marketplace add osouthgate/agent-plus
-claude plugin install agent-plus@agent-plus       # meta plugin (recommended first)
-claude plugin install repo-analyze@agent-plus
-claude plugin install diff-summary@agent-plus
-claude plugin install skill-feedback@agent-plus
-claude plugin install skill-plus@agent-plus
-```
-
-Update later:
-
-```bash
-claude plugin marketplace update agent-plus
-claude plugin update repo-analyze
-```
-
-For user marketplaces published under the `<user>/agent-plus-skills` convention, prefer `agent-plus marketplace install <user>/agent-plus-skills` — it pins the commit SHA, prompts a first-run review, and respects the trust gates documented above.
-
-### Session-only — from a local clone
-
-```bash
-git clone https://github.com/osouthgate/agent-plus
-claude --plugin-dir ./agent-plus/repo-analyze
-```
-
-Stack multiple plugins by repeating the flag.
-
-### Standalone — no Claude Code at all
-
-Every `bin/<plugin>` is a stdlib Python 3 script. Copy to `$PATH`, run it. See each plugin's README.
-
-## Philosophy
-
-Rule from [Garry Tan's skillify post](https://x.com/garrytan): **deterministic work belongs in scripts, not prompts.** The LLM orchestrates; the code does. Every plugin ships a `SKILL.md` that teaches Claude *when* to reach for the script, not how to reinvent it in a prompt.
-
-That's the whole game. If a plugin's `bin/` script starts embedding LLM calls, something's wrong — the prompting belongs in the caller (Claude Code session, Hermes cron), the determinism belongs in the CLI.
-
-## Roadmap
-
-Active design and migration plans:
-
-- [`2026-04-28-skill-plus-plugin.md`](./plans/todo/2026-04-28-skill-plus-plugin.md) — discovery + scaffolding + feedback aggregator. The framework's fifth universal primitive.
-- [`2026-04-28-existing-plugin-audit.md`](./plans/todo/2026-04-28-existing-plugin-audit.md) — quality + tier audit of the pre-extraction plugin set.
-- [`2026-04-28-framework-extraction.md`](./plans/todo/2026-04-28-framework-extraction.md) — migration of the 10 service wrappers to `osouthgate/agent-plus-skills` (in progress).
-- [`2026-04-28-marketplace-convention.md`](./plans/todo/2026-04-28-marketplace-convention.md) — `<user>/agent-plus-skills` convention, `marketplace.json` schema, install/update/trust protocol. Phases 1 + 2 shipped (April 2026); Phase 4 (`search`, collision-resolution `prefer`) remains future work.
-
-## Contributing / development
+## Contributing
 
 Plugins follow the standard Claude Code plugin shape:
 
 ```
 <plugin>/
 ├── .claude-plugin/plugin.json
-├── bin/<plugin>                  # stdlib Python 3, ~500 lines max
+├── bin/<plugin>                  # stdlib Python 3 (some grow large; meta plugin is ~3k LoC)
 ├── skills/<plugin>/SKILL.md
 ├── README.md
 ├── CHANGELOG.md

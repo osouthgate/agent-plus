@@ -34,7 +34,7 @@ Creates `.agent-plus/` with three empty-but-valid JSON files. Idempotent — re-
 ```bash
 $ agent-plus init --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.1.0"},
+  "tool": {"name": "agent-plus", "version": "0.10.0"},
   "workspace": "/path/to/repo/.agent-plus",
   "source": "git",
   "created": ["manifest.json", "services.json", "env-status.json"],
@@ -49,7 +49,7 @@ Walks every known plugin's required env-var prefixes. Reports which are set, whi
 ```bash
 $ agent-plus envcheck --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.1.0"},
+  "tool": {"name": "agent-plus", "version": "0.10.0"},
   "workspace": "/path/to/repo/.agent-plus",
   "source": "git",
   "checked": ["COOLIFY_API_KEY", "COOLIFY_URL", "GITHUB_TOKEN", ...],
@@ -74,7 +74,7 @@ Resolves project / repo identity for the lightest-cost endpoints in **github-rem
 ```bash
 $ agent-plus refresh --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.1.0"},
+  "tool": {"name": "agent-plus", "version": "0.10.0"},
   "services": {
     "github-remote": {
       "plugin": "github-remote",
@@ -103,7 +103,7 @@ Discoverability — one call returns every plugin in `.claude-plugin/marketplace
 ```bash
 $ agent-plus list --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.2.0"},
+  "tool": {"name": "agent-plus", "version": "0.10.0"},
   "plugins": [
     {
       "name": "github-remote",
@@ -146,7 +146,7 @@ Each plugin's required env-vars are checked by their canonical prefix (`HERMES_*
 
 Deliberately out of scope:
 
-- **No `refresh` built-in for coolify-remote, hcloud-remote, hermes-remote, openrouter-remote, skill-feedback.** Six of the eleven plugins are wired. The remaining five are `unconfigured` from envcheck's POV — the per-plugin CLIs are unchanged. (Plug your own gap with an extension; see below.)
+- **`refresh` is data-driven.** Each wrapper declares a `refresh_handler` block in its `plugin.json`; plugins without one are silently skipped. Add your own with an extension — see below.
 - **No SessionStart hook.** Bootstrap is on the agent / user; `agent-plus init` is idempotent so it's cheap to run on every session start.
 - **No edit / generic file ops.** `.agent-plus/*.json` is plain JSON. Use `jq` or an editor.
 - **No secret values anywhere.** Names only; values stay in your shell / `.env`. Verified by a canary test.
@@ -226,7 +226,7 @@ Scaffold a new `<user>/agent-plus-skills` marketplace repo following the marketp
 ```bash
 $ agent-plus marketplace init osouthgate/agent-plus-skills --pretty
 {
-  "tool": {"name": "agent-plus", "version": "0.5.0"},
+  "tool": {"name": "agent-plus", "version": "0.10.0"},
   "marketplace": {
     "path": "/path/to/agent-plus-skills",
     "owner": "osouthgate",
