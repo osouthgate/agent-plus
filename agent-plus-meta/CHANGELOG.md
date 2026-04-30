@@ -1,10 +1,29 @@
-# agent-plus — changelog
+# agent-plus-meta — changelog
 
 All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
-## Unreleased
+## 0.11.0 - 2026-04-30
+
+**Breaking — plugin rename.** The meta plugin is now `agent-plus-meta` (previously: `agent-plus`).
+
+The framework, the GitHub repo, the marketplace, the `.agent-plus/` workspace dir, and the `AGENT_PLUS_*` env vars all retain their existing names. Only the plugin formerly known as `agent-plus` is renamed — to resolve the naming collision between the framework and one of its primitives (the audit found this confused new readers).
+
+### Migration
+
+- Reinstall: `claude plugin uninstall agent-plus@agent-plus && claude plugin install agent-plus-meta@agent-plus`.
+- CLI invocations: `agent-plus init` → `agent-plus-meta init`. Same for `envcheck`, `refresh`, `list`, `extensions`, `marketplace ...`.
+- The envelope `tool.name` field now emits `"agent-plus-meta"` instead of `"agent-plus"`. Downstream consumers reading `tool.name` need to update their match.
+- Storage paths are unchanged: `.agent-plus/`, `~/.agent-plus/`, `AGENT_PLUS_*` env vars.
+
+### Changed
+
+- `plugin.json#name`: `agent-plus` → `agent-plus-meta`. Description rewritten to lead with "the meta plugin for the agent-plus framework".
+- `bin/agent-plus` → `bin/agent-plus-meta`. `TOOL_NAME` constant + `argparse.prog` updated. All user-facing strings ("run `agent-plus init` first", "Upgrade agent-plus first", error prefix `agent-plus:`) now reference `agent-plus-meta`.
+- `skills/agent-plus/SKILL.md` → `skills/agent-plus-meta/SKILL.md`. Frontmatter `name` + `allowed-tools` updated.
+- Root `marketplace.json` entry renamed; `source` path updated.
+- All tests updated. Envelope-contract suite picks up the new name automatically.
 
 ## 0.10.0 - 2026-04-30
 
