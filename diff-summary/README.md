@@ -1,5 +1,7 @@
 # diff-summary
 
+> Part of [**agent-plus**](../README.md) · siblings: [`agent-plus`](../agent-plus) · [`repo-analyze`](../repo-analyze) · [`skill-feedback`](../skill-feedback) · [`skill-plus`](../skill-plus)
+
 Triaging a PR or asking "what changed in this branch", an agent reads each modified file individually — five, ten, twenty Read calls — to figure out: is this a test or source? a config or a migration? did the public API change? were tests updated alongside? is this a 300-line refactor or a one-line typo fix?
 
 `diff-summary` collapses that into one call. **A 12-file PR that would have burned ~12 Reads becomes one structured payload** — per-file role classification, risk tier with reasons, public-API touch detection, co-changed-test detection, secret-risk path flagging, aggregate stats. Stdlib Python only. No network. Stateless.
@@ -28,7 +30,7 @@ The four diff-source flags are mutually exclusive. Default is the working-tree d
 ```bash
 $ diff-summary --base main --pretty
 {
-  "tool": {"name": "diff-summary", "version": "0.1.0"},
+  "tool": {"name": "diff-summary", "version": "0.2.1"},
   "mode": "base",
   "base": "main",
   "head": "abc1234",

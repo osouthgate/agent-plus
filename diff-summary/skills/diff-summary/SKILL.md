@@ -40,7 +40,7 @@ The four diff-source flags (`--staged`, `--base`, `--range`, default) are mutual
 
 ```json
 {
-  "tool": {"name": "diff-summary", "version": "0.1.0"},
+  "tool": {"name": "diff-summary", "version": "0.2.1"},
   "mode": "base",
   "base": "main",
   "head": "abc1234",
