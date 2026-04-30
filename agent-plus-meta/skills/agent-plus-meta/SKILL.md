@@ -5,9 +5,9 @@ when_to_use: Trigger at session start to bootstrap context. Trigger when the use
 allowed-tools: Bash(agent-plus-meta:*)
 ---
 
-# agent-plus
+# agent-plus-meta
 
-The meta plugin. Three subcommands, JSON output only. Use at session start to give the agent day-one context — installed plugin set, env-var readiness, resolved project IDs — without grep-mining the project for every fact.
+The meta plugin. Eight+ subcommands across `init`, `envcheck`, `refresh`, `list`, `extensions`, `marketplace`, `doctor`. JSON output only. Use at session start to give the agent day-one context — installed plugin set, env-var readiness, resolved project IDs — without grep-mining the project for every fact.
 
 The binary lives at `${CLAUDE_SKILL_DIR}/../../bin/agent-plus-meta`; the plugin loader auto-adds `bin/` to PATH, so call it as `agent-plus-meta`.
 

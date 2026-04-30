@@ -86,6 +86,40 @@ $ skill-plus scaffold railway-probe --from-candidate 8ad12e3f9be1   # turn patte
 
 ## Install
 
+One-line install — drops you straight into the wizard:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/osouthgate/agent-plus/main/install.sh | sh
+```
+
+That installs all five primitives, then chains into `agent-plus-meta init`. The wizard detects your state (new to Claude Code? returning on a fresh machine? skill author with `.claude/skills/` already?) and runs the right first command for you. No flag-juggling, no doc-hunting.
+
+### What happens when you install
+
+The wizard adapts to one of three branches based on what it finds:
+
+- **NEW** — no skills, no session history, no env-vars: runs `repo-analyze` against your current repo as the first win.
+- **RETURNING** — fresh machine, existing `.agent-plus/` markers or `~/.claude/projects/` history: runs `agent-plus-meta doctor` first to confirm the install.
+- **SKILL-AUTHOR** — `.claude/skills/` already populated: runs `skill-plus list --include-global` to surface your existing skills + collisions.
+
+Then it offers a per-repo opt-in cross-repo scan against the four most recently active repos under `~/.claude/projects/`, and ends with a coherent `doctor` verdict.
+
+Run the wizard again any time (`agent-plus-meta init`) — it's idempotent.
+
+### CI / automation
+
+For agent harnesses or CI:
+
+```bash
+curl -fsSL .../install.sh | sh -s -- --unattended      # accept defaults, exit 0 on partial install
+curl -fsSL .../install.sh | sh -s -- --no-init         # install primitives only, skip the wizard
+agent-plus-meta init --non-interactive --auto          # deterministic JSON envelope to stdout
+```
+
+The `--non-interactive --auto` envelope is a frozen public contract — see [`agent-plus-meta/README.md`](./agent-plus-meta/README.md#init).
+
+### Manual install
+
 ```bash
 # All five framework primitives in one go
 claude plugin marketplace add osouthgate/agent-plus

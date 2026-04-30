@@ -1,7 +1,7 @@
 {
   "name": "skill-plus",
   "description": "The fifth universal primitive of the agent-plus framework. Mines real Claude Code session transcripts to surface repeated tool-use patterns, scaffolds them into project-scoped Claude skills (`.claude/skills/<name>/`), audits existing skills against a quality contract, and closes the loop with a cross-source feedback aggregator that joins explicit skill-feedback ratings against implicit session-mining failure signals. Stdlib Python, local-only, no network. Promote skills you keep using to your `<user>/agent-plus-skills` marketplace with one command.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Oliver Southgate",
     "url": "https://github.com/osouthgate"

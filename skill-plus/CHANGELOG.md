@@ -4,6 +4,11 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.2.0 - 2026-04-30
+
+### Added
+- **`list --include-global`** — walks `~/.claude/skills/` in addition to `<repo>/.claude/skills/`. Each row carries a `scope: "project" | "global"` tag. Name collisions across scopes are flagged with `collision: true` on every colliding row, and a top-level `collisions[]` lists the names. Powers the v0.12.0 `agent-plus-meta init` wizard's SKILL-AUTHOR branch first-win. Default invocation (`skill-plus list` without the flag) preserves the pre-v0.2.0 envelope shape byte-for-byte — additive change, zero back-compat break. Collision resolution (rename helper, `where`/`globalize`/`localize` subcommands) lands in v0.14.0 per the agent-plus skill-scope-topology plan. 4 new tests, 87 total passing.
+
 ## 0.1.0 - 2026-04-30
 
 Initial release. The fifth universal primitive of the agent-plus framework — alongside `agent-plus`, `repo-analyze`, `diff-summary`, `skill-feedback`. Replaces the "I keep typing this same command" → "I should turn this into a skill" gap with one structured mining loop.

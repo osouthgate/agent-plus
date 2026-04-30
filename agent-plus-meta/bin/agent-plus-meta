@@ -51,6 +51,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Optional
 
+# ─── _subcommands package import ─────────────────────────────────────────────
+# v0.12.0: the wizard logic lives in _subcommands/init.py. Adding this bin's
+# parent directory to sys.path makes `from _subcommands import init` work
+# both when this file is run directly (python3 bin/agent-plus-meta init) and
+# when tests load it via SourceFileLoader.
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
 # ─── tool identity ────────────────────────────────────────────────────────────
 
 TOOL_NAME = "agent-plus-meta"
@@ -381,30 +390,15 @@ def _render_suggestions_section(suggestions: list[dict]) -> str:
 
 
 def cmd_init(args: argparse.Namespace) -> dict:
-    workspace, source = resolve_workspace(args.dir)
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    created: list[str] = []
-    skipped: list[str] = []
-
-    for fname, default in _initial_files().items():
-        path = workspace / fname
-        if path.is_file():
-            skipped.append(fname)
-            continue
-        path.write_text(json.dumps(default, indent=2) + "\n", encoding="utf-8")
-        created.append(fname)
-
-    project_root = _detect_project_root(workspace)
-    suggested = detect_suggested_skills(project_root)
-
-    return {
-        "workspace": str(workspace),
-        "source": source,
-        "created": created,
-        "skipped": skipped,
-        "suggested_skills": suggested,
-    }
+    """v0.12.0: delegate to the persona-aware wizard in
+    _subcommands/init.py. The wizard preserves the legacy envelope shape
+    (workspace/source/created/skipped/suggested_skills) AND adds the
+    frozen v0.12.0 fields (detection/branch_chosen/cross_repo_*/doctor_*/
+    errors[]). See plan §"DX Review Additions / 1" for the full schema.
+    """
+    from _subcommands import init as _init_mod  # noqa: PLC0415 — lazy
+    _init_mod.bind(sys.modules[__name__])
+    return _init_mod.cmd_init(args)
 
 
 # ─── envcheck ────────────────────────────────────────────────────────────────
@@ -3315,8 +3309,16 @@ def _build_parser() -> argparse.ArgumentParser:
     pretty_parent.add_argument("--env-file", help="extra env file to load (highest "
                                                   "precedence after CLI flags)")
 
-    sub.add_parser("init", help="create .agent-plus/ workspace files",
-                   parents=[pretty_parent])
+    s_init = sub.add_parser("init", help="create .agent-plus/ workspace files; "
+                                          "v0.12.0 runs persona-aware wizard",
+                            parents=[pretty_parent])
+    s_init.add_argument("--non-interactive", dest="non_interactive",
+                        action="store_true",
+                        help="no prompts; deterministic branch pick")
+    s_init.add_argument("--auto", action="store_true",
+                        help="combined with --non-interactive: emit the "
+                             "frozen JSON envelope and accept all auto-discovered "
+                             "cross-repo paths silently")
 
     sub.add_parser("envcheck", help="report which plugin env vars are set "
                                     "(names only)",
@@ -3455,6 +3457,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     # plugin READMEs. Force UTF-8 so list output round-trips cleanly.
     try:
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        pass
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     except (AttributeError, OSError):
         pass
 

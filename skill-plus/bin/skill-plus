@@ -443,6 +443,10 @@ def build_parser() -> argparse.ArgumentParser:
     # list
     sp = sub.add_parser("list", help="audit existing project skills against the contract")
     sp.add_argument("--project", default=None)
+    sp.add_argument("--include-global", dest="include_global",
+                    action="store_true", default=False,
+                    help="also walk ~/.claude/skills/; adds a `scope` field "
+                         "(project|global) on each row and flags name collisions")
     _add_envelope_args(sp)
 
     # feedback

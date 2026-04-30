@@ -9,6 +9,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/osouthgate/agent-plus/main/install.sh | sh
 #   AGENT_PLUS_INSTALL_DIR=$HOME/bin sh install.sh
 #   sh install.sh --dry-run        # print what would happen, install nothing
+#   sh install.sh --no-init        # skip the agent-plus-meta init chain (CI)
+#   sh install.sh --unattended     # no prompts, accept defaults, exit 0 on partial install
 #
 # Verify post-install:
 #   agent-plus-meta doctor --pretty
@@ -24,18 +26,26 @@ INSTALL_DIR="${AGENT_PLUS_INSTALL_DIR:-$HOME/.local/bin}"
 PRIMITIVES="agent-plus-meta repo-analyze diff-summary skill-feedback skill-plus"
 
 DRY_RUN=0
+NO_INIT=0
+UNATTENDED=0
 for arg in "$@"; do
     case "$arg" in
         --dry-run)
             DRY_RUN=1
             ;;
+        --no-init)
+            NO_INIT=1
+            ;;
+        --unattended)
+            UNATTENDED=1
+            ;;
         -h|--help)
-            sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
             echo "install.sh: unknown argument: $arg" >&2
-            echo "usage: sh install.sh [--dry-run]" >&2
+            echo "usage: sh install.sh [--dry-run] [--no-init] [--unattended]" >&2
             exit 2
             ;;
     esac
@@ -54,6 +64,9 @@ print_header() {
     echo "=============================="
     if [ "$DRY_RUN" -eq 1 ]; then
         echo "(dry run — nothing will be downloaded or written)"
+    fi
+    if [ "$UNATTENDED" -eq 1 ]; then
+        echo "(unattended mode — no prompts, accept defaults, exit 0 on partial install)"
     fi
 }
 
@@ -82,6 +95,8 @@ install_one() {
     if ! curl -fsSL "$url" -o "$target.tmp"; then
         printf "[%d/%d] %-18s FAILED to download %s\n" \
             "$index" "$TOTAL" "$plugin" "$url" >&2
+        printf "[install_sh_curl_failed] %s: failed to download %s\n" \
+            "$plugin" "$url" >&2
         rm -f "$target.tmp"
         return 1
     fi
@@ -90,11 +105,26 @@ install_one() {
     if ! chmod 755 "$target" 2>/dev/null; then
         printf "[%d/%d] %-18s FAILED to chmod %s\n" \
             "$index" "$TOTAL" "$plugin" "$target" >&2
+        printf "[install_sh_curl_failed] %s: failed to chmod %s\n" \
+            "$plugin" "$target" >&2
         rm -f "$target"
         return 1
     fi
     printf "[%d/%d] %-18s installed at %s\n" \
         "$index" "$TOTAL" "$plugin" "$target"
+}
+
+# Locate agent-plus-meta after install: prefer PATH, fall back to INSTALL_DIR.
+locate_agent_plus_meta() {
+    if command -v agent-plus-meta >/dev/null 2>&1; then
+        command -v agent-plus-meta
+        return 0
+    fi
+    if [ -x "$INSTALL_DIR/agent-plus-meta" ]; then
+        echo "$INSTALL_DIR/agent-plus-meta"
+        return 0
+    fi
+    return 1
 }
 
 # ─── main ────────────────────────────────────────────────────────────────────
@@ -107,6 +137,13 @@ if [ "$DRY_RUN" -eq 0 ]; then
     fi
     if ! command -v curl >/dev/null 2>&1; then
         echo "install.sh: curl is required but not found on PATH" >&2
+        if [ "$UNATTENDED" -eq 1 ]; then
+            echo "[install_sh_curl_failed] env: curl not on PATH" >&2
+            # In unattended mode we still exit 0; the caller inspects the
+            # summary line to decide what to do next.
+            echo "install.sh: unattended — no primitives could be installed" >&2
+            exit 0
+        fi
         exit 1
     fi
 fi
@@ -123,8 +160,77 @@ done
 if [ -n "$failed" ]; then
     echo "" >&2
     echo "install.sh: the following primitive(s) failed to install:$failed" >&2
-    echo "Re-run install.sh after fixing the network issue, or install missing pieces manually." >&2
-    exit 1
+    if [ "$UNATTENDED" -eq 1 ]; then
+        echo "install.sh: unattended mode — exit 0 despite partial install." >&2
+        echo "install.sh: caller should parse [install_sh_curl_failed] lines for failures." >&2
+        # Fall through to the chain attempt; if agent-plus-meta itself failed,
+        # locate_agent_plus_meta will skip the chain cleanly.
+    else
+        echo "Re-run install.sh after fixing the network issue, or install missing pieces manually." >&2
+        exit 1
+    fi
 fi
 
-print_footer
+# ─── chain into agent-plus-meta init ────────────────────────────────────────
+#
+# Default: run the interactive wizard so a fresh `curl | sh` lands the user
+# straight into onboarding. Skipped on:
+#   - --no-init       (CI escape hatch)
+#   - --dry-run       (no side effects, ever)
+#   - agent-plus-meta unreachable (partial install under --unattended)
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    # In dry-run, surface what *would* happen so users (and tests) can verify
+    # the chain is wired up without invoking it.
+    if [ "$NO_INIT" -eq 1 ]; then
+        echo ""
+        echo "(dry run) would skip agent-plus-meta init (--no-init)"
+    elif [ "$UNATTENDED" -eq 1 ]; then
+        echo ""
+        echo "(dry run) would chain: agent-plus-meta init --non-interactive --auto"
+    else
+        echo ""
+        echo "(dry run) would chain: agent-plus-meta init"
+    fi
+    # Dry-run never executes; print footer and exit.
+    if [ -z "$failed" ]; then
+        print_footer
+    fi
+    exit 0
+fi
+
+if [ "$NO_INIT" -eq 1 ]; then
+    echo ""
+    echo "Skipping agent-plus-meta init (--no-init)."
+    if [ -z "$failed" ]; then
+        print_footer
+    fi
+    exit 0
+fi
+
+apm_bin=$(locate_agent_plus_meta 2>/dev/null || true)
+if [ -z "$apm_bin" ]; then
+    echo "" >&2
+    echo "install.sh: agent-plus-meta not reachable on PATH or in $INSTALL_DIR — skipping init chain." >&2
+    echo "Hint: add $INSTALL_DIR to PATH and run: agent-plus-meta init" >&2
+    if [ -z "$failed" ]; then
+        print_footer
+    fi
+    exit 0
+fi
+
+echo ""
+if [ "$UNATTENDED" -eq 1 ]; then
+    echo "Running agent-plus-meta init --non-interactive --auto..."
+    # Don't let init's exit code take down the install script in unattended
+    # mode — the JSON envelope on stdout is the contract.
+    "$apm_bin" init --non-interactive --auto || true
+else
+    echo "Running agent-plus-meta init..."
+    "$apm_bin" init
+fi
+
+if [ -z "$failed" ]; then
+    print_footer
+fi
+exit 0

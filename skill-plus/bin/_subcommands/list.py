@@ -248,6 +248,51 @@ def _audit_skill(skill_dir: Path) -> dict:
     return result
 
 
+# ─── scope walkers ────────────────────────────────────────────────────────────
+
+
+def _audit_dir(skills_dir: Path, scope: str | None) -> list[dict]:
+    """Walk one skills root and return audited rows. When `scope` is non-None,
+    tag each row with it; pass None to preserve the pre-v0.12.0 envelope
+    shape (no `scope` key — back-compat for the default `list` invocation)."""
+    if not skills_dir.is_dir():
+        return []
+    rows: list[dict] = []
+    try:
+        entries = sorted(skills_dir.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.is_dir():
+            continue
+        if not (entry / "SKILL.md").exists():
+            continue
+        row = _audit_skill(entry)
+        if scope is not None:
+            row["scope"] = scope
+        rows.append(row)
+    return rows
+
+
+def _global_skills_dir(home: Path | None = None) -> Path:
+    """Resolve ~/.claude/skills/ — Claude Code's user-level skill directory."""
+    return (home or Path.home()) / ".claude" / "skills"
+
+
+def _mark_collisions(rows: list[dict]) -> None:
+    """In-place: add `collision: true` to every row whose `name` appears in
+    more than one scope. The wizard's SKILL-AUTHOR branch surfaces these so
+    users know which name to disambiguate (resolved by v0.14.0's
+    `skill-plus collisions` subcommand)."""
+    by_name: dict[str, list[dict]] = {}
+    for r in rows:
+        by_name.setdefault(r["name"], []).append(r)
+    for name, group in by_name.items():
+        if len(group) > 1:
+            for r in group:
+                r["collision"] = True
+
+
 # ─── entry point ──────────────────────────────────────────────────────────────
 
 def run(args, emit_fn) -> int:
@@ -259,32 +304,53 @@ def run(args, emit_fn) -> int:
         project = (top if top is not None else Path.cwd()).resolve()
 
     skills_dir = project / ".claude" / "skills"
+    include_global = bool(getattr(args, "include_global", False))
 
-    if not skills_dir.is_dir():
-        emit_fn({
-            "project": str(project),
-            "skillsDir": str(skills_dir),
-            "skills": [],
-            "skillsTotal": 0,
-            "note": "no .claude/skills/ directory",
-        })
-        return 0
+    # Tag scopes only when --include-global is on, so the default envelope
+    # stays byte-identical to pre-v0.12.0 consumers.
+    project_scope = "project" if include_global else None
+    project_rows = _audit_dir(skills_dir, scope=project_scope)
 
-    skills: list[dict] = []
-    for entry in sorted(skills_dir.iterdir()):
-        if not entry.is_dir():
-            continue
-        if not (entry / "SKILL.md").exists():
-            continue
-        skills.append(_audit_skill(entry))
+    global_dir: Path | None = None
+    global_rows: list[dict] = []
+    if include_global:
+        global_dir = _global_skills_dir()
+        global_rows = _audit_dir(global_dir, scope="global")
 
-    # Sort worst-first.
+    skills = project_rows + global_rows
+
+    if include_global:
+        _mark_collisions(skills)
+
+    # Sort: worst score first, then by name. Stable across scopes.
     skills.sort(key=lambda s: (s.get("score", 0.0), s.get("name", "")))
 
-    emit_fn({
+    payload: dict = {
         "project": str(project),
         "skillsDir": str(skills_dir),
         "skillsTotal": len(skills),
         "skills": skills,
-    })
+    }
+
+    if include_global:
+        collisions = sorted({r["name"] for r in skills if r.get("collision")})
+        payload["scopes"] = {
+            "project": {
+                "path": str(skills_dir),
+                "count": len(project_rows),
+            },
+            "global": {
+                "path": str(global_dir),
+                "count": len(global_rows),
+            },
+        }
+        payload["collisions"] = collisions
+
+    if not skills_dir.is_dir() and not skills:
+        # Preserve the existing "nothing here" envelope so downstream
+        # consumers (and the wizard's branch logic) can still detect the
+        # empty case identically.
+        payload["note"] = "no .claude/skills/ directory"
+
+    emit_fn(payload)
     return 0

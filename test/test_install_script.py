@@ -67,6 +67,47 @@ class TestInstallScript(unittest.TestCase):
         )
         self.assertNotEqual(proc.returncode, 0)
 
+    def test_unattended_flag_accepted(self) -> None:
+        # --unattended composed with --dry-run keeps tests offline. The flag
+        # must be accepted (rc=0); semantics are exercised at runtime, not here.
+        proc = subprocess.run(
+            ["sh", str(SCRIPT), "--unattended", "--dry-run"],
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(proc.returncode, 0,
+                         msg=f"--unattended --dry-run failed: stderr={proc.stderr!r}")
+
+    def test_no_init_flag_accepted(self) -> None:
+        proc = subprocess.run(
+            ["sh", str(SCRIPT), "--no-init", "--dry-run"],
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(proc.returncode, 0,
+                         msg=f"--no-init --dry-run failed: stderr={proc.stderr!r}")
+
+    def test_unattended_with_init_chain_dryrun_mentions_init(self) -> None:
+        # Proves the chain into `agent-plus-meta init` is wired even though
+        # dry-run suppresses the actual call.
+        proc = subprocess.run(
+            ["sh", str(SCRIPT), "--unattended", "--dry-run"],
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("agent-plus-meta init", proc.stdout,
+                      msg=f"chain target not surfaced in dry-run output: {proc.stdout!r}")
+
+    def test_dryrun_without_no_init_does_not_actually_chain(self) -> None:
+        # --dry-run alone (no --no-init) must NOT execute init — the chain is
+        # short-circuited under dry-run regardless of --no-init. We assert
+        # absence of the live "Running" prefix used in the non-dry path.
+        proc = subprocess.run(
+            ["sh", str(SCRIPT), "--dry-run"],
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("Running agent-plus-meta init", proc.stdout,
+                         msg=f"dry-run unexpectedly invoked init: {proc.stdout!r}")
+
     def test_install_dir_override_honored_in_dry_run(self) -> None:
         # AGENT_PLUS_INSTALL_DIR env override should appear in dry-run target paths
         # so users can confirm where files would land before committing to a write.

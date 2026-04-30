@@ -51,7 +51,10 @@ def test_envelope_has_tool_meta():
     res = _run("list", "--pretty")
     assert res.returncode == 0
     payload = json.loads(res.stdout)
-    assert payload["tool"] == {"name": "skill-plus", "version": "0.1.0"}
+    # Read version from plugin.json so this test doesn't break on every bump.
+    plugin_json = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+    expected_version = json.loads(plugin_json.read_text(encoding="utf-8"))["version"]
+    assert payload["tool"] == {"name": "skill-plus", "version": expected_version}
 
 
 def test_subcommand_dispatch_falls_back_to_stub_when_module_missing(tmp_path: Path):
