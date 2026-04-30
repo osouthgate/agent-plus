@@ -34,6 +34,33 @@ def _have_sh() -> bool:
     return shutil.which("sh") is not None
 
 
+def _safe_path() -> str:
+    """Build a PATH containing core utilities (rm, sh, etc.) but with no
+    `agent-plus-meta` binary on it. Used by the install.sh delegation tests
+    so we exercise the candidate-path / fallback branches deterministically.
+    """
+    import os
+    sh_path = shutil.which("sh")
+    candidates: list[str] = []
+    if sh_path:
+        candidates.append(str(Path(sh_path).parent))
+    # Common system locations that hold rm and friends.
+    for d in ("/usr/bin", "/bin", "/usr/local/bin"):
+        if Path(d).is_dir():
+            candidates.append(d)
+    # On Windows + Git Bash, /usr/bin maps under the Git install.
+    git_usr_bin = Path("C:/Program Files/Git/usr/bin")
+    if git_usr_bin.is_dir():
+        candidates.append(str(git_usr_bin))
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in candidates:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return os.pathsep.join(out) if out else "/usr/bin"
+
+
 @unittest.skipUnless(_have_sh(), "POSIX `sh` not on PATH")
 class TestInstallScript(unittest.TestCase):
     def test_script_exists(self) -> None:
@@ -124,6 +151,83 @@ class TestInstallScript(unittest.TestCase):
                              msg=f"dry-run with override failed: stderr={proc.stderr!r}")
             self.assertIn(td, proc.stdout,
                           msg=f"override dir {td!r} not surfaced in dry-run output")
+
+
+    def test_install_sh_uninstall_delegates_when_bin_present(self) -> None:
+        # Stage a fake agent-plus-meta in INSTALL_DIR. install.sh --uninstall
+        # should `exec` it. We capture argv via a stub bin that prints them.
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            fake_bin = Path(td) / "agent-plus-meta"
+            fake_bin.write_text(
+                "#!/bin/sh\necho FAKE-APM \"$@\"\n", encoding="utf-8",
+            )
+            os.chmod(fake_bin, 0o755)
+            env = os.environ.copy()
+            env["AGENT_PLUS_INSTALL_DIR"] = td
+            # Strip PATH so `command -v agent-plus-meta` doesn't pick up a real
+            # one — we want the candidate-path branch under
+            # AGENT_PLUS_INSTALL_DIR to fire.
+            # Keep coreutils (rm/sh/etc.) reachable but ensure no real
+            # `agent-plus-meta` binary is on PATH. We rebuild PATH from
+            # canonical system bins only.
+            env["PATH"] = _safe_path()
+            proc = subprocess.run(
+                ["sh", str(SCRIPT), "--uninstall", "--dry-run"],
+                capture_output=True, text=True, timeout=15, env=env,
+            )
+            self.assertEqual(proc.returncode, 0,
+                             msg=f"delegate failed: stderr={proc.stderr!r}")
+            self.assertIn("FAKE-APM", proc.stdout,
+                          msg=f"stub bin not exec'd: stdout={proc.stdout!r}")
+            self.assertIn("uninstall", proc.stdout)
+            self.assertIn("--dry-run", proc.stdout)
+
+    def test_install_sh_uninstall_fallback_when_bin_missing(self) -> None:
+        # No fake bin staged → fallback. Stage primitive bins to be removed.
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            for name in PRIMITIVES:
+                (Path(td) / name).write_text("stub", encoding="utf-8")
+            env = os.environ.copy()
+            env["AGENT_PLUS_INSTALL_DIR"] = td
+            # Keep coreutils (rm/sh/etc.) reachable but ensure no real
+            # `agent-plus-meta` binary is on PATH. We rebuild PATH from
+            # canonical system bins only.
+            env["PATH"] = _safe_path()
+            proc = subprocess.run(
+                ["sh", str(SCRIPT), "--uninstall"],
+                capture_output=True, text=True, timeout=15, env=env,
+            )
+            self.assertEqual(proc.returncode, 0,
+                             msg=f"fallback failed: stderr={proc.stderr!r}")
+            self.assertIn("fallback mode", proc.stdout)
+            for name in PRIMITIVES:
+                self.assertFalse(
+                    (Path(td) / name).is_file(),
+                    msg=f"primitive {name} not removed by fallback",
+                )
+
+    def test_install_sh_uninstall_fallback_refuses_workspace_flag(self) -> None:
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            env = os.environ.copy()
+            env["AGENT_PLUS_INSTALL_DIR"] = td
+            # Keep coreutils (rm/sh/etc.) reachable but ensure no real
+            # `agent-plus-meta` binary is on PATH. We rebuild PATH from
+            # canonical system bins only.
+            env["PATH"] = _safe_path()
+            proc = subprocess.run(
+                ["sh", str(SCRIPT), "--uninstall", "--workspace"],
+                capture_output=True, text=True, timeout=15, env=env,
+            )
+            self.assertEqual(proc.returncode, 3,
+                             msg=f"expected exit 3, got {proc.returncode}; "
+                                 f"stderr={proc.stderr!r}")
+            self.assertIn("re-install", proc.stderr.lower() + proc.stdout.lower())
 
 
 if __name__ == "__main__":

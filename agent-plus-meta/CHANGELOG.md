@@ -4,6 +4,33 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.15.0 - 2026-04-30
+
+agent-plus uninstall slice. The framework finally owns its off-ramp end-to-end. Safe-by-default removal (5 bins; nothing else) with opt-in escalation flags, a self-contained `install.sh --uninstall` shell fallback for broken installs, and a frozen JSON envelope schema as public contract. Skips v0.14.0 (a skill-plus-only slice that didn't bump agent-plus-meta).
+
+### Added
+
+- **`agent-plus-meta uninstall`** — canonical uninstall action at `_subcommands/uninstall.py`. Default scope removes only the 5 framework primitive bins from `$INSTALL_DIR`; workspace, marketplaces, plugins, sessions, and skills are KEPT and listed with hints. Flag matrix: `--workspace` (also removes `<repo>/.agent-plus/` AND `~/.agent-plus/`), `--marketplaces` (unregisters `~/.agent-plus/marketplaces/` state — plugins INSTALLED from marketplaces are NOT touched, Claude Code owns those), `--all` (bins + workspace + marketplaces; "all of ours" semantics — does NOT include `--purge`, T2), `--purge` (`--all` PLUS any other agent-plus state we own; ALWAYS prompts for the literal word `PURGE` even under `--non-interactive`, T6 one-way door), `--dry-run` (manifest preview only), `--non-interactive` (skip prompt; auto-accept the safe default OR explicitly-flagged scope), `--json` (suppress human preview), `--install-dir PATH` (explicit override, defaults to `AGENT_PLUS_INSTALL_DIR` env or `~/.local/bin`).
+- **JSON envelope schema locked as public contract** — see [docs/uninstall-envelope.md](./docs/uninstall-envelope.md). The `kind` enum reserves slots for v0.16+ additive use (`settings_hook`, `daemon_pid`, `migration_state`) so future hooks/daemons/migrations can ship without breaking the contract.
+- **`install.sh --uninstall`** — replaces v0.13.0's `exit 2` stub with: (1) delegate (`exec`) to `agent-plus-meta uninstall` when reachable on PATH or in `$INSTALL_DIR`, all flags pass through; (2) self-contained POSIX shell fallback when the bin is broken/missing — removes ONLY the 5 primitive bins. Refuses `--workspace`/`--marketplaces`/`--all`/`--purge` in fallback mode with exit 3 and a "re-install first" hint (T1).
+- **Idempotency** — every removal target reports one of `removed | missing | skipped | kept | error`. Re-running after a clean uninstall: every target reports `missing`, exit 0.
+- **Self-delete handling on Windows (E1)** — on Linux/macOS the running bin can unlink itself (POSIX inode semantics). On Windows, `os.remove()` may fail with `PermissionError`; we emit `status: error` with a manual-removal note for self, and succeed for the other 4 bins.
+- **`uninstall_run` telemetry event** — appends one JSON line to `~/.agent-plus/analytics/uninstall.jsonl` if the analytics directory exists. Schema: `{ts, event, mode, summary}`. Names only — no paths in telemetry.
+- **Plugin-cache LIST-only behaviour** — walks `~/.claude/plugins/cache/` for plugins tagged `@agent-plus`, surfaces them in `claude_plugin_hints[]` with the exact `claude plugin uninstall <name>@agent-plus` strings to copy-paste. We don't touch them — Claude Code owns them (P3 jurisdictional).
+- **17 new tests** — 14 in `agent-plus-meta/test/test_uninstall.py` (default dry-run / default removal / each scope flag / PURGE confirmation / non-interactive PURGE still prompts / user skills + sessions kept under PURGE / idempotent rerun / partial state / Claude plugin hints / envelope schema / Windows self-delete / install-dir override) + 3 in `test/test_install_script.py` (install.sh delegates when bin present / fallback when missing / fallback refuses workspace flag).
+
+### Changed
+
+- `install.sh`'s verb-dispatcher now correctly forwards `"$@"` to `dispatch_upgrade` and `dispatch_uninstall`. Previously the args were dropped at the case-statement boundary; the upgrade slice never noticed because its tests didn't exercise multi-arg invocations.
+- `agent-plus-meta/.claude-plugin/plugin.json` version bumped 0.13.5 → 0.15.0 (skipping 0.14.0 — that slot was a skill-plus-only slice and didn't bump agent-plus-meta).
+- `agent-plus-meta/README.md` gains an "Uninstalling" section documenting the flag matrix and pointing at the envelope schema.
+- Root `README.md` gets a one-line pointer to the uninstall section.
+
+### Deferred
+
+- **Reverse dual-track skill (`agent-plus-uninstaller` SKILL.md)** — would teach Claude Code WHEN to offer to uninstall (mirror of v0.13.0 `agent-plus-installer`). Deferred to v0.16+ (T3) — validate the JSON envelope as a public contract before binding the skill to it.
+- **`--include-claude-plugins` opt-in inside `--purge`** — would shell out to `claude plugin uninstall <name>@agent-plus` for each tagged plugin. Designed but not implemented; add when users request.
+
 ## 0.13.5 - 2026-04-30
 
 agent-plus upgrade slice. Closes the framework's biggest current craft gap: every dogfooder pasted `curl … install.sh | sh` weeks ago and is on a stale install with no probe, no prompt, no migration path, no rollback. v0.13.5 ships all four — the cached probe, the upgrade action, the migration runner, and a per-bin `.bak` rollback — adapted from gstack's proven shape to agent-plus's multi-plugin reality.
