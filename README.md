@@ -37,8 +37,7 @@ The four plugins that apply to any Claude Code project:
 | [`repo-analyze`](./repo-analyze) | Cold-start orientation in any unfamiliar repo. Replaces the ~67 grep + ~60 ls dance with one structured payload. | `repo-analyze [--max-tree-files] [--max-tree-depth] [--output] [--shape-depth] [--pretty]` |
 | [`diff-summary`](./diff-summary) | Per-file role + risk classification of a git diff. Replaces 5–20 Read calls with one structured triage. | `diff-summary [--staged \| --base BRANCH \| --range A..B] [--include-patches] [--public-api-only] [--risk MIN] [--output] [--pretty]` |
 | [`skill-feedback`](./skill-feedback) | Local-first agent self-assessment for any Claude Code skill. Append-only JSONL, optional bundle-into-GitHub-issue submit. | `log <skill> --rating --outcome [--friction]`, `show`, `report`, `submit` |
-
-A fifth — `skill-plus`, for session-mining-driven skill discovery + scaffold + feedback aggregation — is in design. See [`plans/todo/2026-04-28-skill-plus-plugin.md`](./plans/todo/2026-04-28-skill-plus-plugin.md).
+| [`skill-plus`](./skill-plus) | Mine real Claude Code session JSONL for repeated Bash patterns; scaffold them into project skills; audit existing skills against the framework contract; cross-source feedback aggregator joining `skill-feedback` ratings against implicit session-mining failure signals; promote to a `<user>/agent-plus-skills` marketplace. Stdlib, local-only, consent-gated. | `scan`, `propose`, `install-cron`, `scaffold <name>`, `list`, `feedback`, `promote <name>` |
 
 ## Service wrappers (live in `osouthgate/agent-plus-skills`)
 
@@ -59,6 +58,7 @@ claude plugin install agent-plus@agent-plus
 claude plugin install repo-analyze@agent-plus
 claude plugin install diff-summary@agent-plus
 claude plugin install skill-feedback@agent-plus
+claude plugin install skill-plus@agent-plus
 
 # Install the reference skills marketplace (also via Claude Code's native command)
 claude plugin marketplace add osouthgate/agent-plus-skills
@@ -137,6 +137,7 @@ claude plugin install agent-plus@agent-plus       # meta plugin (recommended fir
 claude plugin install repo-analyze@agent-plus
 claude plugin install diff-summary@agent-plus
 claude plugin install skill-feedback@agent-plus
+claude plugin install skill-plus@agent-plus
 ```
 
 Update later:
