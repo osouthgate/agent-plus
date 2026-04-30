@@ -118,6 +118,7 @@ SAFE_PROBES: dict[str, tuple[str, ...]] = {
     "skill-feedback": ("path",),
     "repo-analyze": ("--max-tree-depth", "1", "--max-tree-files", "5", "--output", "{OUTPUT}"),
     "diff-summary": ("--path", "{GIT_ROOT}", "--output", "{OUTPUT}"),
+    "skill-plus": ("list",),
 }
 
 # Plugins that support --output (will be re-probed with --output to assert

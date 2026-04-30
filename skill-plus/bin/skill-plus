@@ -1,0 +1,505 @@
+#!/usr/bin/env python3
+"""
+skill-plus — the fifth universal primitive of the agent-plus framework.
+
+Mines real Claude Code session transcripts (~/.claude/projects/<encoded-cwd>/*.jsonl)
+to surface repeated tool-use patterns, scaffolds them into project-scoped Claude
+skills, audits existing skills against a quality contract, and closes the loop
+with a cross-source feedback aggregator.
+
+Subcommands (all emit JSON; --pretty for indented):
+  scan                  one-shot session-log scan; appends candidates to
+                        <git-toplevel>/.agent-plus/skill-plus/candidates.jsonl
+  propose               interactive — show ranked candidates from candidate log
+  install-cron          self-install scheduled scan (cron / Task Scheduler)
+  scaffold <name>       write .claude/skills/<name>/{SKILL.md,bin/<name>}
+  list                  audit existing project skills against the contract
+  feedback              cross-source aggregator: skill-feedback JSONL + session mining
+  promote <name>        move a project-local skill to <user>/agent-plus-skills
+
+Storage precedence (highest first):
+  1. SKILL_PLUS_DIR env var (absolute path, project state only)
+  2. <git-toplevel>/.agent-plus/skill-plus/         (project state, gitignored)
+  3. <cwd>/.agent-plus/skill-plus/                  (project, no git)
+  4. ~/.agent-plus/skill-plus/                      (last-resort fallback)
+
+Per-user config / consent (always machine-local):
+  ~/.agent-plus/skill-plus/config.json
+  ~/.agent-plus/skill-plus/consent.json
+
+Hard rules:
+  - Never sends transcripts anywhere. All processing local.
+  - Free-text in candidates redacted for known secret patterns before write.
+  - First scan in a project requires interactive consent (cron install captures
+    consent up front; cron itself never writes outside ~/.agent-plus/skill-plus/).
+  - scaffold writes inside .claude/skills/<name>/ only — explicit and
+    pre-announced. No silent edits.
+
+Python 3.9+, stdlib only. No network calls.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import functools
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Optional
+
+# ─── tool identity ────────────────────────────────────────────────────────────
+
+TOOL_NAME = "skill-plus"
+
+
+@functools.lru_cache(maxsize=1)
+def _plugin_version() -> str:
+    try:
+        manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+        return str(json.loads(manifest.read_text(encoding="utf-8")).get("version", "unknown"))
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+
+
+def _tool_meta() -> dict[str, str]:
+    return {"name": TOOL_NAME, "version": _plugin_version()}
+
+
+def _with_tool_meta(payload: Any) -> Any:
+    if isinstance(payload, dict) and "tool" not in payload:
+        return {"tool": _tool_meta(), **payload}
+    return payload
+
+
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ─── storage resolution (mirrors skill-feedback) ──────────────────────────────
+
+
+def _git_toplevel() -> Path | None:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    line = out.stdout.strip()
+    return Path(line) if line else None
+
+
+def project_state_root_with_source() -> tuple[Path, str]:
+    """Where this project's mined candidates and last-scan markers live.
+
+    Returned tuple: (path, source) where source is one of: env, git, cwd, home.
+    """
+    override = os.environ.get("SKILL_PLUS_DIR")
+    if override:
+        return Path(override).expanduser().resolve(), "env"
+    top = _git_toplevel()
+    if top is not None:
+        return (top / ".agent-plus" / "skill-plus").resolve(), "git"
+    cwd = Path.cwd()
+    if (cwd / ".agent-plus").is_dir():
+        return (cwd / ".agent-plus" / "skill-plus").resolve(), "cwd"
+    return (Path.home() / ".agent-plus" / "skill-plus").resolve(), "home"
+
+
+def project_state_root() -> Path:
+    return project_state_root_with_source()[0]
+
+
+def user_config_root() -> Path:
+    """Per-user config + consent. Always machine-local."""
+    return (Path.home() / ".agent-plus" / "skill-plus").resolve()
+
+
+def candidates_log_path() -> Path:
+    return project_state_root() / "candidates.jsonl"
+
+
+def last_scan_path() -> Path:
+    return project_state_root() / "last-scan.txt"
+
+
+def consent_path() -> Path:
+    return user_config_root() / "consent.json"
+
+
+def config_path() -> Path:
+    return user_config_root() / "config.json"
+
+
+def _ensure_dir(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+# ─── secret redaction (shared with scaffold's emitted skills) ─────────────────
+
+_SECRET_PATTERNS = [
+    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"gh[ousr]_[A-Za-z0-9]{20,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"sk-lf-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"pk-lf-[A-Za-z0-9_-]{20,}"),
+    # webhook URLs (Slack/Discord) — token in URL path
+    re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+"),
+    re.compile(r"https://discord(?:app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9._-]+"),
+    re.compile(r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{20,}"),
+    re.compile(r"sk-or-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
+    re.compile(r"sbp_[A-Za-z0-9]{20,}"),
+    re.compile(r"sntrys_[A-Za-z0-9._-]{20,}"),
+    re.compile(r"AIza[0-9A-Za-z_-]{35}"),
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    re.compile(r"Bearer\s+[A-Za-z0-9._\-]{20,}", re.IGNORECASE),
+    re.compile(r"Authorization:\s*\S+", re.IGNORECASE),
+    # connection strings
+    re.compile(r"(postgres|mysql|redis|mongodb(?:\+srv)?)://[^\s'\"]+@", re.IGNORECASE),
+    # argv-style secret pairs
+    re.compile(r"--(?:password|token|secret|api[-_]?key)[= ]\S+", re.IGNORECASE),
+]
+
+
+def scrub_text(s: str | None) -> str | None:
+    if s is None:
+        return None
+    out = s
+    for pat in _SECRET_PATTERNS:
+        out = pat.sub("[REDACTED]", out)
+    return out
+
+
+# ─── envelope offload (mirrors repo-analyze / diff-summary) ───────────────────
+
+
+def _payload_shape(payload: dict, depth: int = 3) -> dict[str, dict[str, Any]]:
+    if depth < 1 or not isinstance(payload, dict):
+        return {}
+    return {k: _shape_value(v, depth) for k, v in payload.items() if k != "tool"}
+
+
+def _shape_value(v: Any, depth: int) -> dict[str, Any]:
+    if isinstance(v, str):
+        return {"type": "string", "length": len(v)}
+    if isinstance(v, bool):
+        return {"type": "boolean"}
+    if isinstance(v, (int, float)):
+        return {"type": "number"}
+    if isinstance(v, list):
+        out: dict[str, Any] = {"type": "list", "length": len(v)}
+        if depth > 1 and v:
+            out["sample"] = _shape_value(v[0], depth - 1)
+        return out
+    if isinstance(v, dict):
+        out = {"type": "dict", "keys": len(v)}
+        if depth > 1:
+            out["shape"] = {k: _shape_value(val, depth - 1) for k, val in v.items()}
+        return out
+    if v is None:
+        return {"type": "null"}
+    return {"type": type(v).__name__}
+
+
+def _write_output_file(payload: Any, output_path: str, *, shape_depth: int = 3) -> dict[str, Any]:
+    path = Path(output_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2, default=str)
+    path.write_text(text, encoding="utf-8")
+    tool = payload.get("tool") if isinstance(payload, dict) else None
+    summary: dict[str, Any] = {
+        "tool": tool or _tool_meta(),
+        "payloadPath": str(path),
+        "bytes": len(text.encode("utf-8")),
+        "fileLineCount": text.count("\n") + 1,
+    }
+    if isinstance(payload, dict):
+        summary["payloadKeys"] = [k for k in payload.keys() if k != "tool"]
+        summary["payloadShape"] = _payload_shape(payload, depth=shape_depth)
+    return summary
+
+
+def emit(data: Any, *, pretty: bool, output: Optional[str], shape_depth: int) -> None:
+    wrapped = _with_tool_meta(data)
+    if output and isinstance(wrapped, (dict, list)):
+        wrapped = _write_output_file(wrapped, output, shape_depth=shape_depth)
+    if pretty:
+        print(json.dumps(wrapped, indent=2, default=str))
+    else:
+        print(json.dumps(wrapped, default=str))
+
+
+# ─── session-log discovery (used by scan + feedback) ──────────────────────────
+
+
+def encoded_cwd_for(path: Path) -> str:
+    """Claude Code encodes the cwd as project dir name by replacing
+    each non-alphanumeric run with a single dash and stripping the leading
+    drive separator. Mirrors what's observed under ~/.claude/projects/."""
+    s = str(path.resolve())
+    s = re.sub(r"[\\/:]", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    return f"C--{s}" if not s.startswith("C--") else s
+
+
+def claude_projects_root() -> Path:
+    return Path.home() / ".claude" / "projects"
+
+
+def session_files_for_project(project_path: Path) -> list[Path]:
+    """All session JSONL files for the given project path. Returns []
+    if the projects root or encoded directory doesn't exist."""
+    root = claude_projects_root()
+    if not root.is_dir():
+        return []
+    enc = encoded_cwd_for(project_path)
+    proj_dir = root / enc
+    if not proj_dir.is_dir():
+        return []
+    return sorted(proj_dir.glob("*.jsonl"))
+
+
+# ─── consent ──────────────────────────────────────────────────────────────────
+
+
+def has_consent_for(project_path: Path) -> bool:
+    p = consent_path()
+    if not p.exists():
+        return False
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    granted = data.get("projects", {})
+    return bool(granted.get(str(project_path.resolve())))
+
+
+def grant_consent_for(project_path: Path, *, source: str = "interactive") -> None:
+    p = consent_path()
+    _ensure_dir(p)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    projects = data.setdefault("projects", {})
+    projects[str(project_path.resolve())] = {
+        "grantedAt": _now_iso(),
+        "source": source,
+    }
+    p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+# ─── subcommand dispatch ──────────────────────────────────────────────────────
+# Each subcommand body lives in skill_plus_<name>.py modules sourced at runtime.
+# This keeps the bin file readable while letting parallel sub-agents work on
+# independent subcommand surfaces without merge conflicts.
+
+
+def _load_subcommand(name: str):
+    """Look up a subcommand handler. Each handler is a callable accepting
+    (args, emit_fn) where emit_fn = lambda payload: emit(payload, pretty=..., output=..., shape_depth=...).
+    Lookup order:
+      1. skill_plus.subcommands.<name> module (if importable)
+      2. <bin_dir>/_subcommands/<name>.py via import
+    """
+    # Direct import from sibling _subcommands directory.
+    here = Path(__file__).resolve().parent / "_subcommands"
+    # Hyphenated subcommand names map to underscored module filenames
+    # (e.g. install-cron → install_cron.py) so they're importable.
+    candidate = here / f"{name.replace('-', '_')}.py"
+    if candidate.exists():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(f"_skill_plus_{name}", candidate)
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            # Make shared helpers importable inside the subcommand module.
+            mod.__dict__.update({
+                "TOOL_NAME": TOOL_NAME,
+                "_tool_meta": _tool_meta,
+                "_now_iso": _now_iso,
+                "scrub_text": scrub_text,
+                "project_state_root": project_state_root,
+                "project_state_root_with_source": project_state_root_with_source,
+                "user_config_root": user_config_root,
+                "candidates_log_path": candidates_log_path,
+                "last_scan_path": last_scan_path,
+                "consent_path": consent_path,
+                "config_path": config_path,
+                "_git_toplevel": _git_toplevel,
+                "claude_projects_root": claude_projects_root,
+                "encoded_cwd_for": encoded_cwd_for,
+                "session_files_for_project": session_files_for_project,
+                "has_consent_for": has_consent_for,
+                "grant_consent_for": grant_consent_for,
+                "_ensure_dir": _ensure_dir,
+            })
+            spec.loader.exec_module(mod)
+            return getattr(mod, "run", None)
+    return None
+
+
+def _stub(name: str):
+    def run(args, emit_fn):
+        emit_fn({
+            "subcommand": name,
+            "status": "not_implemented",
+            "message": f"subcommand '{name}' not yet wired up — this is a foundation stub",
+        })
+        return 0
+    return run
+
+
+SUBCOMMANDS = (
+    "scan", "propose", "install-cron", "scaffold", "list", "feedback", "promote",
+)
+
+
+# ─── CLI ──────────────────────────────────────────────────────────────────────
+
+
+def _add_envelope_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--output", metavar="PATH", default=None,
+                   help=("write the full JSON payload to PATH and print a compact "
+                         "summary (payloadPath, bytes, payloadKeys, payloadShape)."))
+    p.add_argument("--shape-depth", type=int, choices=[1, 2, 3], default=3,
+                   dest="shape_depth")
+    fmt = p.add_mutually_exclusive_group()
+    fmt.add_argument("--json", dest="pretty", action="store_false", default=False,
+                     help="compact JSON output (default)")
+    fmt.add_argument("--pretty", dest="pretty", action="store_true",
+                     help="pretty-print JSON output")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog=TOOL_NAME,
+        description="Mine session logs into Claude skills. Stdlib, local-only, no network.",
+    )
+    p.add_argument("--version", action="version",
+                   version=f"{TOOL_NAME} {_plugin_version()}")
+    sub = p.add_subparsers(dest="command", required=False)
+
+    # scan
+    sp = sub.add_parser("scan", help="one-shot scan; append candidates to the candidate log")
+    sp.add_argument("--project", default=None,
+                    help="project path to mine (default: cwd / git toplevel)")
+    sp.add_argument("--all-projects", action="store_true",
+                    help="opt-in cross-project mining (off by default)")
+    sp.add_argument("--since-days", type=int, default=30,
+                    help="only sessions modified in the last N days (default: 30)")
+    sp.add_argument("--max-sessions", type=int, default=50,
+                    help="cap on sessions read per scan (default: 50)")
+    sp.add_argument("--min-count", type=int, default=3,
+                    help="minimum invocations across the window to surface (default: 3)")
+    sp.add_argument("--min-sessions", type=int, default=2,
+                    help="minimum distinct sessions a pattern must appear in (default: 2)")
+    sp.add_argument("--accept-consent", action="store_true",
+                    help="non-interactive: grant consent for this project (cron uses this)")
+    _add_envelope_args(sp)
+
+    # propose
+    sp = sub.add_parser("propose", help="show ranked candidates from the candidate log")
+    sp.add_argument("--limit", type=int, default=10)
+    sp.add_argument("--project", default=None)
+    _add_envelope_args(sp)
+
+    # install-cron
+    sp = sub.add_parser("install-cron", help="self-install scheduled scan")
+    sp.add_argument("--frequency", choices=["daily", "weekly"], default="weekly")
+    sp.add_argument("--print-only", action="store_true",
+                    help="show what would be installed but don't write")
+    sp.add_argument("--uninstall", action="store_true")
+    _add_envelope_args(sp)
+
+    # scaffold
+    sp = sub.add_parser("scaffold", help="write .claude/skills/<name>/ skeleton with required slots")
+    sp.add_argument("name")
+    sp.add_argument("--description", default=None)
+    sp.add_argument("--when-to-use", dest="when_to_use", default=None)
+    sp.add_argument("--killer-command", dest="killer_command", default=None)
+    sp.add_argument("--do-not-use-for", dest="do_not_use_for", default=None,
+                    help="at least one bullet for the 'do NOT use this for' section")
+    sp.add_argument("--from-candidate", dest="from_candidate", default=None,
+                    help="seed slots from a candidate id in the candidate log")
+    sp.add_argument("--force", action="store_true",
+                    help="overwrite an existing skill directory")
+    _add_envelope_args(sp)
+
+    # list
+    sp = sub.add_parser("list", help="audit existing project skills against the contract")
+    sp.add_argument("--project", default=None)
+    _add_envelope_args(sp)
+
+    # feedback
+    sp = sub.add_parser("feedback", help="cross-source aggregator: skill-feedback + session mining")
+    sp.add_argument("--skill", default=None,
+                    help="restrict to a single skill name (default: all)")
+    sp.add_argument("--project", default=None)
+    sp.add_argument("--since-days", type=int, default=30,
+                    help="only entries from the last N days (default: 30; 0 = no window, returns no entries)")
+    _add_envelope_args(sp)
+
+    # promote
+    sp = sub.add_parser("promote", help="move a project-local skill to <user>/agent-plus-skills")
+    sp.add_argument("name")
+    sp.add_argument("--to", dest="to_marketplace", default=None,
+                    help="<user>/<repo> destination (default: ~/.agent-plus/config.json target)")
+    sp.add_argument("--marketplace-path", default=None,
+                    help="local clone of the marketplace (default: derive from --to)")
+    sp.add_argument("--dry-run", action="store_true", default=True,
+                    help="print plan without writing (default: on)")
+    sp.add_argument("--no-dry-run", dest="dry_run", action="store_false")
+    sp.add_argument("--keep-local", action="store_true",
+                    help="copy instead of move; project-local copy stays in place")
+    _add_envelope_args(sp)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command is None:
+        parser.print_help(sys.stderr)
+        return 2
+
+    pretty = bool(getattr(args, "pretty", False))
+    output = getattr(args, "output", None)
+    shape_depth = int(getattr(args, "shape_depth", 3))
+
+    def emit_fn(payload: Any) -> None:
+        emit(payload, pretty=pretty, output=output, shape_depth=shape_depth)
+
+    handler = _load_subcommand(args.command) or _stub(args.command)
+    try:
+        rc = handler(args, emit_fn)
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 — top-level reporter
+        emit_fn({
+            "command": args.command,
+            "ok": False,
+            "error": {"type": type(exc).__name__, "message": str(exc)},
+        })
+        return 1
+    return int(rc or 0)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
