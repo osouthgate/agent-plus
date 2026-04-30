@@ -1,38 +1,33 @@
 # skill-plus
 
-The fifth universal primitive of [agent-plus](../README.md). Mines the Claude Code session log to find the things you do over and over by hand, then turns them into proper Claude skills with one command.
+> Part of [**agent-plus**](../README.md) · siblings: [`agent-plus`](../agent-plus) · [`repo-analyze`](../repo-analyze) · [`diff-summary`](../diff-summary) · [`skill-feedback`](../skill-feedback)
 
-Stdlib-only Python 3, no dependencies, no SaaS, no SDK. Sessions never leave the machine.
+Authoring a good Claude skill isn't hard because of the boilerplate — it's hard because picking the **killer command** is guesswork. Repo-introspection ("you have postgres, want a postgres skill?") is shape-matching; it has no idea what you actually do.
 
-## Why
+`skill-plus` is **evidence-driven**: it reads your real Claude Code session JSONL transcripts, clusters the commands you keep typing, and surfaces them as candidates. Then it scaffolds a skill that matches the contract every other agent-plus primitive follows — frontmatter, killer command, "do NOT use this for", layered config, redaction. Lifecycle: **session log → mined candidate → scaffolded skill → marketplace plugin → community discovery.** Stdlib-only Python 3, no SaaS, no SDK. Sessions never leave the machine.
 
-The hard part of authoring a good Claude skill isn't the boilerplate. It's the **killer command** — the one-shot wrapper that collapses a five-step dance into a single call. Repo-introspection ("you have postgres, want a postgres skill?") is shape-matching; it has no idea what you actually do.
+## Headline commands
 
-`skill-plus` is **evidence-driven**: it reads your real Claude Code session JSONL transcripts, clusters the commands you keep typing, and surfaces them as candidates. Then it scaffolds a skill that matches the contract every other agent-plus primitive follows — frontmatter, killer command, "do NOT use this for", layered config, redaction.
-
-You then promote the skill you keep using to your `<user>/agent-plus-skills` marketplace with one command. Lifecycle: **session log → mined candidate → scaffolded skill → marketplace plugin → community discovery.**
-
-## What it does
-
-Seven subcommands, each emits envelope-compliant JSON; `--pretty` for human reading.
-
+```bash
+skill-plus scan             [--accept-consent] [--all-projects] [--pretty]
+skill-plus propose          [--limit 10] [--pretty]
+skill-plus install-cron     [--frequency weekly]
+skill-plus scaffold <name>  [--description ...] [--when-to-use ...]
+                            [--killer-command ...] [--do-not-use-for ...]
+                            [--from-candidate <id>]
+skill-plus list             [--pretty]
+skill-plus feedback         [--pretty]
+skill-plus promote <name>   [--to <user>/<repo>] [--no-dry-run] [--keep-local]
+skill-plus --version
 ```
-skill-plus scan                  # mine the session log; append to candidates.jsonl
-skill-plus propose               # show ranked candidates from the candidate log
-skill-plus install-cron          # self-install scheduled scan (cron / Task Scheduler)
-skill-plus scaffold <name>       # write .claude/skills/<name>/{SKILL.md, bin/<name>}
-skill-plus list                  # audit existing project skills against the contract
-skill-plus feedback              # cross-source aggregator: skill-feedback + session mining
-skill-plus promote <name>        # move a project-local skill to <user>/agent-plus-skills
-```
+
+Every subcommand emits envelope-compliant JSON; `--pretty` for human reading.
 
 ### scan — find what you actually do
 
-Walks `~/.claude/projects/<encoded-cwd>/*.jsonl`, extracts `Bash` tool calls, clusters by first-three-tokens, applies a denylist (`git status`, `ls`, `grep` etc — these are 80% of Bash calls and never skill candidates), and writes deduped candidates to `<git-toplevel>/.agent-plus/skill-plus/candidates.jsonl`.
+Walks `~/.claude/projects/<encoded-cwd>/*.jsonl`, extracts `Bash` tool calls, clusters by first-three-tokens, applies a denylist (`git status`, `ls`, `grep` — 80% of Bash calls and never skill candidates), and writes deduped candidates to `<git-toplevel>/.agent-plus/skill-plus/candidates.jsonl`. Allowlist bias keeps anything carrying `--service`, `--env`, `--project`, `--deployment`, or an MCP tool name through the filter.
 
-Allowlist bias keeps anything carrying `--service`, `--env`, `--project`, `--deployment`, or an MCP tool name through the filter.
-
-```
+```json
 {
   "tool": {"name": "skill-plus", "version": "0.1.0"},
   "project": "/Users/me/checkout",
@@ -50,14 +45,14 @@ Allowlist bias keeps anything carrying `--service`, `--env`, `--project`, `--dep
 
 ### propose — pick the best one
 
-Reads the candidate log, scores by `count + 0.5 × distinct_sessions + recency_boost`, returns the top N. Each row carries a `proposedSkillName` (e.g. `railway logs --service` → `railway-logs`) and a `kind: "new" | "enhance"` — flips to `enhance` when a skill of that name already exists.
+Reads the candidate log, scores by `count + 0.5 × distinct_sessions + recency_boost`, returns the top N. Each row carries a `proposedSkillName` (e.g. `railway logs --service` → `railway-logs`) and `kind: "new" | "enhance"` — flips to `enhance` when a skill of that name already exists.
 
 ### scaffold — turn it into a skill
 
 ```bash
 skill-plus scaffold railway-probe \
   --description "One-shot Railway error probe across services" \
-  --when-to-use "Triggers on 'is staging green', 'why is api 500ing', 'check railway errors'" \
+  --when-to-use "Triggers on 'is staging green', 'why is api 500ing'" \
   --killer-command "probe-errors <service> [--since 5m]" \
   --do-not-use-for "deploys; env-var management; logs over 1h windows"
 ```
@@ -66,7 +61,7 @@ Writes `.claude/skills/railway-probe/{SKILL.md, bin/railway-probe, bin/railway-p
 
 ### list — audit what you have
 
-Walks `<project>/.claude/skills/`, scores each skill against the framework contract: frontmatter (`description`, `when_to_use`, `allowed-tools`), required body sections (`## Killer command`, `## Do NOT use this for`, `## Safety rules`), POSIX + Windows launchers, stdlib-only imports. Sorted worst-first so you see what to fix.
+Walks `<project>/.claude/skills/`, scores each skill against the framework contract: frontmatter (`description`, `when_to_use`, `allowed-tools`), required body sections (`## Killer command`, `## Do NOT use this for`, `## Safety rules`), POSIX + Windows launchers, stdlib-only imports. Sorted worst-first.
 
 ### feedback — close the loop
 
@@ -78,7 +73,7 @@ Reads `.agent-plus/skill-feedback/<skill>.jsonl` (explicit ratings) AND the sess
 skill-plus promote railway-probe --to osouthgate/agent-plus-skills --no-dry-run
 ```
 
-Validates the skill against the contract (frontmatter, `## Killer command`, `obviates` from frontmatter or body), copies the directory into your local marketplace clone, adds a `{name, version, path, obviates}` entry to its `marketplace.json`'s `skills` array, removes the project-local copy unless `--keep-local`. Dry-run by default — prints the plan, doesn't write.
+Validates the skill against the contract, copies the directory into your local marketplace clone, adds `{name, version, path, obviates}` to `marketplace.json`'s `skills` array, removes the project-local copy unless `--keep-local`. Dry-run by default.
 
 ### install-cron — make it continuous
 
@@ -86,27 +81,27 @@ Validates the skill against the contract (frontmatter, `## Killer command`, `obv
 skill-plus install-cron --frequency weekly
 ```
 
-POSIX: idempotent crontab edit, marker-line keyed. Windows: `schtasks` with sanitized task name. Consent for cron is captured at install time — cron itself runs `scan --accept-consent` and never writes outside `~/.agent-plus/skill-plus/`. Errors land in `<state>/scan.log`.
+POSIX: idempotent crontab edit, marker-line keyed. Windows: `schtasks` with sanitized task name. Cron consent captured at install time; cron itself runs `scan --accept-consent` and never writes outside `~/.agent-plus/skill-plus/`. Errors land in `<state>/scan.log`.
 
 ## Privacy
 
 - **No transcript ever leaves the machine.** All processing local; no network calls.
-- **Consent gate.** First scan in a project requires `--accept-consent` (or interactive grant); cron consent is captured at install time. Recorded in `~/.agent-plus/skill-plus/consent.json`.
-- **Secret redaction.** Every scrubbed command runs through patterns covering GitHub PATs (`ghp_…`, `github_pat_…`, `gho_/ghu_/ghs_/ghr_…`), AWS access keys (`AKIA…`), Anthropic (`sk-ant-…`), Langfuse (`pk-lf-…` / `sk-lf-…`), Stripe (`sk_live_/sk_test_/rk_/pk_…`), generic OpenAI-style `sk-…`, OpenRouter (`sk-or-…`), Supabase (`sbp_…`), Sentry (`sntrys_…`), Google API keys (`AIza…`), Slack (`xoxb-/xoxa-/xoxp-/xoxr-/xoxs-…`), Slack/Discord webhook URLs, Discord bot tokens, JWTs (`eyJ…`), `Bearer …`, `Authorization: …`, connection strings (`postgres://user:pw@host/…`), and `--token=…` / `--password=…` / `--secret=…` argv pairs **before** they're written to `candidates.jsonl`.
+- **Consent gate.** First scan in a project requires `--accept-consent` (or interactive grant); cron consent captured at install time. Recorded in `~/.agent-plus/skill-plus/consent.json`.
+- **Secret redaction before write.** Every scrubbed command runs through patterns covering GitHub PATs (`ghp_…`, `github_pat_…`, `gho_/ghu_/ghs_/ghr_…`), AWS access keys (`AKIA…`), Anthropic (`sk-ant-…`), Langfuse (`pk-lf-…` / `sk-lf-…`), Stripe (`sk_live_/sk_test_/rk_/pk_…`), generic OpenAI-style `sk-…`, OpenRouter (`sk-or-…`), Supabase (`sbp_…`), Sentry (`sntrys_…`), Google API keys (`AIza…`), Slack (`xoxb-/xoxa-/xoxp-/xoxr-/xoxs-…`), Slack/Discord webhook URLs, Discord bot tokens, JWTs (`eyJ…`), `Bearer …`, `Authorization: …`, connection strings (`postgres://user:pw@host/…`), and `--token=…` / `--password=…` / `--secret=…` argv pairs **before** they're written to `candidates.jsonl`.
 - **Scope defaults narrow.** Current project, last 30 days, last 50 sessions. `--all-projects` is opt-in with a stronger prompt.
 - **Read-only by default.** `propose`, `list`, `feedback` never write. `scan` writes `candidates.jsonl` and `last-scan.txt`. `scaffold` writes inside `.claude/skills/<name>/` only — explicit and pre-announced.
 
 ## State layout
 
 ```
-~/.agent-plus/skill-plus/                        # per-user, machine-local
-  config.json                                    # defaultMarketplace, prefs
-  consent.json                                   # per-project consent grants
+~/.agent-plus/skill-plus/                  # per-user, machine-local
+  config.json                              # defaultMarketplace, prefs
+  consent.json                             # per-project consent grants
 
-<git-toplevel>/.agent-plus/skill-plus/           # per-repo, gitignored
-  candidates.jsonl                               # mined patterns, deduped by id
-  last-scan.txt                                  # watermark for incremental scans
-  scan.log                                       # cron error log
+<git-toplevel>/.agent-plus/skill-plus/     # per-repo, gitignored
+  candidates.jsonl                         # mined patterns, deduped by id
+  last-scan.txt                            # watermark for incremental scans
+  scan.log                                 # cron error log
 ```
 
 Storage precedence (highest first): `SKILL_PLUS_DIR` env override → git toplevel → cwd `.agent-plus/` if present → home fallback.
@@ -128,7 +123,7 @@ chmod +x skill-plus
 ./skill-plus scan --pretty
 ```
 
-Python 3.9+. No pip installs.
+Python 3.9+ stdlib only. No pip installs.
 
 ## Tests
 

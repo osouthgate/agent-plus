@@ -37,7 +37,7 @@ Default behaviour: analyze cwd, return one JSON blob.
 
 ```json
 {
-  "tool": {"name": "repo-analyze", "version": "0.1.0"},
+  "tool": {"name": "repo-analyze", "version": "0.2.1"},
   "path": "/abs/path",
   "git": {"isRepo": true, "branch": "main", "remote": "...", "headCommit": "abc1234"},
   "languages": {"python": {"files": 42, "loc": 12345, "percent": 38.2}, ...},
