@@ -1,6 +1,6 @@
 # repo-analyze
 
-> Part of [**agent-plus**](../README.md) · siblings: [`agent-plus`](../agent-plus) · [`diff-summary`](../diff-summary) · [`skill-feedback`](../skill-feedback) · [`skill-plus`](../skill-plus)
+> Part of [**agent-plus**](../README.md) · siblings: [`agent-plus-meta`](../agent-plus-meta) · [`diff-summary`](../diff-summary) · [`skill-feedback`](../skill-feedback) · [`skill-plus`](../skill-plus)
 
 Cold-starting in an unfamiliar repo, every agent session re-mines the same facts. File-tree exploration. Finding entrypoints. Reading `package.json` / `pyproject.toml` / `Cargo.toml` / `go.mod`. Scanning the README. Detecting whether this is a Next.js app or a Django service.
 

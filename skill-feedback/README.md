@@ -1,6 +1,6 @@
 # skill-feedback
 
-> Part of [**agent-plus**](../README.md) · siblings: [`agent-plus`](../agent-plus) · [`repo-analyze`](../repo-analyze) · [`diff-summary`](../diff-summary) · [`skill-plus`](../skill-plus)
+> Part of [**agent-plus**](../README.md) · siblings: [`agent-plus-meta`](../agent-plus-meta) · [`repo-analyze`](../repo-analyze) · [`diff-summary`](../diff-summary) · [`skill-plus`](../skill-plus)
 
 Skill authors are flying blind. You ship a SKILL.md and have no idea whether agents reach for it correctly, what they fall back to, or which flag they wished was there. Hosted alternatives solve it by posting telemetry to a third-party service — fine for some teams, a non-starter for others.
 

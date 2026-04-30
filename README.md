@@ -50,24 +50,65 @@ That's one plugin. The framework ships **five universal primitives**:
 
 Plus a **marketplace convention** — `<user>/agent-plus-skills` — for publishing your own service-specific wrappers (GitHub, Vercel, Supabase, Railway, Linear, OpenRouter, Coolify, Hetzner, Hermes, Langfuse, etc.). Reference marketplace lives at [`osouthgate/agent-plus-skills`](https://github.com/osouthgate/agent-plus-skills) — install it, fork it, or use it as a template.
 
+## A 90-second tour
+
+```text
+$ agent-plus-meta init                         # creates .agent-plus/, idempotent
+✓ created manifest.json, services.json, env-status.json
+
+$ agent-plus-meta envcheck                     # which sibling-plugin env vars are set?
+✓ ready: github-remote, vercel-remote, langfuse-remote
+✗ missing: SUPABASE_ACCESS_TOKEN  →  supabase-remote unconfigured
+
+$ agent-plus-meta refresh                      # resolves project IDs once; written to services.json
+✓ services: 6 ok, 1 unconfigured  (4.2s)
+
+$ repo-analyze --pretty | jq '.frameworks'     # cold-start orientation
+[{"name": "Next.js", "evidence": "package.json:next", "confidence": "high"},
+ {"name": "TailwindCSS", "evidence": "package.json:tailwindcss", "confidence": "high"}]
+
+$ diff-summary --base main                     # one-call PR triage
+{"summary": {"highRisk": 0, "publicApiTouches": 1, "missingTests": 0, ...}}
+
+$ skill-plus scan --pretty                     # mine the session log for repeated patterns
+{"candidatesNew": 3, "candidates": [
+  {"key": "railway logs --service", "count": 14, "sessions": 3, ...}]}
+
+$ skill-plus scaffold railway-probe --from-candidate 8ad12e3f9be1   # turn pattern → skill
+✓ wrote .claude/skills/railway-probe/{SKILL.md, bin/, ...}
+```
+
 ## Install
 
 ```bash
-# Framework primitives (recommended)
+# All five framework primitives in one go
 claude plugin marketplace add osouthgate/agent-plus
-claude plugin install agent-plus-meta@agent-plus
-claude plugin install repo-analyze@agent-plus
-claude plugin install diff-summary@agent-plus
-claude plugin install skill-feedback@agent-plus
-claude plugin install skill-plus@agent-plus
+for p in agent-plus-meta repo-analyze diff-summary skill-feedback skill-plus; do
+  claude plugin install $p@agent-plus
+done
+```
 
-# Reference service-wrapper marketplace (commit-pinned, first-run review)
+Or pick the ones you want:
+
+```bash
+claude plugin marketplace add osouthgate/agent-plus
+claude plugin install repo-analyze@agent-plus       # cold-start orientation
+claude plugin install diff-summary@agent-plus       # PR triage
+claude plugin install skill-feedback@agent-plus     # rate skills as you use them
+claude plugin install skill-plus@agent-plus         # mine sessions for new skills
+claude plugin install agent-plus-meta@agent-plus    # workspace bootstrap + marketplace lifecycle
+```
+
+Then add service wrappers from the reference marketplace:
+
+```bash
+# Commit-pinned + first-run review (gh, vercel, supabase, railway, linear, ...)
 agent-plus-meta marketplace install osouthgate/agent-plus-skills
 
-# Or scaffold your own marketplace
+# Or scaffold your own
 agent-plus-meta marketplace init <your-handle>/agent-plus-skills
 
-# Discover other people's marketplaces
+# Or discover other people's
 agent-plus-meta marketplace search [query]
 ```
 
