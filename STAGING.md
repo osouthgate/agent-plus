@@ -76,6 +76,7 @@ Wrapper-related topic adds (`github-remote`, `vercel-remote`, etc.) are no longe
 | v0.1.0 | (early) | pre-2026-04 | Initial framework split |
 | v0.2.0 | `c923160` | 2026-04-28 | Status README + framework-only restructure |
 | v0.9.0 | `db7ff68` | 2026-04-28 | Marketplace install/update/list/remove + trust model (Phase 2) |
+| v0.9.1 | `abe11db` | 2026-04-30 | Papercut bundle: services.json cleanup, repo-analyze deque BFS, diff-summary public-API regex fix, slice-8 coverage |
 
 **Upcoming slices** (not yet shipped):
 
