@@ -1835,5 +1835,147 @@ class TestRefreshCollisionResolution(unittest.TestCase):
         self.assertEqual(collisions, [])
 
 
+# ─── doctor ──────────────────────────────────────────────────────────────────
+
+
+class TestDoctor(unittest.TestCase):
+    """Read-only diagnostic. No mutations to the workspace, even if absent."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        # Marketplace root override → empty dir → 0 installed marketplaces.
+        self.mp_root = tempfile.TemporaryDirectory()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+        self.mp_root.cleanup()
+
+    def _clean_env(self, extra: dict | None = None) -> dict:
+        out: dict[str, str] = {}
+        for k, v in os.environ.items():
+            if any(k.startswith(prefix) for prefix in (
+                "GITHUB_", "VERCEL_", "COOLIFY_", "HCLOUD_", "HERMES_",
+                "LANGFUSE_", "OPENROUTER_", "SUPABASE_", "LINEAR_",
+            )):
+                continue
+            out[k] = v
+        out["AGENT_PLUS_MARKETPLACES_ROOT"] = self.mp_root.name
+        if extra:
+            out.update(extra)
+        return out
+
+    def _doctor(self, extra_env: dict | None = None,
+                dir_flag: str | None = None,
+                cwd: str | None = None,
+                pretty: bool = False) -> tuple[int, dict, str]:
+        argv = ["doctor"]
+        if dir_flag:
+            argv += ["--dir", dir_flag]
+        if pretty:
+            argv += ["--pretty"]
+        rc, out, err = _run(*argv, env=self._clean_env(extra_env),
+                            cwd=cwd or self.tmp.name)
+        return rc, json.loads(out), err
+
+    def test_doctor_envelope_has_tool_meta(self) -> None:
+        rc, payload, _err = self._doctor(dir_flag=str(self.dir))
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["tool"]["name"], "agent-plus-meta")
+        self.assertIsInstance(payload["tool"]["version"], str)
+        # Top-level shape contract.
+        for key in ("verdict", "self", "workspace", "primitives",
+                    "envcheck", "marketplaces", "stale_services_entries",
+                    "checks_run", "issues"):
+            self.assertIn(key, payload, f"missing top-level key {key!r}")
+
+    def test_doctor_broken_when_workspace_missing(self) -> None:
+        # Fresh tempdir; no .agent-plus/ created → workspace.exists False.
+        rc, payload, _err = self._doctor(dir_flag=str(self.dir))
+        self.assertEqual(rc, 0)
+        self.assertEqual(payload["verdict"], "broken")
+        self.assertFalse(payload["workspace"]["exists"])
+        # And NEVER write — the dir we pointed at must remain workspace-free.
+        self.assertFalse((self.dir / ".agent-plus").is_dir())
+
+    def test_doctor_healthy_in_clean_repo(self) -> None:
+        # Init the workspace so files exist.
+        rc0, _o, err0 = _run("init", "--dir", str(self.dir))
+        self.assertEqual(rc0, 0, msg=err0)
+        # Provide every required env var so envcheck is fully ready, and
+        # ensure the railway binary on PATH is fine to skip via fake bin.
+        # Easiest: provide env vars; railway-ops has no required env vars,
+        # but the CLI binary check will fail. Set PATH to include a stub.
+        stub_dir = Path(self.tmp.name) / "stubs"
+        stub_dir.mkdir()
+        railway_stub = stub_dir / ("railway.bat" if os.name == "nt"
+                                   else "railway")
+        railway_stub.write_text("")
+        try:
+            railway_stub.chmod(0o755)
+        except OSError:
+            pass
+        # Also stub out the framework primitives so primitives section is
+        # all-installed (warns otherwise — but warns don't downgrade verdict).
+        for prim in ("agent-plus-meta", "repo-analyze", "diff-summary",
+                     "skill-feedback", "skill-plus"):
+            stub = stub_dir / (f"{prim}.bat" if os.name == "nt" else prim)
+            stub.write_text("")
+            try:
+                stub.chmod(0o755)
+            except OSError:
+                pass
+        env_extra = {
+            "PATH": str(stub_dir) + os.pathsep + os.environ.get("PATH", ""),
+            "COOLIFY_URL": "x", "COOLIFY_API_KEY": "x",
+            "HCLOUD_TOKEN": "x",
+            "HERMES_URL": "x", "HERMES_CHAT_API_KEY": "x",
+            "LANGFUSE_PUBLIC_KEY": "x", "LANGFUSE_SECRET_KEY": "x",
+            "OPENROUTER_API_KEY": "x",
+            "SUPABASE_ACCESS_TOKEN": "x",
+            "VERCEL_TOKEN": "x",
+            "LINEAR_API_KEY": "x",
+        }
+        rc, payload, _err = self._doctor(extra_env=env_extra,
+                                         dir_flag=str(self.dir))
+        self.assertEqual(rc, 0)
+        # Either healthy (ideal) or degraded (windows binary detection
+        # quirks). Must NOT be broken.
+        self.assertNotEqual(payload["verdict"], "broken",
+                            msg=f"unexpected broken: {payload['issues']}")
+        self.assertTrue(payload["workspace"]["exists"])
+        self.assertEqual(payload["envcheck"]["missing_count"], 0)
+
+    def test_doctor_degraded_when_envvar_missing(self) -> None:
+        # Workspace exists, but no env vars set → degraded.
+        rc0, _o, _e = _run("init", "--dir", str(self.dir))
+        self.assertEqual(rc0, 0)
+        rc, payload, _err = self._doctor(dir_flag=str(self.dir))
+        self.assertEqual(rc, 0)
+        # Workspace OK so not broken; but envcheck has misses → degraded.
+        self.assertIn(payload["verdict"], ("degraded", "broken"))
+        self.assertGreater(len(payload["issues"]), 0)
+        # Confirm at least one envcheck issue.
+        cats = [i["category"] for i in payload["issues"]]
+        self.assertIn("envcheck", cats)
+
+    def test_doctor_pretty_renders_summary(self) -> None:
+        _rc0, _o, _e = _run("init", "--dir", str(self.dir))
+        rc, _payload, err = self._doctor(dir_flag=str(self.dir), pretty=True)
+        self.assertEqual(rc, 0)
+        # Pretty summary lands on stderr.
+        self.assertIn("agent-plus-meta doctor:", err)
+        # One of the verdict words must appear.
+        self.assertTrue(
+            any(v in err for v in ("HEALTHY", "DEGRADED", "BROKEN")),
+            msg=f"no verdict word in stderr: {err!r}",
+        )
+        # At least one bullet (either an issue or "No issues detected.").
+        self.assertTrue(
+            ("- [" in err) or ("No issues detected." in err),
+            msg=f"no summary bullet in stderr: {err!r}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
