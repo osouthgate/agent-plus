@@ -18,6 +18,11 @@ skill-plus scaffold <name>  [--description ...] [--when-to-use ...]
 skill-plus list             [--pretty]
 skill-plus feedback         [--pretty]
 skill-plus promote <name>   [--to <user>/<repo>] [--no-dry-run] [--keep-local]
+skill-plus globalize <name> [--no-dry-run] [--keep-local] [--force]
+skill-plus localize <name>  [--no-dry-run] [--keep-local] [--force]
+skill-plus where <name>
+skill-plus team-sync <name> [--no-dry-run] [--force]
+skill-plus collisions       [--no-dry-run] [--auto] [--rename name:scope:new-name]...
 skill-plus --version
 ```
 
@@ -74,6 +79,73 @@ skill-plus promote railway-probe --to osouthgate/agent-plus-skills --no-dry-run
 ```
 
 Validates the skill against the contract, copies the directory into your local marketplace clone, adds `{name, version, path, obviates}` to `marketplace.json`'s `skills` array, removes the project-local copy unless `--keep-local`. Dry-run by default.
+
+## Scope topology (v0.3.0)
+
+Skills can live in three places: **project** (`<repo>/.claude/skills/<name>/`), **global** (`~/.claude/skills/<name>/`), and **plugin-installed** (`~/.claude/plugins/cache/**/skills/<name>/`). Five subcommands move skills between scopes and resolve name collisions. All five default to **dry-run**; pass `--no-dry-run` to actually write.
+
+### where — three-tier scope resolver
+
+```bash
+skill-plus where my-skill --pretty
+```
+
+Walks all three tiers and reports every location, plus a `resolution_hint` reflecting Claude Code's documented loader preference (`project > global > plugin`). Read-only; never writes. Use this to answer "why am I not seeing my skill" or "is this skill colliding with something."
+
+### globalize — move project skill to your user scope
+
+```bash
+skill-plus globalize my-skill --no-dry-run
+```
+
+Moves `<repo>/.claude/skills/my-skill/` to `~/.claude/skills/my-skill/`. With `--keep-local`, copies instead of moves so the project copy stays. With `--force`, overwrites an existing global skill of the same name. Cross-volume safe via `shutil.move`.
+
+### localize — pull a global skill into the repo
+
+```bash
+skill-plus localize my-skill --no-dry-run
+```
+
+Symmetric mirror of `globalize`. Source `~/.claude/skills/<name>/`, destination `<repo>/.claude/skills/<name>/`. Same flags.
+
+### team-sync — share a personal skill with the team
+
+```bash
+skill-plus team-sync my-skill --no-dry-run
+```
+
+One-step alias for "share my personal skill with my team via the repo." Equivalent to `localize <name>` plus an emitted `commit_hint` field suggesting:
+
+```
+chore(skills): share my-skill via repo (was global)
+
+Was at ~/.claude/skills/my-skill/, now at .claude/skills/my-skill/
+so teammates pick it up automatically.
+```
+
+Does **not** invoke git — caller decides whether to commit.
+
+### collisions — detect and resolve name overlaps
+
+```bash
+# Interactive (default tty): prompts you per collision
+skill-plus collisions --no-dry-run
+
+# Non-interactive (CI / pipe): bails with suggested renames
+skill-plus collisions
+
+# Deterministic: project wins, global gets `-global` suffix
+skill-plus collisions --auto --no-dry-run
+
+# Scripted: explicit per-collision instruction (repeatable)
+skill-plus collisions --rename foo:global:foo-old --no-dry-run
+```
+
+UX modes (T1 + T3 in `2026-04-30-scope-topology.md`):
+- **Interactive (default tty + no flags):** prompts `[p=project, g=global, s=skip]` then asks for the new name.
+- **Non-interactive (no tty, no flags):** emits `verdict: "needs_user_input"` plus a `suggested_renames[]` block listing two candidates per collision (`-project`, `-global` suffixes). No FS writes.
+- **Explicit (`--rename name:scope:new-name`, repeatable):** validates the new name is legal (`^[a-zA-Z0-9_-]+$`) and doesn't collide; refuses otherwise.
+- **Auto (`--auto`):** project always wins; global side gets `-global` suffix. Deterministic, scriptable.
 
 ### install-cron — make it continuous
 

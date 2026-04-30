@@ -4,6 +4,21 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.3.0 - 2026-04-30
+
+### Added
+- **`globalize <name>`** — moves `<repo>/.claude/skills/<name>/` to `~/.claude/skills/<name>/`. Default is dry-run; `--no-dry-run` performs. `--keep-local` copies instead of moves. `--force` overwrites the destination. Cross-volume safe via `shutil.move`. Verdicts: `would_move | moved | would_copy | copied | error_source_missing | error_destination_exists | error_no_git_repo | error_invalid_name`.
+- **`localize <name>`** — symmetric mirror of `globalize`. Source `~/.claude/skills/<name>/`, destination `<repo>/.claude/skills/<name>/`. Same flags, same verdicts.
+- **`where <name>`** — read-only three-tier resolver. Walks `<repo>/.claude/skills/`, `~/.claude/skills/`, and `~/.claude/plugins/cache/**/skills/<name>/` (using each plugin's `.claude-plugin/plugin.json` for plugin name + version when present). Reports every location plus a `resolution_hint` (Claude Code's documented loader preference: `project > global > plugin`). Flags `collision: true` when the skill is defined in more than one tier.
+- **`team-sync <name>`** — one-step alias for "share my personal skill with the team via the repo." Equivalent to `localize <name>` plus an emitted `commit_hint` field with a suggested commit message. Does not invoke git — caller decides whether to commit.
+- **`collisions`** — detects collisions between project + global scopes and offers renames in four UX modes: interactive prompt (default tty), non-tty bail (emits `verdict: needs_user_input` + `suggested_renames[]` for every collision), explicit `--rename name:scope:new-name` (repeatable), and deterministic `--auto` (project wins, global side gets `-global` suffix). Validates that planned new names are legal (`^[a-zA-Z0-9_-]+$`) and don't collide with anything else. Default is dry-run; `--no-dry-run` performs.
+- **40 new tests** across `test_globalize.py` (8), `test_localize.py` (8), `test_where.py` (7), `test_team_sync.py` (6), `test_collisions.py` (11). Total: 127 passing.
+
+### Notes
+- Per-subcommand JSON envelopes (not a shared discriminator union) — distinct shapes already established by v0.2.0's `list --include-global` precedent. Each new subcommand emits the standard `tool: {name, version}` wrapper plus `verdict` and `dry_run` keys; errors use `verdict: "error_<reason>"` plus a human-readable `error` field.
+- Cross-platform: `pathlib` everywhere, `shutil.move` / `shutil.copytree` for cross-volume safety on Windows, utf-8 file I/O.
+- Plugin-cache walk in `where` resolves the marketplace-tier visibility gap that `list --include-global` couldn't surface in v0.2.0.
+
 ## 0.2.0 - 2026-04-30
 
 ### Added

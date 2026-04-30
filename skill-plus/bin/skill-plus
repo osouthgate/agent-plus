@@ -366,6 +366,7 @@ def _stub(name: str):
 
 SUBCOMMANDS = (
     "scan", "propose", "install-cron", "scaffold", "list", "feedback", "promote",
+    "globalize", "localize", "where", "team-sync", "collisions",
 )
 
 
@@ -470,6 +471,62 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--no-dry-run", dest="dry_run", action="store_false")
     sp.add_argument("--keep-local", action="store_true",
                     help="copy instead of move; project-local copy stays in place")
+    _add_envelope_args(sp)
+
+    # globalize (v0.14.0)
+    sp = sub.add_parser("globalize",
+                         help="move <repo>/.claude/skills/<name>/ to ~/.claude/skills/<name>/")
+    sp.add_argument("name")
+    sp.add_argument("--dry-run", action="store_true", default=True,
+                    help="print plan without writing (default: on)")
+    sp.add_argument("--no-dry-run", dest="dry_run", action="store_false")
+    sp.add_argument("--keep-local", action="store_true",
+                    help="copy instead of move; project copy stays in place")
+    sp.add_argument("--force", action="store_true",
+                    help="overwrite the destination if it exists")
+    _add_envelope_args(sp)
+
+    # localize (v0.14.0)
+    sp = sub.add_parser("localize",
+                         help="move ~/.claude/skills/<name>/ to <repo>/.claude/skills/<name>/")
+    sp.add_argument("name")
+    sp.add_argument("--dry-run", action="store_true", default=True,
+                    help="print plan without writing (default: on)")
+    sp.add_argument("--no-dry-run", dest="dry_run", action="store_false")
+    sp.add_argument("--keep-local", action="store_true",
+                    help="copy instead of move; global copy stays in place")
+    sp.add_argument("--force", action="store_true",
+                    help="overwrite the destination if it exists")
+    _add_envelope_args(sp)
+
+    # where (v0.14.0)
+    sp = sub.add_parser("where",
+                         help="report every scope (project, global, plugin) that defines <name>")
+    sp.add_argument("name")
+    _add_envelope_args(sp)
+
+    # team-sync (v0.14.0)
+    sp = sub.add_parser("team-sync",
+                         help="share a global skill with the team via the repo (localize + commit hint)")
+    sp.add_argument("name")
+    sp.add_argument("--dry-run", action="store_true", default=True,
+                    help="print plan without writing (default: on)")
+    sp.add_argument("--no-dry-run", dest="dry_run", action="store_false")
+    sp.add_argument("--force", action="store_true",
+                    help="overwrite the project destination if it exists")
+    _add_envelope_args(sp)
+
+    # collisions (v0.14.0)
+    sp = sub.add_parser("collisions",
+                         help="detect and resolve project/global skill name collisions")
+    sp.add_argument("--dry-run", action="store_true", default=True,
+                    help="print plan without writing (default: on)")
+    sp.add_argument("--no-dry-run", dest="dry_run", action="store_false")
+    sp.add_argument("--rename", action="append", default=[], metavar="SPEC",
+                    help="explicit rename: name:scope:new-name (repeatable). "
+                         "Example: --rename foo:global:foo-global")
+    sp.add_argument("--auto", action="store_true",
+                    help="deterministic: project wins, global gets '-global' suffix")
     _add_envelope_args(sp)
 
     return p
