@@ -25,6 +25,51 @@ INSTALL_DIR="${AGENT_PLUS_INSTALL_DIR:-$HOME/.local/bin}"
 # Primitives shipped from the framework marketplace.
 PRIMITIVES="agent-plus-meta repo-analyze diff-summary skill-feedback skill-plus"
 
+# ─── verb dispatcher ─────────────────────────────────────────────────────────
+#
+# Generic --<verb> dispatch skeleton. v0.13.0 only implements VERB=install
+# (the existing behaviour, the default verb when none is specified). The
+# upgrade/uninstall branches exist as stubs that exit 2 — v0.13.5 fills in
+# `--upgrade`, v0.15.0 fills in `--uninstall`. This refactor is no-op for
+# every existing invocation.
+#
+# Today:   install.sh [--dry-run] [--no-init] [--unattended]
+#          install.sh --help
+#          install.sh                                      (default = install)
+# Future:  install.sh --upgrade [flags]                    (v0.13.5)
+#          install.sh --uninstall [flags]                  (v0.15.0)
+
+VERB="install"
+# Peek at the first arg only — verbs are positional-leading, never deep in
+# the flag list. This keeps the parser unambiguous and lets the install verb
+# preserve flag order exactly as before.
+case "${1:-}" in
+    --upgrade)
+        VERB="upgrade"
+        shift
+        ;;
+    --uninstall)
+        VERB="uninstall"
+        shift
+        ;;
+esac
+
+dispatch_upgrade() {
+    echo "install.sh: agent-plus-meta upgrade not yet implemented; ships in v0.13.5" >&2
+    exit 2
+}
+
+dispatch_uninstall() {
+    echo "install.sh: agent-plus-meta uninstall not yet implemented; ships in v0.15.0" >&2
+    exit 2
+}
+
+case "$VERB" in
+    upgrade)   dispatch_upgrade ;;
+    uninstall) dispatch_uninstall ;;
+    install)   : ;; # fall through to existing install parser below
+esac
+
 DRY_RUN=0
 NO_INIT=0
 UNATTENDED=0
@@ -46,6 +91,8 @@ for arg in "$@"; do
         *)
             echo "install.sh: unknown argument: $arg" >&2
             echo "usage: sh install.sh [--dry-run] [--no-init] [--unattended]" >&2
+            echo "       sh install.sh --upgrade    (v0.13.5+)" >&2
+            echo "       sh install.sh --uninstall  (v0.15.0+)" >&2
             exit 2
             ;;
     esac

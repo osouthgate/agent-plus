@@ -4,6 +4,24 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.13.0 - 2026-04-30
+
+agent-plus-installer SKILL.md — trigger doctrine for Claude Code on *when* (and when NOT) to offer to install agent-plus on the user's behalf. Pure-markdown skill; the runtime is the existing `install.sh --unattended` one-liner shipped in v0.12.0. Plus: a no-op `--<verb>` dispatcher refactor of `install.sh` that gives v0.13.5 (`--upgrade`) and v0.15.0 (`--uninstall`) a clean plug-in surface.
+
+### Added
+
+- **`agent-plus-meta/skills/agent-plus-installer/SKILL.md`** — nested skill (per repo convention) with five trigger cues in `when_to_use`, each gated by a `command -v agent-plus-meta` probe AND a session-scope decline flag (`AGENT_PLUS_INSTALL_DECLINED`). Killer command is the single `curl … | sh -s -- --unattended` line; the install.sh → `agent-plus-meta init --non-interactive --auto` chain is documented under Architecture (the agent types one thing, not two). Five concrete safety rules (surface-never-auto-execute, per-invocation permission prompt, session-decline, no destructive flags without confirmation, report failures verbatim). Four explicit Do-NOT-use guards (already-installed, declined-this-session, false-positive trigger, sandbox/CI environment). `allowed-tools: Bash(curl:*) Bash(sh:*) Bash(agent-plus-meta:*)` — `Bash(install.sh:*)` deferred to the v0.13.5 upgrade skill.
+- **5 new tests** in `agent-plus-meta/test/test_installer_skill.py` covering frontmatter shape, canonical h2 sections, the locked `allowed-tools` regex, and the killer-command URL/flag shape.
+
+### Changed
+
+- **`install.sh` arg parser refactored into a `--<verb>` dispatcher** (~30 lines POSIX shell). VERB defaults to `install` (today's behaviour, byte-for-byte). `--upgrade` / `--uninstall` are recognised verbs that exit 2 with a "ships in v0.13.5 / v0.15.0" stub message. Behaviourally no-op for v0.13.0 — all 9 existing `test_install_script.py` assertions pass without modification. The refactor exists to give v0.13.5 (`--upgrade`) and v0.15.0 (`--uninstall`) a clean plug-in surface; integration is explicit.
+- `agent-plus-meta/.claude-plugin/plugin.json` version bumped 0.12.0 → 0.13.0.
+
+### Tests
+
+- 5 new (`test_installer_skill.py`). 9 existing install.sh tests still pass without edits. No new dependencies; stdlib unittest only; pathlib + UTF-8 throughout.
+
 ## 0.12.0 - 2026-04-30
 
 Persona-aware onboarding wizard. `agent-plus-meta init` is now interactive: detects user state, picks one of three first-run branches, offers cross-repo session mining, and ends with a coherent doctor verdict. `install.sh` chains into the wizard so `curl|sh` lands the user there immediately.
