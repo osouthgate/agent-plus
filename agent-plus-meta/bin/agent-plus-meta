@@ -3061,10 +3061,23 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
     checks_run += 1
     on_path = shutil.which(TOOL_NAME)
     bin_path = Path(__file__).resolve()
-    try:
-        executable = os.access(str(bin_path), os.X_OK)
-    except OSError:
-        executable = False
+    # `shutil.which` already verifies the candidate is executable on POSIX.
+    # If it found us on PATH, trust that. Otherwise fall back to a direct
+    # X_OK check against the bin file we're running from — but tolerate
+    # source-tree checkouts where the executable bit isn't set yet
+    # (e.g. fresh CI clones with core.fileMode=false): if the file exists
+    # and is readable, treat as effectively-executable since we're
+    # demonstrably running it.
+    if on_path is not None:
+        executable = True
+    else:
+        try:
+            executable = (
+                os.access(str(bin_path), os.X_OK)
+                or bin_path.is_file()
+            )
+        except OSError:
+            executable = False
     self_version = _plugin_version()
     # `version_known` is true when plugin.json was readable at runtime.
     # We don't compare against an external version, just confirm the manifest
@@ -3083,6 +3096,12 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
             "severity": "warn",
             "category": "self",
             "message": f"{TOOL_NAME} not found on PATH; install via install.sh or symlink the bin",
+        })
+    if not executable:
+        issues.append({
+            "severity": "error",
+            "category": "self",
+            "message": f"{TOOL_NAME} bin at {bin_path} is not executable; chmod 755 to fix",
         })
     if not version_known:
         issues.append({
