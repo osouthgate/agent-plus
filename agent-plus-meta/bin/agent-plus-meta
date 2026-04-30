@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-agent-plus — workspace bootstrap for the agent-plus plugin collection.
+agent-plus-meta — the meta plugin for the agent-plus framework. Workspace bootstrap, env-var readiness, identity cache, marketplace lifecycle, extensions.
 
 The meta plugin. Three subcommands, all emitting JSON wrapped in the
 standard `tool: {name, version}` envelope:
@@ -53,7 +53,7 @@ from typing import Any, Optional
 
 # ─── tool identity ────────────────────────────────────────────────────────────
 
-TOOL_NAME = "agent-plus"
+TOOL_NAME = "agent-plus-meta"
 
 
 @functools.lru_cache(maxsize=1)
@@ -154,7 +154,7 @@ def resolve_workspace(dir_flag: Optional[str] = None) -> tuple[Path, str]:
     if (cwd / WORKSPACE_DIRNAME).is_dir():
         return (cwd / WORKSPACE_DIRNAME).resolve(), "cwd"
     # Last-resort fallback for `init`: prefer cwd over home so a fresh
-    # `agent-plus init` in a non-git project lands locally rather than in
+    # `agent-plus-meta init` in a non-git project lands locally rather than in
     # the home dir. Read paths (envcheck/refresh) still respect skill-feedback's
     # ordering (home is the final fallback) — see _resolve_for_read.
     return (cwd / WORKSPACE_DIRNAME).resolve(), "cwd"
@@ -238,7 +238,7 @@ def load_env(env_file: Optional[str] = None) -> dict[str, str]:
 
 
 def die(msg: str, *, code: int = 1) -> None:
-    sys.stderr.write(f"agent-plus: {msg}\n")
+    sys.stderr.write(f"agent-plus-meta: {msg}\n")
     sys.exit(code)
 
 
@@ -503,7 +503,7 @@ def cmd_envcheck(args: argparse.Namespace) -> dict:
             payload["write_error"] = str(e)
     else:
         payload["note"] = (
-            f"workspace {workspace} not initialised; run `agent-plus init` first "
+            f"workspace {workspace} not initialised; run `agent-plus-meta init` first "
             "to persist env-status.json"
         )
 
@@ -1256,7 +1256,7 @@ def cmd_refresh(args: argparse.Namespace) -> dict:
             payload["write_error"] = str(e)
     else:
         payload["note"] = (
-            f"workspace {workspace} not initialised; run `agent-plus init` first "
+            f"workspace {workspace} not initialised; run `agent-plus-meta init` first "
             "to persist services.json"
         )
 
@@ -1329,7 +1329,7 @@ def cmd_list(args: argparse.Namespace) -> dict:
     # any subdir; fall back to walking up from the bin script's location.
     repo_root: Optional[Path] = _git_toplevel()
     if repo_root is None:
-        # Walk up from this script's parent; bin/agent-plus -> agent-plus/ -> repo.
+        # Walk up from this script's parent; bin/agent-plus-meta -> agent-plus-meta/ -> repo.
         cur = Path(__file__).resolve()
         for parent in cur.parents:
             if (parent / ".claude-plugin" / "marketplace.json").is_file():
@@ -1591,7 +1591,7 @@ def cmd_extensions_remove(args: argparse.Namespace) -> dict:
     written = _save_extensions(workspace, remaining)
 
     # Clean up any stale entry for this extension in services.json so the
-    # next `agent-plus list` / agent context reads don't show a service
+    # next `agent-plus-meta list` / agent context reads don't show a service
     # for a plugin the user just removed. Best-effort: a malformed or
     # missing services.json is not an error here — extensions.json is the
     # source of truth for "is it installed".
@@ -1647,7 +1647,7 @@ def cmd_extensions(args: argparse.Namespace) -> dict:
 
 # ─── marketplace ─────────────────────────────────────────────────────────────
 #
-# Phase 1 (slice 1): `agent-plus marketplace init <user>/<name>` only.
+# Phase 1 (slice 1): `agent-plus-meta marketplace init <user>/<name>` only.
 # Scaffolds a new `<user>/agent-plus-skills` repo's local files. Does NOT
 # run `gh repo create`; prints suggested follow-up invocations instead.
 # Install / update / list / remove are Phase 2 and live in a separate slice.
@@ -1689,7 +1689,7 @@ def _marketplace_readme(owner: str, name: str) -> str:
         "is declared in [`marketplace.json`](./marketplace.json) at the repo root.\n\n"
         "## Install\n\n"
         "```bash\n"
-        f"agent-plus marketplace install {owner}/{name}\n"
+        f"agent-plus-meta marketplace install {owner}/{name}\n"
         "```\n\n"
         "(Phase 2 — install is not implemented yet. For now, clone manually:)\n\n"
         "```bash\n"
@@ -1711,7 +1711,7 @@ def _marketplace_readme(owner: str, name: str) -> str:
 
 
 _MARKETPLACE_GITIGNORE = (
-    "# agent-plus marketplace\n"
+    "# agent-plus-meta marketplace\n"
     ".DS_Store\n"
     "Thumbs.db\n"
     "*.swp\n"
@@ -1734,7 +1734,7 @@ def _marketplace_changelog(owner: str, name: str) -> str:
         "Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.\n\n"
         "## Unreleased\n\n"
         f"## 0.1.0 - {today}\n\n"
-        f"Initial scaffold via `agent-plus marketplace init {owner}/{name}`.\n\n"
+        f"Initial scaffold via `agent-plus-meta marketplace init {owner}/{name}`.\n\n"
         "### Added\n\n"
         "- `marketplace.json` with empty `skills: []` and `agent_plus_version: \""
         + MARKETPLACE_AGENT_PLUS_RANGE
@@ -2262,7 +2262,7 @@ def _format_first_run_prompt(
 ) -> str:
     lines = [
         "",
-        f"=== agent-plus marketplace install: {owner}/{name} ===",
+        f"=== agent-plus-meta marketplace install: {owner}/{name} ===",
         f"  pinned SHA: {sha}",
         f"  plugins ({len(plugins)}):",
     ]
@@ -2378,7 +2378,7 @@ def cmd_marketplace_install(args: argparse.Namespace) -> dict:
         sys.stderr.write(
             f"\n[!] Marketplace installed but NOT accepted. Plugins from "
             f"{owner}/{name} will refuse to load until accepted.\n"
-            f"    To accept, run `agent-plus marketplace remove "
+            f"    To accept, run `agent-plus-meta marketplace remove "
             f"{owner}/{name}` and re-install, or set "
             f'`accepted_first_run: true` in '
             f"{target / MARKETPLACE_META_FILENAME}.\n\n"
@@ -2706,7 +2706,7 @@ def _update_one(state_dir: Path) -> dict:
     if apv_blocks:
         sys.stderr.write(
             f"[BLOCKED] {apv_msg}\n"
-            f"Upgrade agent-plus first, then re-run update.\n\n"
+            f"Upgrade agent-plus-meta first, then re-run update.\n\n"
         )
         return {
             "slug": slug,
@@ -3040,8 +3040,8 @@ def cmd_marketplace(args: argparse.Namespace) -> dict:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="agent-plus",
-        description="Workspace bootstrap for the agent-plus collection.",
+        prog="agent-plus-meta",
+        description="The meta plugin for the agent-plus framework — workspace bootstrap, env-var readiness, identity cache, marketplace lifecycle, extensions.",
     )
     p.add_argument("--version", action="store_true",
                    help="print plugin version and exit")
@@ -3118,7 +3118,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ── marketplace ────────────────────────────────────────────────────────
     s_market = sub.add_parser(
         "marketplace",
-        help="manage agent-plus marketplaces (init/install/list/update/remove/search/prefer)",
+        help="manage agent-plus-meta marketplaces (init/install/list/update/remove/search/prefer)",
         parents=[pretty_parent],
     )
     market_sub = s_market.add_subparsers(dest="marketplace_cmd")

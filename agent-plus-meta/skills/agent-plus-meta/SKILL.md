@@ -1,47 +1,47 @@
 ---
-name: agent-plus
-description: Workspace bootstrap for the agent-plus plugin collection. Creates `.agent-plus/` (one shared dir with skill-feedback), reports which sibling-plugin env vars are set (names only), and caches resolved project IDs / service handles into `services.json` so subsequent calls don't re-discover them. Use at session start, when env config changes, or when an agent asks "is X configured here?".
-when_to_use: Trigger at session start to bootstrap context. Trigger when the user asks "is hermes configured here?", "what env vars do I need?", "what github repo is this?", "what vercel projects do I have?", "what supabase projects can I see?", "what railway projects am I in?", "what linear teams am I on?", "set up agent-plus", "init agent-plus", or after the user edits `.env`. Trigger `agent-plus list` when the user asks "what plugins are installed", "show me agent-plus tools", "what can agent-plus do", "which plugin should I use for X", or any tool-discovery question — it returns marketplace.json + a per-plugin headline-commands preview in one call so you don't have to open every README. Trigger `agent-plus extensions` when the user asks "add an agent-plus extension", "register a custom refresh script", "list my extensions", "validate extensions config", or wants to plug a custom data source into `refresh` without modifying the meta plugin. Skip for actual plugin operations — once `agent-plus refresh` has cached identity, switch to the per-plugin CLI (`github-remote overview`, `vercel-remote overview`, `supabase-remote sql`, `railway-ops overview`, `linear-remote issues`, `langfuse-remote health`, etc.) for real work.
-allowed-tools: Bash(agent-plus:*)
+name: agent-plus-meta
+description: The meta plugin for the agent-plus framework. Workspace bootstrap, env-var readiness, identity cache, marketplace lifecycle, extensions. Creates `.agent-plus/` (one shared dir with skill-feedback / skill-plus), reports which sibling-plugin env vars are set (names only), and caches resolved project IDs / service handles into `services.json` so subsequent calls don't re-discover them. Use at session start, when env config changes, or when an agent asks "is X configured here?".
+when_to_use: Trigger at session start to bootstrap context. Trigger when the user asks "is hermes configured here?", "what env vars do I need?", "what github repo is this?", "what vercel projects do I have?", "what supabase projects can I see?", "what railway projects am I in?", "what linear teams am I on?", "set up agent-plus", "init agent-plus", or after the user edits `.env`. Trigger `agent-plus-meta list` when the user asks "what plugins are installed", "show me agent-plus tools", "what can agent-plus do", "which plugin should I use for X", or any tool-discovery question — it returns marketplace.json + a per-plugin headline-commands preview in one call so you don't have to open every README. Trigger `agent-plus-meta extensions` when the user asks "add an agent-plus extension", "register a custom refresh script", "list my extensions", "validate extensions config", or wants to plug a custom data source into `refresh` without modifying the meta plugin. Skip for actual plugin operations — once `agent-plus-meta refresh` has cached identity, switch to the per-plugin CLI (`github-remote overview`, `vercel-remote overview`, `supabase-remote sql`, `railway-ops overview`, `linear-remote issues`, `langfuse-remote health`, etc.) for real work.
+allowed-tools: Bash(agent-plus-meta:*)
 ---
 
 # agent-plus
 
 The meta plugin. Three subcommands, JSON output only. Use at session start to give the agent day-one context — installed plugin set, env-var readiness, resolved project IDs — without grep-mining the project for every fact.
 
-The binary lives at `${CLAUDE_SKILL_DIR}/../../bin/agent-plus`; the plugin loader auto-adds `bin/` to PATH, so call it as `agent-plus`.
+The binary lives at `${CLAUDE_SKILL_DIR}/../../bin/agent-plus-meta`; the plugin loader auto-adds `bin/` to PATH, so call it as `agent-plus-meta`.
 
 ## When to reach for this
 
-**At session start, run `agent-plus envcheck` once.** It tells you which plugins are configured in this workspace without you having to read every `.env` and README. If the user asks for a service you can see in `set:` use the corresponding plugin; otherwise, surface what's missing.
+**At session start, run `agent-plus-meta envcheck` once.** It tells you which plugins are configured in this workspace without you having to read every `.env` and README. If the user asks for a service you can see in `set:` use the corresponding plugin; otherwise, surface what's missing.
 
-After running `agent-plus refresh` once per session, treat `services.json` as the single source of truth for project IDs and service handles. Don't re-resolve.
+After running `agent-plus-meta refresh` once per session, treat `services.json` as the single source of truth for project IDs and service handles. Don't re-resolve.
 
 ```bash
 # Session-start bootstrap (run once)
-agent-plus init                      # idempotent; creates .agent-plus/ if missing
-agent-plus envcheck                  # which plugin env vars are set?
-agent-plus refresh                   # resolves github + vercel identity into services.json
+agent-plus-meta init                      # idempotent; creates .agent-plus/ if missing
+agent-plus-meta envcheck                  # which plugin env vars are set?
+agent-plus-meta refresh                   # resolves github + vercel identity into services.json
 
 # "Is X configured?" questions
-agent-plus envcheck --pretty | jq '.plugins["hermes-remote"].ready'
+agent-plus-meta envcheck --pretty | jq '.plugins["hermes-remote"].ready'
 ```
 
 ## Headline commands
 
 ```bash
-agent-plus init       [--dir PATH] [--pretty]   # also suggests matching skills from osouthgate/agent-plus-skills based on stack markers (vercel.json, supabase/, .github/workflows/, etc.)
-agent-plus envcheck   [--dir PATH] [--env-file PATH] [--pretty]
-agent-plus refresh    [--dir PATH] [--env-file PATH] [--plugin <name>]
+agent-plus-meta init       [--dir PATH] [--pretty]   # also suggests matching skills from osouthgate/agent-plus-skills based on stack markers (vercel.json, supabase/, .github/workflows/, etc.)
+agent-plus-meta envcheck   [--dir PATH] [--env-file PATH] [--pretty]
+agent-plus-meta refresh    [--dir PATH] [--env-file PATH] [--plugin <name>]
                       [--no-extensions | --extensions-only] [--pretty]
-agent-plus list       [--dir PATH] [--names-only] [--pretty]
-agent-plus extensions list|validate|add|remove [--dir PATH] [--pretty]
-agent-plus marketplace init    <user>/<name> [--path PATH] [--pretty]
-agent-plus marketplace install <user>/agent-plus-skills [--pretty]
-agent-plus marketplace list    [--pretty]
-agent-plus marketplace update  [<user>/<name>] [--pretty]
-agent-plus marketplace remove  <user>/<name> [--pretty]
-agent-plus --version
+agent-plus-meta list       [--dir PATH] [--names-only] [--pretty]
+agent-plus-meta extensions list|validate|add|remove [--dir PATH] [--pretty]
+agent-plus-meta marketplace init    <user>/<name> [--path PATH] [--pretty]
+agent-plus-meta marketplace install <user>/agent-plus-skills [--pretty]
+agent-plus-meta marketplace list    [--pretty]
+agent-plus-meta marketplace update  [<user>/<name>] [--pretty]
+agent-plus-meta marketplace remove  <user>/<name> [--pretty]
+agent-plus-meta --version
 ```
 
 All commands emit JSON wrapped in the standard `tool: {name, version}` envelope (pattern #6).
@@ -55,7 +55,7 @@ Resolution order (highest precedence first) — **identical to skill-feedback so
 3. `<cwd>/.agent-plus/` (cwd contains an existing `.agent-plus/`)
 4. `~/.agent-plus/` (last-resort fallback for read paths)
 
-Run `agent-plus envcheck` and look at the `source` field to see which rule fired.
+Run `agent-plus-meta envcheck` and look at the `source` field to see which rule fired.
 
 ## What lands on disk
 
@@ -72,14 +72,14 @@ Run `agent-plus envcheck` and look at the `source` field to see which rule fired
 
 ## Extensions (user-defined refresh handlers)
 
-`agent-plus refresh` runs both built-in handlers AND any user extensions registered in `<workspace>/extensions.json` by default. The contract: each extension's stdout must be a single JSON object with a `status` field (`ok` | `unconfigured` | `partial` | `error`); all other fields pass through verbatim. The orchestrator wraps it as `{plugin: "<name>", source: "extension", ...}` and merges into `services.<name>`. Names that collide with built-in plugins are rejected. See `agent-plus/README.md#Extensions` for the worked example. **agent-plus only orchestrates; the user owns the extension scripts themselves.**
+`agent-plus-meta refresh` runs both built-in handlers AND any user extensions registered in `<workspace>/extensions.json` by default. The contract: each extension's stdout must be a single JSON object with a `status` field (`ok` | `unconfigured` | `partial` | `error`); all other fields pass through verbatim. The orchestrator wraps it as `{plugin: "<name>", source: "extension", ...}` and merges into `services.<name>`. Names that collide with built-in plugins are rejected. See `agent-plus/README.md#Extensions` for the worked example. **agent-plus only orchestrates; the user owns the extension scripts themselves.**
 
 ```bash
-agent-plus extensions add --name X --command python3 --command-arg=script.py
-agent-plus extensions list
-agent-plus extensions validate
-agent-plus refresh --no-extensions     # skip them
-agent-plus refresh --extensions-only   # only run them
+agent-plus-meta extensions add --name X --command python3 --command-arg=script.py
+agent-plus-meta extensions list
+agent-plus-meta extensions validate
+agent-plus-meta refresh --no-extensions     # skip them
+agent-plus-meta refresh --extensions-only   # only run them
 ```
 
 ## What `refresh` covers
@@ -101,11 +101,11 @@ The `<user>/agent-plus-skills` convention. Five subcommands.
 
 ### `init` — scaffold a new marketplace repo
 
-`agent-plus marketplace init <user>/agent-plus-skills` writes `marketplace.json` (empty `skills: []`, `agent_plus_version: ">=0.5"`, `surface: "claude-code"`), `README.md`, MIT `LICENSE`, `.gitignore`, `CHANGELOG.md`. Runs `git init` if available. Prints — does NOT execute — `gh repo create` and `gh repo edit --add-topic` follow-up invocations.
+`agent-plus-meta marketplace init <user>/agent-plus-skills` writes `marketplace.json` (empty `skills: []`, `agent_plus_version: ">=0.5"`, `surface: "claude-code"`), `README.md`, MIT `LICENSE`, `.gitignore`, `CHANGELOG.md`. Runs `git init` if available. Prints — does NOT execute — `gh repo create` and `gh repo edit --add-topic` follow-up invocations.
 
 ```bash
-agent-plus marketplace init osouthgate/agent-plus-skills            # ./agent-plus-skills/
-agent-plus marketplace init osouthgate/agent-plus-skills --path /tmp/myrepo
+agent-plus-meta marketplace init osouthgate/agent-plus-skills            # ./agent-plus-skills/
+agent-plus-meta marketplace init osouthgate/agent-plus-skills --path /tmp/myrepo
 ```
 
 The `name` portion of the slug must be `agent-plus-skills` for v1.
@@ -113,7 +113,7 @@ The `name` portion of the slug must be `agent-plus-skills` for v1.
 ### `install` — clone + register a marketplace
 
 ```bash
-agent-plus marketplace install osouthgate/agent-plus-skills
+agent-plus-meta marketplace install osouthgate/agent-plus-skills
 ```
 
 Clones to a temp dir, validates `marketplace.json` (name, owner-vs-URL, semver-range against the framework, `surface`, every skill's path + plugin.json name/version match, optional SHA-256 checksums), pins the commit SHA, moves to `~/.agent-plus/marketplaces/<owner>-<name>/`, writes `.agent-plus-meta.json`, fires the **first-run review prompt**. Decline = installed but un-accepted; plugins refuse to load until accepted.
@@ -121,10 +121,10 @@ Clones to a temp dir, validates `marketplace.json` (name, owner-vs-URL, semver-r
 ### `list`, `update`, `remove`
 
 ```bash
-agent-plus marketplace list                              # what's installed locally
-agent-plus marketplace update                            # iterate every install, prompt per one
-agent-plus marketplace update osouthgate/agent-plus-skills
-agent-plus marketplace remove  osouthgate/agent-plus-skills
+agent-plus-meta marketplace list                              # what's installed locally
+agent-plus-meta marketplace update                            # iterate every install, prompt per one
+agent-plus-meta marketplace update osouthgate/agent-plus-skills
+agent-plus-meta marketplace remove  osouthgate/agent-plus-skills
 ```
 
 `update` prompts `Accept update from <old[:8]> to <new[:8]>? [y/N]`, fast-forwards, **re-arms `accepted_first_run`**. Refuses `--cron`. Blocks (does not prompt) when the upstream raises `agent_plus_version` past what the local framework supports.
@@ -137,7 +137,7 @@ agent-plus marketplace remove  osouthgate/agent-plus-skills
 4. No execution at install time — clone + JSON parse + filesystem move only. Nothing in the cloned repo runs.
 5. Optional checksum verification — when `marketplace.json` declares `checksums`, install computes deterministic SHA-256 over each plugin tar; mismatch aborts.
 
-`agent-plus refresh` walks `~/.agent-plus/marketplaces/` and **skips plugins from un-accepted marketplaces**, surfacing them under `marketplaces_skipped_unaccepted[]` in the envelope.
+`agent-plus-meta refresh` walks `~/.agent-plus/marketplaces/` and **skips plugins from un-accepted marketplaces**, surfacing them under `marketplaces_skipped_unaccepted[]` in the envelope.
 
 `AGENT_PLUS_MARKETPLACES_ROOT` env var overrides the default location (intended for tests).
 
@@ -168,19 +168,19 @@ agent-plus marketplace remove  osouthgate/agent-plus-skills
 ## Example session-start bootstrap
 
 ```bash
-agent-plus init --pretty
+agent-plus-meta init --pretty
 # {"tool":{"name":"agent-plus","version":"0.1.0"},
 #  "workspace":"/path/to/repo/.agent-plus",
 #  "source":"git",
 #  "created":["manifest.json","services.json","env-status.json"],
 #  "skipped":[]}
 
-agent-plus envcheck --pretty
+agent-plus-meta envcheck --pretty
 # {... "set":["GITHUB_TOKEN","VERCEL_TOKEN"],
 #      "missing":["LINEAR_API_KEY","SUPABASE_ACCESS_TOKEN", ...],
 #      "plugins":{"github-remote":{"ready":true,...}, ...}}
 
-agent-plus refresh --pretty
+agent-plus-meta refresh --pretty
 # {... "services":{"github-remote":{"owner":"osouthgate","repo":"agent-plus",
 #                                   "default_branch":"main", ...},
 #                  "vercel-remote":{"projects":[{"name":"...","id":"..."}], ...}}}

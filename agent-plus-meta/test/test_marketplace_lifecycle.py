@@ -24,7 +24,7 @@ from pathlib import Path
 
 def _load_module():
     here = Path(__file__).resolve()
-    bin_path = here.parent.parent / "bin" / "agent-plus"
+    bin_path = here.parent.parent / "bin" / "agent-plus-meta"
     loader = SourceFileLoader("agent_plus", str(bin_path))
     spec = importlib.util.spec_from_loader("agent_plus", loader)
     assert spec
@@ -34,7 +34,7 @@ def _load_module():
 
 
 ap = _load_module()
-BIN = Path(__file__).resolve().parent.parent / "bin" / "agent-plus"
+BIN = Path(__file__).resolve().parent.parent / "bin" / "agent-plus-meta"
 
 
 def _git(*args: str, cwd: Path) -> subprocess.CompletedProcess[str]:
