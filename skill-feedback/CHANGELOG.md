@@ -6,6 +6,40 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.4.0 - 2026-05-01
+
+Provenance-aware advisor + submit. Slots into the v0.15.5 framework release.
+
+### Added
+- **`skill-feedback feedback <name>` subcommand** — provenance-aware advisor that calls `skill-plus where <name>` to detect tier and emits a tier-appropriate `recommended_action`:
+  - **project / global tier** → `kind: "edit"` with the absolute SKILL.md path. The skill is user-authored; there's no upstream marketplace to file an issue against. The recommendation is to edit the SKILL.md directly using the recent feedback log as evidence.
+  - **plugin tier (marketplace)** → `kind: "submit"` with a copy-pasteable `skill-feedback submit <name>` command. The marketplace `repository` is auto-resolved from the cache plugin's `plugin.json`.
+  - **ambiguous (collision across tiers)** → `kind: "resolve_collision"` with `skill-plus collisions` as the next step.
+  - **unknown** → graceful no-action with install hint when skill-plus isn't on PATH.
+- **`_detect_skill_provenance(name)` helper** — single-source provenance detection. Subprocesses out to `skill-plus where`, parses its JSON envelope, and returns `{tier, locations, primary_path, marketplace_repo, edit_hint, collision, skill_plus_available, error}`. Used by `feedback`, `submit`, and `report`.
+- **`report` envelope now carries `provenance`** when scoped to a single skill (`--skill <name>`), so consumers don't need a second call to know whether to recommend edit vs submit. Best-effort — falls through silently when skill-plus is absent.
+
+### Changed
+- **`submit` is now provenance-aware (additive — `--repo` contract unchanged).** When `--repo` is omitted:
+  - `tier=plugin` → uses the auto-detected marketplace `repository` (replaces the legacy `_resolve_repo_from_plugin` probe for this tier).
+  - `tier=project` or `tier=global` → REFUSES with `result.error` plus `result.edit_hint` pointing at the SKILL.md. Old behaviour was a confusing "no plugin.json found" path.
+  - `tier=ambiguous` → REFUSES with the locations list and a hint to use `skill-plus collisions`.
+  - `tier=unknown` (skill-plus not installed, or skill not found anywhere) → falls back to the v0.3.0 `_resolve_repo_from_plugin` probe, preserving pre-0.4.0 behaviour for users who don't install skill-plus.
+- **Behaviour change**: a `submit` invocation against a project-tier or global-tier skill without `--repo` is now a hard refusal (with an actionable hint), where v0.3.0 would either silently succeed against an arbitrary `plugin.json#repository` it found, or land at "no repo resolved." This is a non-breaking change for the documented happy paths (marketplace skill + `--repo override + plugin.json with repository field).
+
+### Tests
+- 6 new tests in `TestProvenanceAwareFeedback` and `TestSubmitProvenanceAware`:
+  - `test_feedback_subcommand_project_tier` — mocked project provenance → `recommended_action.kind == "edit"`.
+  - `test_feedback_subcommand_plugin_tier` — mocked plugin provenance + plugin.json on disk → marketplace repo resolved, `kind == "submit"`.
+  - `test_feedback_subcommand_ambiguous_tier` — mocked collision → `kind == "resolve_collision"`.
+  - `test_feedback_subcommand_unknown_tier_skill_plus_unavailable` — `shutil.which("skill-plus") → None` → `kind == "no_action"` with install hint.
+  - `test_submit_refuses_on_project_skill_with_edit_hint` — project provenance + no `--repo` → refusal with `edit_hint`, no gh call.
+  - `test_submit_uses_provenance_marketplace_repo_when_no_explicit_repo` — plugin provenance + no `--repo` → repo auto-resolved.
+- Test suite: 44 → 50.
+
+### Cross-platform
+- Helper uses `subprocess.run([list], ...)` (no `shell=True`), `pathlib`, and utf-8 throughout. Works identically on Windows + macOS + Linux. Tests use `Path.parent` comparisons (not string `startswith`) to handle path separator normalisation on Windows.
+
 ## 0.3.0 - 2026-04-28
 
 `--version` output normalised to `<name> <semver>` shape.

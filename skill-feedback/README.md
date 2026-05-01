@@ -15,6 +15,7 @@ skill-feedback log <skill> --rating 1-5 --outcome success|partial|failure \
 skill-feedback show <skill> [--since 7d] [--limit 20]
 skill-feedback report [--skill <name>] [--since 30d] [--pretty]
 skill-feedback submit <skill> [--since 30d] [--no-dry-run] [--repo owner/name]
+skill-feedback feedback <skill>             # provenance-aware: edit vs submit advisor
 skill-feedback path  [--skill <name>]
 skill-feedback --version
 ```
@@ -27,7 +28,7 @@ skill-feedback --version
 $ skill-feedback log hermes-remote --rating 3 --outcome partial \
     --friction "no streaming chat support; fell back to curl + SSE"
 {
-  "tool": {"name": "skill-feedback", "version": "0.3.0"},
+  "tool": {"name": "skill-feedback", "version": "0.4.0"},
   "ok": true,
   "skill": "hermes-remote",
   "appended": "/repo/.agent-plus/skill-feedback/hermes-remote.jsonl",
@@ -38,14 +39,14 @@ $ skill-feedback log hermes-remote --rating 3 --outcome partial \
     "outcome": "partial",
     "friction": "no streaming chat support; fell back to curl + SSE",
     "session_id": "abc123",
-    "tool_version": "0.3.0",
+    "tool_version": "0.4.0",
     "schema": 1
   }
 }
 
 $ skill-feedback report --skill hermes-remote --since 30d --pretty
 {
-  "tool": {"name": "skill-feedback", "version": "0.3.0"},
+  "tool": {"name": "skill-feedback", "version": "0.4.0"},
   "window": "30d",
   "skills": [{
     "skill": "hermes-remote",
@@ -80,6 +81,49 @@ Highest precedence first:
 `skill-feedback path` prints the resolved root + the rule that fired (`source: env|git|cwd|home`). The `.agent-plus/` directory is the standard agent-plus convention — gitignore it for personal feedback, commit it to share with the team.
 
 `CLAUDE_SESSION_ID` is auto-attached to each entry when Claude Code sets it, so the author can correlate logs from one session.
+
+## Provenance-aware behavior (v0.4.0+)
+
+Skills live in three tiers, and the right action when feedback is bad differs by tier:
+
+| Tier | Where | Right action when feedback is poor |
+|---|---|---|
+| **project** | `<repo>/.claude/skills/<name>/` | Edit the SKILL.md directly. No upstream. |
+| **global** | `~/.claude/skills/<name>/` | Edit the SKILL.md directly. No upstream. |
+| **plugin** (marketplace) | `~/.claude/plugins/cache/**/skills/<name>/` | File a GitHub issue against the plugin's `repository`. |
+
+`skill-feedback feedback <name>` is the read-only advisor that tells you which action makes sense. It calls `skill-plus where <name>` under the hood, then emits a `recommended_action` envelope with a copy-pasteable `command`:
+
+```bash
+$ skill-feedback feedback my-local-helper --pretty
+{
+  "skill": "my-local-helper",
+  "provenance": {"tier": "project", "primary_path": "/repo/.claude/skills/my-local-helper", ...},
+  "feedback_summary": {"total_entries": 8, "ratings_avg": 2.5, ...},
+  "recommended_action": {
+    "kind": "edit",
+    "command": "$EDITOR /repo/.claude/skills/my-local-helper/SKILL.md",
+    "explanation": "This skill is project-tier (no upstream marketplace). Edit the SKILL.md directly. ..."
+  }
+}
+```
+
+`submit` is also provenance-aware as of v0.4.0. With no `--repo` flag:
+
+- **plugin tier** → repo auto-resolved from the marketplace plugin's `plugin.json#repository`.
+- **project / global tier** → hard refusal with an actionable `edit_hint`. The skill is user-authored; there's no upstream to file an issue against.
+- **ambiguous (collision across tiers)** → hard refusal with the locations list and `skill-plus collisions` as the next step.
+- **unknown** (skill-plus not installed, or skill not found anywhere) → falls back to the legacy `plugin.json` probe so users without skill-plus still get pre-0.4.0 behaviour.
+
+The explicit `--repo owner/name` flag still bypasses provenance detection, so the v0.3.0 contract is unchanged.
+
+**Dependency**: provenance auto-detection requires `skill-plus` on PATH. Install with:
+
+```bash
+claude plugin install skill-plus@agent-plus
+```
+
+If skill-plus isn't reachable, `feedback` and `submit` print a helpful install hint and degrade gracefully (`submit` falls back to the legacy `plugin.json` probe; `feedback` returns `kind: "no_action"`).
 
 ## Privacy + safety contract
 

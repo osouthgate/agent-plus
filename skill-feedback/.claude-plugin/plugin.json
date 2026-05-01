@@ -1,7 +1,7 @@
 {
   "name": "skill-feedback",
   "description": "Local-first agent self-assessment for Claude Code skills. After using a skill, the agent appends a structured rating + friction note to .agent-plus/skill-feedback/<skill>.jsonl. Skill authors aggregate locally with `report`, or bundle entries into a GitHub issue body for the skill's source repo with `submit`. No SaaS, no SDK.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": {
     "name": "Oliver Southgate",
     "url": "https://github.com/osouthgate"

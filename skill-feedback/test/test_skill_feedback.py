@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import io
 import json
@@ -658,6 +659,245 @@ class TestLimitZeroSemantics(unittest.TestCase):
         self.assertEqual(rc, 0)
         # default 50 is well above 7
         self.assertEqual(json.loads(out)["count"], 7)
+
+
+# ──────────────── provenance-aware feedback / submit (v0.4.0) ────────────────
+
+
+def _fake_proc(stdout: str, returncode: int = 0):
+    """Build a minimal CompletedProcess-like object for subprocess.run mocks."""
+    class _P:
+        pass
+    p = _P()
+    p.stdout = stdout
+    p.stderr = ""
+    p.returncode = returncode
+    return p
+
+
+class TestProvenanceAwareFeedback(unittest.TestCase):
+    """`skill-feedback feedback <name>` consults `skill-plus where` and emits
+    a tier-appropriate recommended action. We mock subprocess.run + which so
+    skill-plus is never actually invoked."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        # Pre-populate one log entry so feedback_summary has something to show.
+        env = {"SKILL_FEEDBACK_DIR": self.tmp.name}
+        _run("log", "demo", "--rating", "4", "--outcome", "success",
+             "--friction", "minor", env=env)
+        self.env_dir = self.tmp.name
+
+    def _patch_skill_plus(self, where_payload: dict, available: bool = True):
+        """Returns a context-manager-style tuple of patches to enter."""
+        def fake_which(name):
+            if name == "skill-plus":
+                return "/fake/bin/skill-plus" if available else None
+            return shutil.which(name)
+
+        def fake_run(cmd, *a, **kw):
+            if isinstance(cmd, list) and cmd and cmd[0] == "/fake/bin/skill-plus":
+                return _fake_proc(json.dumps(where_payload))
+            return subprocess.run(cmd, *a, **kw)
+
+        return (
+            patch.object(sf.shutil, "which", side_effect=fake_which),
+            patch.object(sf.subprocess, "run", side_effect=fake_run),
+        )
+
+    def test_feedback_subcommand_project_tier(self) -> None:
+        project_dir = "/repo/.claude/skills/demo"
+        payload = {
+            "verdict": "found",
+            "name": "demo",
+            "locations": [{"scope": "project", "path": project_dir}],
+            "resolution_hint": "project",
+            "collision": False,
+        }
+        p1, p2 = self._patch_skill_plus(payload)
+        with p1, p2:
+            args = argparse.Namespace(skill="demo", since="30d")
+            os.environ["SKILL_FEEDBACK_DIR"] = self.env_dir
+            try:
+                result = sf.cmd_feedback(args)
+            finally:
+                os.environ.pop("SKILL_FEEDBACK_DIR", None)
+        self.assertEqual(result["provenance"]["tier"], "project")
+        self.assertEqual(result["recommended_action"]["kind"], "edit")
+        self.assertIn("SKILL.md", result["provenance"]["edit_hint"])
+        # Path() may normalise separators (\ on Windows); compare via Path.
+        eh = Path(result["provenance"]["edit_hint"])
+        self.assertEqual(eh.parent, Path(project_dir))
+
+    def test_feedback_subcommand_plugin_tier(self) -> None:
+        # Build a fake plugin cache with a plugin.json that declares a repo.
+        tmp_root = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(tmp_root, ignore_errors=True))
+        plug = Path(tmp_root) / "vercel-remote"
+        skill_dir = plug / "skills" / "vercel-deploy"
+        skill_dir.mkdir(parents=True)
+        (plug / ".claude-plugin").mkdir()
+        (plug / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+            "name": "vercel-remote",
+            "version": "0.4.3",
+            "repository": "https://github.com/osouthgate/agent-plus-skills",
+        }))
+        payload = {
+            "verdict": "found",
+            "name": "vercel-deploy",
+            "locations": [{
+                "scope": "plugin",
+                "path": str(skill_dir),
+                "plugin": "vercel-remote",
+                "version": "0.4.3",
+            }],
+            "resolution_hint": "plugin",
+            "collision": False,
+        }
+        p1, p2 = self._patch_skill_plus(payload)
+        with p1, p2:
+            args = argparse.Namespace(skill="vercel-deploy", since="30d")
+            os.environ["SKILL_FEEDBACK_DIR"] = self.env_dir
+            try:
+                result = sf.cmd_feedback(args)
+            finally:
+                os.environ.pop("SKILL_FEEDBACK_DIR", None)
+        self.assertEqual(result["provenance"]["tier"], "plugin")
+        self.assertEqual(result["provenance"]["marketplace_repo"],
+                         "osouthgate/agent-plus-skills")
+        self.assertEqual(result["recommended_action"]["kind"], "submit")
+
+    def test_feedback_subcommand_ambiguous_tier(self) -> None:
+        payload = {
+            "verdict": "found",
+            "name": "deploy",
+            "locations": [
+                {"scope": "project", "path": "/repo/.claude/skills/deploy"},
+                {"scope": "global", "path": "/home/u/.claude/skills/deploy"},
+            ],
+            "resolution_hint": "project",
+            "collision": True,
+        }
+        p1, p2 = self._patch_skill_plus(payload)
+        with p1, p2:
+            args = argparse.Namespace(skill="deploy", since="30d")
+            os.environ["SKILL_FEEDBACK_DIR"] = self.env_dir
+            try:
+                result = sf.cmd_feedback(args)
+            finally:
+                os.environ.pop("SKILL_FEEDBACK_DIR", None)
+        self.assertEqual(result["provenance"]["tier"], "ambiguous")
+        self.assertTrue(result["provenance"]["collision"])
+        self.assertEqual(result["recommended_action"]["kind"],
+                         "resolve_collision")
+
+    def test_feedback_subcommand_unknown_tier_skill_plus_unavailable(self) -> None:
+        # skill-plus not on PATH → tier=unknown + helpful install message.
+        p1, p2 = self._patch_skill_plus({}, available=False)
+        with p1, p2:
+            args = argparse.Namespace(skill="demo", since="30d")
+            os.environ["SKILL_FEEDBACK_DIR"] = self.env_dir
+            try:
+                result = sf.cmd_feedback(args)
+            finally:
+                os.environ.pop("SKILL_FEEDBACK_DIR", None)
+        self.assertEqual(result["provenance"]["tier"], "unknown")
+        self.assertEqual(result["recommended_action"]["kind"], "no_action")
+        explanation = result["recommended_action"]["explanation"].lower()
+        self.assertIn("skill-plus", explanation)
+
+
+class TestSubmitProvenanceAware(unittest.TestCase):
+    """`submit` without --repo now consults `skill-plus where` and refuses
+    project/global skills with an actionable edit hint, while plugin-tier
+    skills auto-resolve their marketplace repo."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.env_dir = self.tmp.name
+        env = {"SKILL_FEEDBACK_DIR": self.env_dir}
+        _run("log", "myskill", "--rating", "5", "--outcome", "success",
+             env=env)
+
+    def _patch_skill_plus(self, where_payload: dict):
+        def fake_which(name):
+            if name == "skill-plus":
+                return "/fake/bin/skill-plus"
+            return shutil.which(name)
+
+        def fake_run(cmd, *a, **kw):
+            if isinstance(cmd, list) and cmd and cmd[0] == "/fake/bin/skill-plus":
+                return _fake_proc(json.dumps(where_payload))
+            return subprocess.run(cmd, *a, **kw)
+
+        return (
+            patch.object(sf.shutil, "which", side_effect=fake_which),
+            patch.object(sf.subprocess, "run", side_effect=fake_run),
+        )
+
+    def test_submit_refuses_on_project_skill_with_edit_hint(self) -> None:
+        proj_dir = "/repo/.claude/skills/myskill"
+        payload = {
+            "verdict": "found",
+            "name": "myskill",
+            "locations": [{"scope": "project", "path": proj_dir}],
+            "resolution_hint": "project",
+            "collision": False,
+        }
+        p1, p2 = self._patch_skill_plus(payload)
+        with p1, p2:
+            args = argparse.Namespace(
+                skill="myskill", since="30d", repo=None, dry_run=True,
+            )
+            os.environ["SKILL_FEEDBACK_DIR"] = self.env_dir
+            try:
+                result = sf.cmd_submit(args)
+            finally:
+                os.environ.pop("SKILL_FEEDBACK_DIR", None)
+        self.assertIn("error", result)
+        self.assertIn("project", result["error"].lower())
+        self.assertIn("edit_hint", result)
+        self.assertIn("SKILL.md", result["edit_hint"])
+        self.assertIsNone(result["repo"])
+        self.assertNotIn("issue_url", result)
+
+    def test_submit_uses_provenance_marketplace_repo_when_no_explicit_repo(self) -> None:
+        tmp_root = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(tmp_root, ignore_errors=True))
+        plug = Path(tmp_root) / "some-plugin"
+        skill_dir = plug / "skills" / "myskill"
+        skill_dir.mkdir(parents=True)
+        (plug / ".claude-plugin").mkdir()
+        (plug / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+            "name": "some-plugin",
+            "repository": "https://github.com/acme/widgets.git",
+        }))
+        payload = {
+            "verdict": "found",
+            "name": "myskill",
+            "locations": [{
+                "scope": "plugin",
+                "path": str(skill_dir),
+                "plugin": "some-plugin",
+            }],
+            "resolution_hint": "plugin",
+            "collision": False,
+        }
+        p1, p2 = self._patch_skill_plus(payload)
+        with p1, p2:
+            args = argparse.Namespace(
+                skill="myskill", since="30d", repo=None, dry_run=True,
+            )
+            os.environ["SKILL_FEEDBACK_DIR"] = self.env_dir
+            try:
+                result = sf.cmd_submit(args)
+            finally:
+                os.environ.pop("SKILL_FEEDBACK_DIR", None)
+        self.assertEqual(result["repo"], "acme/widgets")
+        self.assertNotIn("error", result)
+        self.assertEqual(result["provenance"]["tier"], "plugin")
 
 
 if __name__ == "__main__":
