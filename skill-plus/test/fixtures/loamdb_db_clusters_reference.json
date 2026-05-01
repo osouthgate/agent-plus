@@ -1,0 +1,362 @@
+{
+  "generator": "scripts/capture_loamdb_clusters.py",
+  "envelope_version": "1.1",
+  "stats": {
+    "files_scanned": 238,
+    "files_skipped": 0,
+    "tuples_collected": 27026,
+    "tier1_count": 13,
+    "total_invocations": 120,
+    "sql_invocations_seen": 455,
+    "unique_tier1": 13,
+    "unique_tier2": 21,
+    "parse_failures": 335
+  },
+  "tier1_clusters": [
+    {
+      "shape": "select: contents",
+      "count": 40,
+      "tier2": [
+        {
+          "select_cols": [],
+          "where_cols": [
+            "lifecycle",
+            "organization_id"
+          ],
+          "count": 7,
+          "sample_query": "SELECT o.id, o.name, (SELECT COUNT(*) FROM contents c WHERE c.organization_id = o.id AND c.lifecycle='ACTIVE') AS active_contents, (SELECT COUNT(*) FROM memories m WHERE m.organization_id = o.id) AS m",
+          "promotion_kind": "missing",
+          "recommended_name": "select contents"
+        },
+        {
+          "select_cols": [
+            "created_at",
+            "id",
+            "index_status",
+            "source_uri"
+          ],
+          "where_cols": [
+            "created_at",
+            "organization_id"
+          ],
+          "count": 2,
+          "sample_query": "SELECT o.id, o.name, (SELECT COUNT(*) FROM contents c WHERE c.organization_id = o.id AND c.lifecycle='ACTIVE') AS active_contents, (SELECT COUNT(*) FROM memories m WHERE m.organization_id = o.id) AS m",
+          "promotion_kind": "missing",
+          "recommended_name": "select contents"
+        },
+        {
+          "select_cols": [
+            "id",
+            "source_uri"
+          ],
+          "where_cols": [
+            "lifecycle",
+            "organization_id"
+          ],
+          "count": 2,
+          "sample_query": "SELECT o.id, o.name, (SELECT COUNT(*) FROM contents c WHERE c.organization_id = o.id AND c.lifecycle='ACTIVE') AS active_contents, (SELECT COUNT(*) FROM memories m WHERE m.organization_id = o.id) AS m",
+          "promotion_kind": "missing",
+          "recommended_name": "select contents"
+        },
+        {
+          "select_cols": [
+            "organization_id"
+          ],
+          "where_cols": [
+            "lifecycle"
+          ],
+          "count": 2,
+          "sample_query": "SELECT o.id, o.name, (SELECT COUNT(*) FROM contents c WHERE c.organization_id = o.id AND c.lifecycle='ACTIVE') AS active_contents, (SELECT COUNT(*) FROM memories m WHERE m.organization_id = o.id) AS m",
+          "promotion_kind": "missing",
+          "recommended_name": "select contents"
+        },
+        {
+          "select_cols": [
+            "id",
+            "name"
+          ],
+          "where_cols": [],
+          "count": 2,
+          "sample_query": "SELECT o.id, o.name, (SELECT COUNT(*) FROM contents c WHERE c.organization_id = o.id AND c.lifecycle='ACTIVE') AS active_contents, (SELECT COUNT(*) FROM memories m WHERE m.organization_id = o.id) AS m",
+          "promotion_kind": "missing",
+          "recommended_name": "select contents"
+        },
+        {
+          "select_cols": [
+            "id"
+          ],
+          "where_cols": [
+            "id"
+          ],
+          "count": 2,
+          "sample_query": "SELECT o.id, o.name, (SELECT COUNT(*) FROM contents c WHERE c.organization_id = o.id AND c.lifecycle='ACTIVE') AS active_contents, (SELECT COUNT(*) FROM memories m WHERE m.organization_id = o.id) AS m",
+          "promotion_kind": "missing",
+          "recommended_name": "select contents"
+        }
+      ]
+    },
+    {
+      "shape": "select: columns",
+      "count": 13,
+      "tier2": [
+        {
+          "select_cols": [
+            "column_name"
+          ],
+          "where_cols": [
+            "table_name"
+          ],
+          "count": 5,
+          "sample_query": "SELECT column_name FROM information_schema.columns WHERE table_name = 'contents' ORDER BY ordinal_position",
+          "promotion_kind": "missing",
+          "recommended_name": "select columns"
+        },
+        {
+          "select_cols": [
+            "column_name"
+          ],
+          "where_cols": [
+            "table_name",
+            "table_schema"
+          ],
+          "count": 3,
+          "sample_query": "SELECT column_name FROM information_schema.columns WHERE table_name = 'contents' ORDER BY ordinal_position",
+          "promotion_kind": "missing",
+          "recommended_name": "select columns"
+        }
+      ]
+    },
+    {
+      "shape": "select: connector_connections",
+      "count": 10,
+      "tier2": [
+        {
+          "select_cols": [
+            "connection_id",
+            "enabled",
+            "last_sweep_at"
+          ],
+          "where_cols": [
+            "connection_id"
+          ],
+          "count": 2,
+          "sample_query": "SELECT id, organization_id, connector_id, enabled, created_at, updated_at FROM connector_connections WHERE connector_id = 'gmail' ORDER BY updated_at DESC LIMIT 10",
+          "promotion_kind": "missing",
+          "recommended_name": "select connector_connections"
+        }
+      ]
+    },
+    {
+      "shape": "select: chunk_sets,content_chunks",
+      "count": 8,
+      "tier2": [
+        {
+          "select_cols": [
+            "id"
+          ],
+          "where_cols": [
+            "content_id"
+          ],
+          "count": 5,
+          "sample_query": "SELECT cs.content_id, cc.id AS chunk_id, (cc.embedding IS NULL) AS emb_null, (cc.text_vector IS NULL) AS tsv_null, cc.index_status, cc.lifecycle, LEFT(cc.text, 80) AS preview FROM content_chunks cc JO",
+          "promotion_kind": "missing",
+          "recommended_name": "select chunk_sets"
+        }
+      ]
+    },
+    {
+      "shape": "select: chunk_sets,content_chunks,contents",
+      "count": 8,
+      "tier2": [
+        {
+          "select_cols": [],
+          "where_cols": [
+            "lifecycle",
+            "organization_id"
+          ],
+          "count": 3,
+          "sample_query": "SELECT (cc.text_vector @@ plainto_tsquery('english', 'sniffcanary42')) AS matches, (cc.text_vector @@ plainto_tsquery('english', 'octet-stream')) AS matches_hyphen, (c.metadata->>'prov:invalidatedAtTi",
+          "promotion_kind": "missing",
+          "recommended_name": "select contents"
+        },
+        {
+          "select_cols": [
+            "content_id",
+            "id"
+          ],
+          "where_cols": [
+            "organization_id",
+            "text_vector"
+          ],
+          "count": 2,
+          "sample_query": "SELECT (cc.text_vector @@ plainto_tsquery('english', 'sniffcanary42')) AS matches, (cc.text_vector @@ plainto_tsquery('english', 'octet-stream')) AS matches_hyphen, (c.metadata->>'prov:invalidatedAtTi",
+          "promotion_kind": "missing",
+          "recommended_name": "select contents"
+        }
+      ]
+    },
+    {
+      "shape": "select: sync_runs",
+      "count": 6,
+      "tier2": [
+        {
+          "select_cols": [
+            "completed_at",
+            "connection_id",
+            "id",
+            "organization_id",
+            "records_synced",
+            "started_at",
+            "status"
+          ],
+          "where_cols": [],
+          "count": 3,
+          "sample_query": "SELECT id, organization_id, connection_id, feed_id, status, started_at, records_synced FROM sync_runs ORDER BY started_at DESC LIMIT 5;",
+          "promotion_kind": "missing",
+          "recommended_name": "select sync_runs"
+        },
+        {
+          "select_cols": [
+            "completed_at",
+            "connection_id",
+            "id",
+            "records_synced",
+            "started_at",
+            "status"
+          ],
+          "where_cols": [],
+          "count": 2,
+          "sample_query": "SELECT id, organization_id, connection_id, feed_id, status, started_at, records_synced FROM sync_runs ORDER BY started_at DESC LIMIT 5;",
+          "promotion_kind": "missing",
+          "recommended_name": "select sync_runs"
+        }
+      ]
+    },
+    {
+      "shape": "select: pg_tables",
+      "count": 6,
+      "tier2": [
+        {
+          "select_cols": [
+            "tablename"
+          ],
+          "where_cols": [
+            "schemaname",
+            "tablename"
+          ],
+          "count": 2,
+          "sample_query": "SELECT tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE 'connector%' OR tablename LIKE 'sync%' OR tablename LIKE 'nango%') ORDER BY tablename",
+          "promotion_kind": "missing",
+          "recommended_name": "select pg_tables"
+        },
+        {
+          "select_cols": [
+            "schemaname",
+            "tablename"
+          ],
+          "where_cols": [
+            "tablename"
+          ],
+          "count": 2,
+          "sample_query": "SELECT tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE 'connector%' OR tablename LIKE 'sync%' OR tablename LIKE 'nango%') ORDER BY tablename",
+          "promotion_kind": "missing",
+          "recommended_name": "select pg_tables"
+        },
+        {
+          "select_cols": [
+            "tablename"
+          ],
+          "where_cols": [
+            "schemaname"
+          ],
+          "count": 2,
+          "sample_query": "SELECT tablename FROM pg_tables WHERE schemaname='public' AND (tablename LIKE 'connector%' OR tablename LIKE 'sync%' OR tablename LIKE 'nango%') ORDER BY tablename",
+          "promotion_kind": "missing",
+          "recommended_name": "select pg_tables"
+        }
+      ]
+    },
+    {
+      "shape": "select: tables",
+      "count": 4,
+      "tier2": [
+        {
+          "select_cols": [
+            "table_name"
+          ],
+          "where_cols": [
+            "table_schema"
+          ],
+          "count": 2,
+          "sample_query": "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name",
+          "promotion_kind": "missing",
+          "recommended_name": "select tables"
+        }
+      ]
+    },
+    {
+      "shape": "select: pg_extension",
+      "count": 4,
+      "tier2": [
+        {
+          "select_cols": [
+            "extname",
+            "extversion"
+          ],
+          "where_cols": [
+            "extname"
+          ],
+          "count": 4,
+          "sample_query": "select extname, extversion from pg_extension where extname='vector'; select table_name from information_schema.tables where table_schema='public' and table_name='_sync_state';",
+          "promotion_kind": "missing",
+          "recommended_name": "select pg_extension"
+        }
+      ]
+    },
+    {
+      "shape": "select: organizations",
+      "count": 3,
+      "tier2": [
+        {
+          "select_cols": [
+            "created_at",
+            "id",
+            "name"
+          ],
+          "where_cols": [],
+          "count": 2,
+          "sample_query": "SELECT COUNT(*) FROM organizations",
+          "promotion_kind": "missing",
+          "recommended_name": "select organizations"
+        }
+      ]
+    },
+    {
+      "shape": "select: content_chunks",
+      "count": 3,
+      "tier2": []
+    },
+    {
+      "shape": "select: __drizzle_migrations",
+      "count": 3,
+      "tier2": [
+        {
+          "select_cols": [
+            "created_at",
+            "hash"
+          ],
+          "where_cols": [],
+          "count": 2,
+          "sample_query": "SELECT hash, created_at FROM drizzle.__drizzle_migrations ORDER BY created_at DESC LIMIT 5;",
+          "promotion_kind": "missing",
+          "recommended_name": "select __drizzle_migrations"
+        }
+      ]
+    },
+    {
+      "shape": "select: entities",
+      "count": 3,
+      "tier2": []
+    }
+  ]
+}

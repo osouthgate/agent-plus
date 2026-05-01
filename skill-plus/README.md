@@ -25,6 +25,7 @@ skill-plus team-sync <name> [--no-dry-run] [--force]
 skill-plus collisions       [--no-dry-run] [--auto] [--rename name:scope:new-name]...
 skill-plus inquire <tool>   [--audit] [--plugin-path <path>] [--cli <name>]
                             [--no-cache] [--refresh] [--clear-cache]
+                            [--no-transcripts]
 skill-plus --version
 ```
 
@@ -149,7 +150,7 @@ UX modes (T1 + T3 in `2026-04-30-scope-topology.md`):
 - **Explicit (`--rename name:scope:new-name`, repeatable):** validates the new name is legal (`^[a-zA-Z0-9_-]+$`) and doesn't collide; refuses otherwise.
 - **Auto (`--auto`):** project always wins; global side gets `-global` suffix. Deterministic, scriptable.
 
-### inquire — probe a tool, audit a plugin (v0.4.0)
+### inquire — probe a tool, audit a plugin or skill (v0.5.0)
 
 ```bash
 # Generator mode: probe a tool, get a recommended skill scaffold.
@@ -158,18 +159,42 @@ skill-plus inquire github --pretty
 # Auditor mode: probe an existing plugin, get a paste-ready PR body.
 skill-plus inquire github-remote --audit \
   --plugin-path ~/dev/agent-plus-skills/github-remote --pretty
+
+# Auditor mode against a skill target (SKILL.md frontmatter parsed).
+skill-plus inquire my-skill --audit \
+  --plugin-path ~/.claude/skills/my-skill --pretty
+
+# Skip transcript sourcing (faster; drops usage signal).
+skill-plus inquire github --no-transcripts --pretty
 ```
 
-Runs the universal inquiry (Q1-Q7 — error surface, lookup keys, async `--wait`, `--json`, stays in lane, strips secrets, tool envelope) across every available source class (`cli`, `plugin`, `web`, `openapi`, `repo`). At least 2 sources required for non-`unknown` confidence. Web probe uses DuckDuckGo HTML — stdlib `urllib.request` + `html.parser`, no API key, no `pip install`. Q1/Q3 results carry maturity-ladder placement (current rung + recommended next rung) so the audit reads as "Plugin is at Level 1/3, here's Level 2" instead of binary "gap." Audit envelope's `pr_body_draft` field pastes straight into `gh pr create`.
+Runs the universal inquiry (Q1-Q7 -- error surface, lookup keys, async `--wait`, `--json`, stays in lane, strips secrets, tool envelope) across every available source class: `cli`, `plugin`, `web`, `openapi`, `repo`, and `transcripts`. At least 2 sources required for non-`unknown` confidence. Web probe uses DuckDuckGo HTML -- stdlib `urllib.request` + `html.parser`, no API key, no `pip install`. Q1/Q3 results carry maturity-ladder placement (current rung + recommended next rung) so the audit reads as "Plugin is at Level 1/3, here's Level 2" instead of binary "gap." Audit envelope's `pr_body_draft` field pastes straight into `gh pr create`.
+
+**Transcripts source.** Auto-discovered from `~/.claude/projects/`, `~/.gstack/projects/`, `~/.codex/sessions/`, `~/.cursor/chats/`. Extend via `~/.agent-plus/inquire-sources.json` + user-supplied adapters at `~/.agent-plus/inquire-adapters/<name>.py` (symlinks skipped). Use `--no-transcripts` or set `AGENT_PLUS_INQUIRE_NO_TRANSCRIPTS=1` to opt out. Raw command-string tuples are never persisted to envelope or cache -- clustering is in-memory only.
+
+**Two-tier clustering.** Tier 1 = `(verb, sorted(tables))` shape fingerprint (count >= 3). Tier 2 = `(select_cols, where_cols)` column fingerprint within parent (count >= 2). Generic SQL-grammar normalisation; no per-tool regex.
+
+**Type A/B/C promotion classifier.** Gaps are classified against the target's existing subcommands:
+- **A = Missing** -- no canned command; heavy raw use detected. Priority: `high`.
+- **B = Misaligned** -- canned command exists but doesn't cover the shape. Priority: `high`.
+- **C = Aligned** -- canned command covers it correctly. Verdict: `well_used` (no action needed).
+- Light usage of a missing/misaligned command downgrades priority to `low`.
+
+**Skill-as-target support.** `--audit` resolves against SKILL.md frontmatter in addition to `plugin.json`. Subcommand bin is auto-resolved from the `Bash(<name>:*)` allowed-tools entry. Both plugin targets and skill targets are fully supported.
+
+**ENVELOPE_VERSION 1.1** (additive only -- v1.0 consumers unaffected). New fields: `usage_signal`, `usage_clusters`, `promotions`, optional per-Q `usage_evidence` / `promotion_kind` / `priority`.
+
+Reference cluster output format: `skill-plus/test/fixtures/loamdb_db_clusters_reference.json` -- 12 KB structured cluster envelope, no raw command strings.
 
 Cache lives at `~/.agent-plus/inquire-cache/<tool>.json`, 7-day TTL. Bypass with `--no-cache`, `--refresh`, or `--clear-cache`.
 
-**Known limitations** (R7 — documented honest signal):
+**Known limitations** (R7 -- documented honest signal):
 
-- **Maturity ladder Level 4 ("platform-aware hybrid")** is not detectable from static analysis alone. The auto-detector caps at Level 3. railway-ops, for instance, sits at Level 4 in practice (it picks Railway's CLI for logs because Railway's GraphQL log queries are unreliable, but uses GraphQL for deploy metadata) — a deliberate choice the regex probes can't recognize. Plugins with this kind of platform-quirk awareness will be reported as Level 3 with no further upgrade suggestion. That's honest signal: we don't surface what we can't verify.
+- **Maturity ladder Level 4 ("platform-aware hybrid")** is not detectable from static analysis alone. The auto-detector caps at Level 3. railway-ops, for instance, sits at Level 4 in practice (it picks Railway's CLI for logs because Railway's GraphQL log queries are unreliable, but uses GraphQL for deploy metadata) -- a deliberate choice the regex probes can't recognize. Plugins with this kind of platform-quirk awareness will be reported as Level 3 with no further upgrade suggestion. That's honest signal: we don't surface what we can't verify.
 - **Q6 (`strips_secrets`) confidence is structurally capped at `medium`.** The behavioral CLI probe is deliberately skipped to avoid touching real auth state. The plugin-source probe (greps for `scrub`/`redact`/etc.) is the only authoritative source; `medium` is the highest honest rating without behavioral corroboration.
 - **`max_achievable_level` overrides are tool-specific and finite.** Currently only `vercel-remote: Q1=2` is registered (Vercel's API doesn't expose source-location records). Other platform ceilings will be added as we discover them. Plugin authors who hit a ceiling that isn't documented yet should file an issue with evidence.
-- **Web probe quality scales with vendor doc quality.** Mainstream tools (github, vercel, supabase) get rich corroboration. Niche tools or hand-rolled internal CLIs may turn up nothing on web search and degrade to `low_confidence` from CLI alone. Honest signal — inquiry quality varies by tool popularity.
+- **Web probe quality scales with vendor doc quality.** Mainstream tools (github, vercel, supabase) get rich corroboration. Niche tools or hand-rolled internal CLIs may turn up nothing on web search and degrade to `low_confidence` from CLI alone. Honest signal -- inquiry quality varies by tool popularity.
+- **Type B/C classification** requires subcommand introspection. The current implementation does not introspect argparse subcommands inside single-file CLIs, so plugins with implicit subcommands may show Type A gaps that are actually Type B or C.
 
 ### install-cron — make it continuous
 
@@ -227,4 +252,4 @@ Python 3.9+ stdlib only. No pip installs.
 python3 -m pytest skill-plus/test/ -v
 ```
 
-83 tests covering envelope contract, foundation helpers, scan (clustering / denylist / dedupe / redaction / malformed JSONL / consent gate / cap), propose (ranking / limit / name derivation / enhance-flip), scaffold (slot validation / from-candidate seeding / generated bin runs), list (frontmatter parser / contract checks / non-stdlib import detection), install-cron (POSIX + Windows idempotency / reinstall detection / consent), feedback (stream-1 aggregation / stream-2 fallback rate / discoverability gap), and promote (live marketplace shape / contract validation / dry-run default).
+263 tests (1 skipped) covering envelope contract, foundation helpers, scan (clustering / denylist / dedupe / redaction / malformed JSONL / consent gate / cap), propose (ranking / limit / name derivation / enhance-flip), scaffold (slot validation / from-candidate seeding / generated bin runs), list (frontmatter parser / contract checks / non-stdlib import detection), install-cron (POSIX + Windows idempotency / reinstall detection / consent), feedback (stream-1 aggregation / stream-2 fallback rate / discoverability gap), promote (live marketplace shape / contract validation / dry-run default), scope topology (globalize / localize / where / team-sync / collisions), and inquire (probe pipeline / source stacking / transcript clustering / Type A/B/C classification / priority calc / skill-kind detection / envelope shape).
