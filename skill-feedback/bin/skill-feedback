@@ -14,6 +14,7 @@ Subcommands (all emit JSON; --pretty for indented):
   report [--skill <name>] [--since 7d] [--limit 200]
   show <skill> [--since 1d] [--limit 50]
   submit <skill> [--since 30d] [--repo owner/name] [--dry-run]
+  feedback <skill>           provenance-aware "what should I do" advisor
   path [--skill <name>]
 
 Storage precedence (highest first):
@@ -369,13 +370,31 @@ def cmd_report(args: argparse.Namespace) -> dict:
             "top_friction": [{"text": t, "count": c} for t, c in friction_counter.most_common(5)],
         })
 
-    return {
+    payload: dict[str, Any] = {
         "since": args.since,
         "skill_filter": args.skill,
         "total_entries": len(entries),
         "skills": summaries,
         "storage_root": str(_storage_root()),
     }
+    # When scoped to a single skill, attach provenance so consumers can
+    # decide between edit / submit / resolve-collision without a second
+    # call. Best-effort — degrades gracefully when skill-plus is absent.
+    if args.skill:
+        try:
+            prov = _detect_skill_provenance(args.skill)
+            payload["provenance"] = {
+                "tier": prov["tier"],
+                "primary_path": prov["primary_path"],
+                "marketplace_repo": prov["marketplace_repo"],
+                "edit_hint": prov["edit_hint"],
+                "collision": prov["collision"],
+            }
+        except SystemExit:
+            raise
+        except Exception:
+            pass
+    return payload
 
 
 def cmd_path(args: argparse.Namespace) -> dict:
@@ -496,7 +515,54 @@ def cmd_submit(args: argparse.Namespace) -> dict:
     since = _parse_since(args.since) if args.since else None
     entries = _filter_since(_iter_entries(skill), since)
 
-    repo = args.repo or _resolve_repo_from_plugin(skill)
+    # Repo resolution order (v0.4.0+):
+    #   1. explicit --repo (unchanged contract)
+    #   2. provenance auto-detection via `skill-plus where`:
+    #        - tier=plugin → use detected marketplace repo
+    #        - tier=project|global → REFUSE with edit hint
+    #        - tier=ambiguous → REFUSE with collision hint
+    #        - tier=unknown → fall back to legacy plugin.json probe
+    repo: str | None = args.repo
+    refusal: dict | None = None
+    provenance_envelope: dict | None = None
+
+    if not repo:
+        prov = _detect_skill_provenance(skill)
+        provenance_envelope = {
+            "tier": prov["tier"],
+            "primary_path": prov["primary_path"],
+            "marketplace_repo": prov["marketplace_repo"],
+            "edit_hint": prov["edit_hint"],
+            "collision": prov["collision"],
+        }
+        tier = prov["tier"]
+        if tier == "plugin":
+            repo = prov["marketplace_repo"] or _resolve_repo_from_plugin(skill)
+        elif tier in ("project", "global"):
+            refusal = {
+                "error": (
+                    f"skill {skill!r} is {tier}-authored (no upstream "
+                    "marketplace); refusing to file an issue against "
+                    "nothing. Edit the SKILL.md directly."
+                ),
+                "edit_hint": prov["edit_hint"],
+                "tier": tier,
+            }
+        elif tier == "ambiguous":
+            refusal = {
+                "error": (
+                    f"skill {skill!r} exists in multiple tiers; resolve "
+                    "via `skill-plus collisions` or pass `--repo "
+                    "owner/name` explicitly."
+                ),
+                "tier": tier,
+                "locations": prov["locations"],
+            }
+        else:
+            # unknown — fall back to the pre-0.4.0 plugin.json probe so we
+            # keep working when skill-plus is absent.
+            repo = _resolve_repo_from_plugin(skill)
+
     body = _format_issue_body(skill, entries, args.since)
     title = f"skill-feedback: {len(entries)} entr{'y' if len(entries) == 1 else 'ies'} for {skill}"
 
@@ -509,6 +575,18 @@ def cmd_submit(args: argparse.Namespace) -> dict:
         "body": body,
         "dry_run": args.dry_run,
     }
+    if provenance_envelope is not None:
+        result["provenance"] = provenance_envelope
+    if refusal is not None:
+        # Provenance-driven refusal short-circuits everything else: no gh
+        # call, no body-write fallback. The user sees the actionable hint
+        # and either passes --repo explicitly or edits the SKILL.md.
+        result["error"] = refusal["error"]
+        if "edit_hint" in refusal and refusal["edit_hint"]:
+            result["edit_hint"] = refusal["edit_hint"]
+        if "locations" in refusal:
+            result["locations"] = refusal["locations"]
+        return result
 
     # Defence-in-depth at submit time. Regex scrubbing (in cmd_log) only
     # catches token shapes — it cannot catch PII, customer names, internal
@@ -587,6 +665,244 @@ def cmd_submit(args: argparse.Namespace) -> dict:
     return result
 
 
+# ─── provenance detection (v0.4.0+) ──────────────────────────────────────────
+
+# We delegate to `skill-plus where <name>` rather than re-implement the
+# three-tier walk. Keeps the framework's "primitives invoke each other" pattern
+# intact and makes provenance semantics single-sourced. If skill-plus isn't on
+# PATH, callers get tier="unknown" plus a clear hint to install it.
+
+def _detect_skill_provenance(name: str) -> dict:
+    """Auto-detect a skill's tier (project / global / plugin / ambiguous /
+    unknown) by shelling out to `skill-plus where <name> --json`.
+
+    Returns:
+        {
+          "tier": "project" | "global" | "plugin" | "ambiguous" | "unknown",
+          "locations": [...],            # raw `where` location list
+          "primary_path": str | None,    # absolute path to the resolved skill dir
+          "marketplace_repo": str | None,# "owner/name" — only when tier=plugin
+          "edit_hint": str | None,       # absolute path to SKILL.md (project/global)
+          "collision": bool,
+          "skill_plus_available": bool,
+          "error": str | None,           # populated when tier=unknown
+        }
+    """
+    base = {
+        "tier": "unknown",
+        "locations": [],
+        "primary_path": None,
+        "marketplace_repo": None,
+        "edit_hint": None,
+        "collision": False,
+        "skill_plus_available": False,
+        "error": None,
+    }
+
+    sp = shutil.which("skill-plus")
+    if not sp:
+        base["error"] = (
+            "skill-plus not installed; provenance auto-detection unavailable. "
+            "Install: `claude plugin install skill-plus@agent-plus` or pass "
+            "--repo explicitly."
+        )
+        return base
+    base["skill_plus_available"] = True
+
+    try:
+        proc = subprocess.run(
+            [sp, "where", name],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        base["error"] = f"skill-plus where failed to launch: {e}"
+        return base
+
+    # `where` writes its JSON envelope to stdout; informational lines go to
+    # stderr. Parse stdout as JSON; if that fails, try the last JSON-looking
+    # block. Anything else → unknown.
+    raw = proc.stdout.strip()
+    if not raw:
+        base["error"] = f"skill-plus where produced no output (rc={proc.returncode})"
+        return base
+    try:
+        env = json.loads(raw)
+    except json.JSONDecodeError:
+        # Fall back: scan for the last `{...}` block.
+        m = re.search(r"\{.*\}\s*$", raw, re.DOTALL)
+        if not m:
+            base["error"] = "skill-plus where returned non-JSON output"
+            return base
+        try:
+            env = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            base["error"] = "skill-plus where returned non-JSON output"
+            return base
+
+    locations = env.get("locations") or []
+    base["locations"] = locations
+
+    if not locations:
+        # not_found verdict.
+        return base
+
+    base["collision"] = bool(env.get("collision")) or len(locations) > 1
+
+    # `where` orders by resolution preference: project > global > plugin.
+    primary = locations[0]
+    base["primary_path"] = primary.get("path")
+
+    if base["collision"]:
+        base["tier"] = "ambiguous"
+    else:
+        scope = primary.get("scope")
+        if scope in ("project", "global", "plugin"):
+            base["tier"] = scope
+        else:
+            base["tier"] = "unknown"
+
+    # For project/global, surface the SKILL.md edit hint.
+    if base["tier"] in ("project", "global") and base["primary_path"]:
+        base["edit_hint"] = str(Path(base["primary_path"]) / "SKILL.md")
+
+    # For plugin tier, derive owner/name from the cache plugin's plugin.json.
+    if base["tier"] == "plugin":
+        repo = _resolve_marketplace_repo_from_location(primary)
+        if repo:
+            base["marketplace_repo"] = repo
+
+    return base
+
+
+def _resolve_marketplace_repo_from_location(loc: dict) -> str | None:
+    """Walk up from a plugin-tier location's path to find `.claude-plugin/plugin.json`
+    and parse `repository` into 'owner/name'. Returns None if not found."""
+    path_s = loc.get("path")
+    if not path_s:
+        return None
+    cur = Path(path_s)
+    for _ in range(6):
+        manifest = cur / ".claude-plugin" / "plugin.json"
+        if manifest.is_file():
+            try:
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+            repo = data.get("repository")
+            if isinstance(repo, str):
+                m = _REPO_URL_RE.search(repo)
+                if m:
+                    return f"{m.group(1)}/{m.group(2)}"
+            return None
+        if cur.parent == cur:
+            return None
+        cur = cur.parent
+    return None
+
+
+def cmd_feedback(args: argparse.Namespace) -> dict:
+    """Provenance-aware advisor: tells the user what action makes sense for
+    a skill given its tier (edit project/global SKILL.md, submit a marketplace
+    issue, or resolve a collision first). Read-only — never writes."""
+    skill = _validate_skill_name(args.skill)
+    prov = _detect_skill_provenance(skill)
+
+    # Aggregate recent feedback so the recommendation isn't blind.
+    since = _parse_since(args.since) if args.since else None
+    entries = _filter_since(_iter_entries(skill), since)
+    ratings = [e.get("rating") for e in entries if isinstance(e.get("rating"), int)]
+    outcomes_counter: Counter = Counter()
+    for e in entries:
+        o = e.get("outcome")
+        if o in VALID_OUTCOMES:
+            outcomes_counter[o] += 1
+
+    feedback_summary = {
+        "total_entries": len(entries),
+        "ratings_avg": round(sum(ratings) / len(ratings), 2) if ratings else None,
+        "outcomes": {o: outcomes_counter.get(o, 0) for o in VALID_OUTCOMES},
+    }
+
+    # Recommended action per tier.
+    tier = prov["tier"]
+    if tier in ("project", "global"):
+        edit_hint = prov["edit_hint"] or prov["primary_path"] or "<unknown>"
+        recommended = {
+            "kind": "edit",
+            "command": f"$EDITOR {edit_hint}",
+            "explanation": (
+                f"This skill is {tier}-tier (no upstream marketplace). "
+                f"Edit the SKILL.md directly. Use `skill-feedback report "
+                f"{skill} --since 30d` for evidence."
+            ),
+        }
+    elif tier == "plugin":
+        if prov["marketplace_repo"]:
+            recommended = {
+                "kind": "submit",
+                "command": f"skill-feedback submit {skill}",
+                "explanation": (
+                    f"This skill ships from marketplace plugin "
+                    f"{prov['marketplace_repo']}. File a feedback issue "
+                    f"upstream via `submit`."
+                ),
+            }
+        else:
+            recommended = {
+                "kind": "submit",
+                "command": f"skill-feedback submit {skill} --repo owner/name",
+                "explanation": (
+                    "This skill ships from a marketplace plugin but its "
+                    "plugin.json doesn't declare `repository`. Pass --repo "
+                    "owner/name explicitly."
+                ),
+            }
+    elif tier == "ambiguous":
+        recommended = {
+            "kind": "resolve_collision",
+            "command": "skill-plus collisions",
+            "explanation": (
+                f"Skill `{skill}` exists in multiple tiers. Resolve the "
+                f"collision first, then re-run `skill-feedback feedback "
+                f"{skill}`."
+            ),
+        }
+    else:  # unknown
+        if not prov["skill_plus_available"]:
+            recommended = {
+                "kind": "no_action",
+                "command": "claude plugin install skill-plus@agent-plus",
+                "explanation": (
+                    "skill-plus is not installed; provenance auto-detection "
+                    "unavailable. Install skill-plus, or pass --repo "
+                    "explicitly to `submit`."
+                ),
+            }
+        else:
+            recommended = {
+                "kind": "no_action",
+                "command": f"skill-plus where {skill}",
+                "explanation": (
+                    f"Skill `{skill}` was not found in any tier (project, "
+                    "global, plugin). Confirm the name spelling."
+                ),
+            }
+
+    return {
+        "skill": skill,
+        "provenance": {
+            "tier": prov["tier"],
+            "primary_path": prov["primary_path"],
+            "marketplace_repo": prov["marketplace_repo"],
+            "edit_hint": prov["edit_hint"],
+            "collision": prov["collision"],
+            "locations": prov["locations"],
+        },
+        "feedback_summary": feedback_summary,
+        "recommended_action": recommended,
+    }
+
+
 # ─── argparse ─────────────────────────────────────────────────────────────────
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -648,6 +964,17 @@ def _build_parser() -> argparse.ArgumentParser:
     g.add_argument("--no-dry-run", dest="dry_run", action="store_false",
                    help="actually open a GitHub issue (needs gh on PATH)")
 
+    s_feedback = sub.add_parser(
+        "feedback",
+        help="provenance-aware advisor: what action to take for a skill",
+        parents=[pretty_parent],
+    )
+    s_feedback.add_argument("skill")
+    s_feedback.add_argument(
+        "--since", default="30d",
+        help="aggregation window for the feedback summary (default 30d)",
+    )
+
     s_path = sub.add_parser("path", help="print storage paths",
                             parents=[pretty_parent])
     s_path.add_argument("--skill", help="show the per-skill jsonl path")
@@ -668,6 +995,7 @@ def main(argv: list[str] | None = None) -> int:
         "show": cmd_show,
         "report": cmd_report,
         "submit": cmd_submit,
+        "feedback": cmd_feedback,
         "path": cmd_path,
     }
     if args.cmd not in handlers:

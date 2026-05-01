@@ -4,6 +4,18 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.15.5 - 2026-05-01
+
+Companion release for `skill-feedback@0.4.0` — provenance-aware advisor + submit. agent-plus-meta itself is unchanged in this release; the framework version bump tracks the skill-feedback plugin upgrade so users see a single coordinated tag.
+
+### Companion changes (skill-feedback v0.4.0)
+- New `skill-feedback feedback <name>` subcommand: provenance-aware advisor that shells out to `skill-plus where` and tells the user the right action per tier (edit project/global SKILL.md vs file an issue against a marketplace plugin vs resolve a collision first).
+- `skill-feedback submit` is now provenance-aware (additive — explicit `--repo` flag still works as before). Refuses to file issues for project/global skills with an actionable edit hint; auto-resolves the marketplace repo for plugin-tier skills.
+- 6 new tests in skill-feedback (44 → 50). Total framework: 413 → 419.
+
+### Doc-drift
+- README badges synced: `version-0.15.4` → `version-0.15.5`; `tests-413` → `tests-419`. The doc-drift CI gate enforces this.
+
 ## 0.15.4 - 2026-05-01
 
 Closes the lifecycle-ring "install → healthy" semantic gap that v0.15.2 + v0.15.3 left open. Plus the doc-drift CI gate caught a real one — README badges fell behind through the v0.15.2/v0.15.3 churn.
