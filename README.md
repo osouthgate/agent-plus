@@ -2,7 +2,7 @@
 
 [![Website](https://img.shields.io/badge/website-youragentplus.xyz-a6e22e?style=flat&labelColor=1e1e1e)](https://youragentplus.xyz) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Version](https://img.shields.io/github/v/release/osouthgate/agent-plus?label=version&color=green)](https://github.com/osouthgate/agent-plus/releases) [![CI](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml) [![Tests](https://img.shields.io/badge/tests-526%20passing-brightgreen.svg)](#) [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#) [![Stdlib only](https://img.shields.io/badge/stdlib-only-yellowgreen.svg)](#)
 
-**Website:** [youragentplus.xyz](https://youragentplus.xyz) · **Install:** `curl -fsSL youragentplus.xyz/install.sh | sh`
+**Website:** [youragentplus.xyz](https://youragentplus.xyz) · **Install:** `curl -fsSL https://github.com/osouthgate/agent-plus/releases/latest/download/install.sh | sh`
 
 **Cut tokens. Kill context bloat. Run 20x faster.**
 
@@ -76,7 +76,7 @@ Deterministic shape in, deterministic shape out. Permanent across every future s
 </p>
 
 ```bash
-curl -fsSL youragentplus.xyz/install.sh | sh
+curl -fsSL https://github.com/osouthgate/agent-plus/releases/latest/download/install.sh | sh
 ```
 
 That's it. The wizard takes it from here.
@@ -155,7 +155,7 @@ $ skill-plus scaffold railway-probe --from-candidate 8ad12e3f9be1   # turn patte
 One-line install — drops you straight into the wizard:
 
 ```bash
-curl -fsSL youragentplus.xyz/install.sh | sh
+curl -fsSL https://github.com/osouthgate/agent-plus/releases/latest/download/install.sh | sh
 ```
 
 That installs all five primitives, then chains into `agent-plus-meta init`. The wizard detects your state (new to Claude Code? returning on a fresh machine? skill author with `.claude/skills/` already?) and runs the right first command for you. No flag-juggling, no doc-hunting.
@@ -190,13 +190,23 @@ agent-plus owns its off-ramp end-to-end. `install.sh --uninstall` (or `agent-plu
 
 ### Trust
 
-You're about to `curl | sh`. The short URL above proxies (HTTP 200) to a **pinned release tag** of this repo via Netlify edge. Pushing to `main` does NOT auto-ship a new install script — updates require an explicit website redeploy with a new tag.
+You're about to `curl | sh`. Two URLs work, both serve the same script body, both auto-track the latest published release (not `main`):
 
-**Audit-first install** if you want to read the script before running it:
-
+**Quick install** (branded URL on the marketing site):
 ```bash
-# pick any released tag
-curl -fsSL https://raw.githubusercontent.com/osouthgate/agent-plus/v0.16.0/install.sh \
+curl -fsSL youragentplus.xyz/install.sh | sh
+```
+Proxies (HTTP 200) via Netlify edge to the GitHub release-asset URL below.
+
+**GitHub-direct install** (no proxy, one fewer trust layer):
+```bash
+curl -fsSL https://github.com/osouthgate/agent-plus/releases/latest/download/install.sh | sh
+```
+Hits GitHub directly. The URL itself documents the source. `/releases/latest/` resolves to the most recent published release — pushing to `main` does NOT auto-ship a new install script.
+
+**Audit-first** if you want to read the script before running it:
+```bash
+curl -fsSL https://github.com/osouthgate/agent-plus/releases/latest/download/install.sh \
   | tee /tmp/install-agent-plus.sh \
   | less                       # read it
 sh /tmp/install-agent-plus.sh  # then run
@@ -204,7 +214,7 @@ sh /tmp/install-agent-plus.sh  # then run
 
 **What the script does:** detects your shell + OS, downloads the framework tarball from the matching GitHub release, drops the five primitives into `~/.claude/plugins/`, then chains into `agent-plus-meta init` (idempotent, runs the wizard).
 
-**What you're trusting** (in order): this repo and its release tags · `youragentplus.xyz` DNS · Netlify edge · your local TLS chain.
+**What you're trusting** (in order): this repo and its release tags · GitHub release infrastructure · your local TLS chain. The branded URL adds one layer (Netlify edge proxy) for those who use it.
 
 **Coming:** SHA-256 tarball verification (the install script will verify the downloaded payload against a checksums file served from a different origin). Specced internally, not yet implemented.
 
