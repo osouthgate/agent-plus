@@ -165,7 +165,7 @@ Standalone (no Claude Code): every `bin/<plugin>` is one stdlib Python 3 file. C
 | `~67 grep + ~60 ls` per cold start | `repo-analyze` — 1 call |
 | `git diff` + 5–20 Reads to triage a PR | `diff-summary --staged` — 1 call with role + risk per file |
 | Manual `gh pr view --json` + `gh run list` + `gh pr checks` triage | `github-remote pr <name>` — one structured overview |
-| "Did that skill work? Should I keep using it?" — never tracked | `skill-feedback log` after each use; aggregated reports + GitHub-issue submit |
+| "Did that skill work? Should I keep using it?" — never tracked | `skill-feedback log` after each use; `report` aggregates locally for any skill (project / global / marketplace); `submit` files a GitHub issue against the upstream repo when the skill came from a marketplace (auto-detected via `plugin.json#repository`). For your own authored skills with no upstream, just edit the SKILL.md — the feedback log gives you the evidence to act on. |
 | "I keep typing this by hand" — stays manual forever | `skill-plus scan` mines the session log, `scaffold` writes the skill |
 | UUID-shaped IDs leaking into the agent's context | Name-resolved IDs everywhere; UUIDs never enter the transcript |
 | Env-var values, tokens, secrets in command output | NAMES-only — values stripped on read paths, scrub-on-write on log paths |
