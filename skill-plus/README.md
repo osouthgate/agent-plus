@@ -23,6 +23,8 @@ skill-plus localize <name>  [--no-dry-run] [--keep-local] [--force]
 skill-plus where <name>
 skill-plus team-sync <name> [--no-dry-run] [--force]
 skill-plus collisions       [--no-dry-run] [--auto] [--rename name:scope:new-name]...
+skill-plus inquire <tool>   [--audit] [--plugin-path <path>] [--cli <name>]
+                            [--no-cache] [--refresh] [--clear-cache]
 skill-plus --version
 ```
 
@@ -146,6 +148,28 @@ UX modes (T1 + T3 in `2026-04-30-scope-topology.md`):
 - **Non-interactive (no tty, no flags):** emits `verdict: "needs_user_input"` plus a `suggested_renames[]` block listing two candidates per collision (`-project`, `-global` suffixes). No FS writes.
 - **Explicit (`--rename name:scope:new-name`, repeatable):** validates the new name is legal (`^[a-zA-Z0-9_-]+$`) and doesn't collide; refuses otherwise.
 - **Auto (`--auto`):** project always wins; global side gets `-global` suffix. Deterministic, scriptable.
+
+### inquire — probe a tool, audit a plugin (v0.4.0)
+
+```bash
+# Generator mode: probe a tool, get a recommended skill scaffold.
+skill-plus inquire github --pretty
+
+# Auditor mode: probe an existing plugin, get a paste-ready PR body.
+skill-plus inquire github-remote --audit \
+  --plugin-path ~/dev/agent-plus-skills/github-remote --pretty
+```
+
+Runs the universal inquiry (Q1-Q7 — error surface, lookup keys, async `--wait`, `--json`, stays in lane, strips secrets, tool envelope) across every available source class (`cli`, `plugin`, `web`, `openapi`, `repo`). At least 2 sources required for non-`unknown` confidence. Web probe uses DuckDuckGo HTML — stdlib `urllib.request` + `html.parser`, no API key, no `pip install`. Q1/Q3 results carry maturity-ladder placement (current rung + recommended next rung) so the audit reads as "Plugin is at Level 1/3, here's Level 2" instead of binary "gap." Audit envelope's `pr_body_draft` field pastes straight into `gh pr create`.
+
+Cache lives at `~/.agent-plus/inquire-cache/<tool>.json`, 7-day TTL. Bypass with `--no-cache`, `--refresh`, or `--clear-cache`.
+
+**Known limitations** (R7 — documented honest signal):
+
+- **Maturity ladder Level 4 ("platform-aware hybrid")** is not detectable from static analysis alone. The auto-detector caps at Level 3. railway-ops, for instance, sits at Level 4 in practice (it picks Railway's CLI for logs because Railway's GraphQL log queries are unreliable, but uses GraphQL for deploy metadata) — a deliberate choice the regex probes can't recognize. Plugins with this kind of platform-quirk awareness will be reported as Level 3 with no further upgrade suggestion. That's honest signal: we don't surface what we can't verify.
+- **Q6 (`strips_secrets`) confidence is structurally capped at `medium`.** The behavioral CLI probe is deliberately skipped to avoid touching real auth state. The plugin-source probe (greps for `scrub`/`redact`/etc.) is the only authoritative source; `medium` is the highest honest rating without behavioral corroboration.
+- **`max_achievable_level` overrides are tool-specific and finite.** Currently only `vercel-remote: Q1=2` is registered (Vercel's API doesn't expose source-location records). Other platform ceilings will be added as we discover them. Plugin authors who hit a ceiling that isn't documented yet should file an issue with evidence.
+- **Web probe quality scales with vendor doc quality.** Mainstream tools (github, vercel, supabase) get rich corroboration. Niche tools or hand-rolled internal CLIs may turn up nothing on web search and degrade to `low_confidence` from CLI alone. Honest signal — inquiry quality varies by tool popularity.
 
 ### install-cron — make it continuous
 

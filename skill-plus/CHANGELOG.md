@@ -4,6 +4,20 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.4.0 - 2026-05-01
+
+### Added
+- **`inquire <tool>`** — universal tool inquiry. Probes a tool across the seven framework patterns (Q1 errors_surface, Q2 lookup_keys, Q3 wait_async, Q4 json_output, Q5 stays_in_lane, Q6 strips_secrets, Q7 tool_envelope) using stacked source classes (`cli`, `plugin`, `web`, `openapi`, `repo`). Emits a JSON envelope with per-Q answer, confidence rating (`high` ≥2 sources agree; `medium` 1 authoritative source; `low` web-only; `none` unknown), evidence, and a `recommended_skill` scaffold. Web probe uses DuckDuckGo HTML (D1: stdlib `urllib.request` + `html.parser`; no API key, no third-party deps; 5s timeout, fail-soft to `unknown`).
+- **`inquire <plugin> --audit --plugin-path <path>`** — auditor mode. Same probe pipeline, run against an existing agent-plus marketplace plugin. Diffs current state vs achievable, surfaces gaps, places Q1/Q3 on a 4-rung maturity ladder ("Plugin is at Level 1/3 on Q1, recommended Level 2 → 3 because annotations API exists"), and emits a `pr_body_draft` field — paste-ready into `gh pr create` without manual editing. Supports `--cli <name>` to override the binary, `--spec <url>` for OpenAPI (Phase A: skeleton), `--repo <path>` for repo-signal probes (Phase A: skeleton).
+- **Probe cache** at `~/.agent-plus/inquire-cache/<tool>.json` (D2: 7-day TTL, one file per tool). Bypass flags: `--no-cache`, `--refresh`, `--clear-cache`. Cache key includes audit mode so generate vs audit results don't masquerade as each other.
+- **Cross-platform discipline:** pathlib everywhere, `subprocess.run([list], timeout=...)` form (10s for CLI probes, 5s for web), `MSYS_NO_PATHCONV=1` set on every probe subprocess so Git Bash doesn't rewrite leading-slash args (matches the v0.15.6 F2 fix).
+- **45 new tests** in `test_inquire.py` covering each probe in isolation, source stacking + confidence rules, cache hit/miss/expiry/clear, audit envelope shape, `pr_body_draft` content, `na` outcome for non-applicable Qs, maturity-ladder placement, DuckDuckGo HTML parser, and CLI integration. Total: 172 passing.
+
+### Notes
+- Phase A scope. Phase B (run audit across the 10 wrappers in `agent-plus-skills`) is a separate slice.
+- The inquiry's web probe is one of multiple sources — its job is corroboration, not primary truth. Source-stacking floor is `low` confidence (web alone) so a fresh inquiry with no creds + no CLI still returns actionable answers, never "5 unknowns out of 7."
+- `inquire` mention added to `skill-plus --help` (auto-surfaced via argparse subparser registration).
+
 ## 0.3.0 - 2026-04-30
 
 ### Added
