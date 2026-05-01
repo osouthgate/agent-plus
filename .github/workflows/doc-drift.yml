@@ -18,3 +18,19 @@ jobs:
           python-version: "3.11"
       - name: Run doc-drift checks
         run: python3 .github/scripts/doc-drift-check.py
+
+      - name: No private-staging residue
+        run: |
+          set -e
+          leaked=()
+          [ -f STAGING.md ]   && leaked+=("STAGING.md")
+          [ -d plans/todo ]   && leaked+=("plans/todo/")
+          if [ ${#leaked[@]} -ne 0 ]; then
+            echo "::error::Private staging files leaked into public repo:"
+            printf '  - %s\n' "${leaked[@]}"
+            echo ""
+            echo "These files belong only to the private plans-agent-plus staging clone."
+            echo "Delete them in a follow-up PR, or amend the cherry-pick commit."
+            exit 1
+          fi
+          echo "no private-staging residue."

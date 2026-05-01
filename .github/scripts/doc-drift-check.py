@@ -92,23 +92,42 @@ def check_version_matches_tag(version: str) -> list[str]:
 
 
 def check_readme_badges(version: str) -> list[str]:
-    """Root README badges must match VERSION and contain a tests count."""
+    """Root README must contain a version badge (static or dynamic) and a
+    tests count.
+
+    A dynamic badge — `img.shields.io/github/v/(tag|release)/...` or
+    `img.shields.io/badge/dynamic/...` — auto-syncs to the published tag
+    or to a file in the repo, so no manual bump is needed on every
+    release. We accept either form; static badges still get a hard
+    version-match check for back-compat.
+    """
     errors: list[str] = []
     readme = REPO_ROOT / "README.md"
     if not readme.is_file():
         errors.append("README.md missing at repo root")
         return errors
     text = readme.read_text(encoding="utf-8")
-    # Find the version badge line.
-    m = re.search(r"version-(\d+\.\d+\.\d+)-", text)
-    if not m:
-        errors.append("README.md: no `version-X.Y.Z-` badge found")
-    elif m.group(1) != version:
-        errors.append(
-            f"README.md version badge ({m.group(1)}) does not match "
-            f"VERSION ({version}). Update the `version-X.Y.Z-` badge."
-        )
-    # Find the tests badge.
+
+    has_dynamic = bool(re.search(
+        r"img\.shields\.io/(github/v/(tag|release)|badge/dynamic)",
+        text,
+    ))
+    if not has_dynamic:
+        m = re.search(r"version-(\d+\.\d+\.\d+)-", text)
+        if not m:
+            errors.append(
+                "README.md: no version badge found (either a dynamic "
+                "`img.shields.io/github/v/release/...` badge or a static "
+                "`version-X.Y.Z-` badge)"
+            )
+        elif m.group(1) != version:
+            errors.append(
+                f"README.md version badge ({m.group(1)}) does not match "
+                f"VERSION ({version}). Either update the `version-X.Y.Z-` "
+                f"badge or switch to a dynamic shields.io badge."
+            )
+
+    # Tests badge: static count, no auto-sync exists. Just require presence.
     tm = re.search(r"tests-(\d+)%20passing", text)
     if not tm:
         errors.append("README.md: no `tests-N%20passing` badge found")
