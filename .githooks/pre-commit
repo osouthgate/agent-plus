@@ -1,0 +1,84 @@
+#!/bin/sh
+# .githooks/pre-commit — agent-plus pre-commit hook
+#
+# Runs the test suite with `env -i` (minimal env, like CI) so the class of
+# bug where local-tests-pass-but-CI-fails gets caught before you push.
+# Bypass with: git commit --no-verify
+#
+# Activate (one-time per clone):
+#   sh scripts/install-precommit.sh
+# OR:
+#   git config core.hooksPath .githooks
+#
+# Why: agent-plus's tests can pass locally because the maintainer's `~/.env`
+# leaks into `load_env`, or because `LINEAR_API_KEY` is set in their shell.
+# CI runs with no such state. Two recent incidents:
+#   1. v0.12.0 test_decode_windows_drive_form — Linux assumption masked by
+#      Windows-passing test (commit 7397153 fix).
+#   2. v0.15.5 test_doctor_degraded_when_envvar_missing — verdict semantics
+#      changed in v0.15.4 but local tests passed because env vars triggered
+#      the partial-config path; CI's clean env hit the new healthy path
+#      (commit 5720536 fix).
+#
+# This hook prevents that bug class by running tests with `env -i` plus a
+# minimal whitelist (PATH for python3/sh, HOME for tempdir resolution,
+# AGENT_PLUS_NO_ENV_FILES=1 for envcheck hermeticity).
+#
+# Pure POSIX shell — no bashisms.
+
+set -e
+
+# Escape hatch: SKIP_PRECOMMIT_TESTS=1 git commit ... bypasses for hot fixes
+# that don't touch test-relevant surfaces. Prefer --no-verify for explicit
+# one-off bypasses; this env var is for repeated automation contexts.
+if [ "${SKIP_PRECOMMIT_TESTS:-0}" = "1" ]; then
+    echo "pre-commit: SKIP_PRECOMMIT_TESTS=1 — skipping test run."
+    exit 0
+fi
+
+# Optimization: skip if the staged diff doesn't touch any Python or shell
+# files. Avoids running ~50s of tests for pure documentation commits.
+CHANGED=$(git diff --cached --name-only)
+if ! echo "$CHANGED" | grep -qE '\.(py|sh)$|/test_|^test/|^.github/'; then
+    echo "pre-commit: no Python/shell/CI changes staged — skipping tests."
+    exit 0
+fi
+
+cat <<'EOF'
+pre-commit: running tests with clean env (PATH+HOME only).
+            Bypass with: git commit --no-verify  (or set SKIP_PRECOMMIT_TESTS=1)
+EOF
+
+# Resolve repo root so the hook works from any subdirectory.
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+# env -i: replace process env entirely. Whitelist:
+#   PATH                       — find python3, git, pytest
+#   HOME                       — Path.home() resolves correctly + tempfile root
+#   AGENT_PLUS_NO_ENV_FILES=1  — agent-plus-meta load_env skips .env walk-up,
+#                                 mirrors CI's hermeticity (no maintainer .env)
+# Don't pass any AGENT_PLUS_* state — keep it as clean as CI.
+CLEAN_ENV="env -i PATH=$PATH HOME=$HOME AGENT_PLUS_NO_ENV_FILES=1"
+
+echo
+echo "  [1/3] agent-plus-meta + skill-feedback unittest..."
+$CLEAN_ENV python3 -m unittest \
+    agent-plus-meta/test/test_agent_plus.py \
+    agent-plus-meta/test/test_marketplace_lifecycle.py \
+    agent-plus-meta/test/test_installer_skill.py \
+    agent-plus-meta/test/test_upgrade_check.py \
+    agent-plus-meta/test/test_upgrade.py \
+    agent-plus-meta/test/test_migrations.py \
+    agent-plus-meta/test/test_uninstall.py 2>&1 | tail -2
+
+echo
+echo "  [2/3] skill-plus + skill-feedback pytest..."
+$CLEAN_ENV python3 -m pytest skill-plus/test/ skill-feedback/test/ 2>&1 | tail -2
+
+echo
+echo "  [3/3] install.sh shell tests..."
+$CLEAN_ENV python3 -m unittest discover -s test -p "test_install_script.py" 2>&1 | tail -2
+
+echo
+echo "pre-commit: all tests passed under clean env."

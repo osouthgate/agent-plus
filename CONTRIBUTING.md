@@ -93,9 +93,23 @@ The script uses [`agg`](https://github.com/asciinema/agg) directly when on PATH,
 
 The cast is plain JSON (asciinema v2 format) — anyone with agg can render it without our build script.
 
+## Pre-commit hook (recommended)
+
+agent-plus's tests can pass locally but fail in CI when the maintainer's `~/.env` (real API keys) leaks into `load_env`, or when shell env vars trigger different code paths than CI's clean env. Two recent incidents (v0.12.0 `test_decode_windows_drive_form`, v0.15.5 `test_doctor_degraded_when_envvar_missing`) shipped passing local tests + red CI.
+
+The repo ships a versioned pre-commit hook at `.githooks/pre-commit` that re-runs the test suite under `env -i` (clean env, like CI) before every commit. **Activate it once per clone:**
+
+```bash
+sh scripts/install-precommit.sh
+```
+
+That sets `git config core.hooksPath .githooks`. From then on, `git commit` runs the hook unless bypassed via `--no-verify` or `SKIP_PRECOMMIT_TESTS=1`. Skips automatically for pure documentation commits (no `.py` / `.sh` / test/ changes staged).
+
+To deactivate: `git config --unset core.hooksPath`.
+
 ## Doc-drift discipline
 
-When you modify `bin/<name>` or `skills/<name>/SKILL.md`, you must also update `README.md` and append a `CHANGELOG.md` entry **before** the commit. The repo's `.claude/hooks/check-readme-drift.sh` enforces this on every Stop event.
+When you modify `bin/<name>` or `skills/<name>/SKILL.md`, you must also update `README.md` and append a `CHANGELOG.md` entry **before** the commit. The repo's `.claude/hooks/check-readme-drift.sh` enforces this on every Stop event. The `.github/workflows/doc-drift.yml` CI gate also asserts README badges match `VERSION` + actual test count + plugin.json semver — if they drift, the gate fails the PR.
 
 When you ADD a whole new plugin, also:
 - Add it to the root `README.md` plugin table.
