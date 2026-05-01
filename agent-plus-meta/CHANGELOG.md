@@ -4,6 +4,24 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.15.6 - 2026-05-01
+
+DX-audit follow-up: closes the two friction points the v0.15.5 live `/devex-review` surfaced. F1 is the version-surface fix (every fresh user hit it within seconds); F2 is the bad-`--dir` error (Git-Bash MSYS path-mangling + raw `WinError 5` instead of three-tier explanation).
+
+### Fixed
+
+- **F1 — `agent-plus-meta --version` now matches the umbrella framework version.** Pre-fix, plugin.json said `0.15.4` while root `VERSION` (read by `upgrade-check`) said `0.15.5`, so a fresh installer would run `--version` and immediately get an "upgrade available!" prompt for a release they had just pulled. Plugin.json bumped to `0.15.6` to match VERSION. New doc-drift gate (`check_meta_version_matches_root`) asserts they stay in sync going forward — agent-plus-meta is the framework's keystone plugin, so its version IS the umbrella version. Other plugins (skill-feedback, hermes-remote, etc.) keep independent versions; the gate only locks meta.
+- **F2 — `init --dir <bad-path>` now returns a structured three-tier envelope instead of leaking `WinError 5`.** The old failure mode: `{"error": "[WinError 5] Access is denied: 'C:\\Program Files\\Git\\this'"}` — both unhelpful and misleading (the `C:\Program Files\Git` prefix wasn't even in the user's command; Git Bash MSYS rewrote `/this` silently). New envelope:
+  ```json
+  {
+    "error": "could not create workspace directory",
+    "problem": "directory <PATH> is not writable",
+    "cause": "Git Bash MSYS may have rewritten the POSIX-style path you passed (\"/foo\") into a Windows path under the Git install prefix. The path the OS actually saw was: <RESOLVED>",
+    "fix": "use --dir with a path under your home directory, e.g.: agent-plus-meta init --dir ~/test/foo"
+  }
+  ```
+  MSYS detection fires only when the original arg started with `/` AND resolved under a Git/MSYS prefix. Non-MSYS bad paths (typo, perm denial under writable parent) get a cleaner two-tier message without the false MSYS hint.
+
 ## 0.15.5 - 2026-05-01
 
 Companion release for `skill-feedback@0.4.0` — provenance-aware advisor + submit. agent-plus-meta itself is unchanged in this release; the framework version bump tracks the skill-feedback plugin upgrade so users see a single coordinated tag.

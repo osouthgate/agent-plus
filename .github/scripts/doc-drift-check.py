@@ -7,6 +7,11 @@ Asserts:
      numeric tests badge (`tests-N%20passing`).
   3. Each plugin's `<plugin>/.claude-plugin/plugin.json#version` is valid
      semver (X.Y.Z).
+  3a. The keystone plugin `agent-plus-meta`'s `plugin.json#version` MUST
+      equal the root VERSION. Other plugins version independently; the
+      meta plugin IS the framework's umbrella, so a split between its
+      `--version` output and the umbrella tag would deceive every fresh
+      installer (the v0.15.5 friction that drove the F1 fix).
   4. The most recent CHANGELOG.md entry across the framework is dated
      within the last 7 days (sanity check that we're shipping, not just
      bumping).
@@ -132,6 +137,33 @@ def check_plugin_versions() -> list[str]:
     return errors
 
 
+def check_meta_version_matches_root(version: str) -> list[str]:
+    """agent-plus-meta IS the framework's keystone plugin — its plugin.json
+    version must match the root VERSION. If they drift, fresh users see
+    `agent-plus-meta --version` report a stale number while `upgrade-check`
+    fetches the (newer) root VERSION, surfacing a phantom "upgrade
+    available" prompt seconds after install. See F1 in the v0.15.5 DX
+    audit for the original incident.
+    """
+    errors: list[str] = []
+    pjson = REPO_ROOT / "agent-plus-meta" / ".claude-plugin" / "plugin.json"
+    if not pjson.is_file():
+        return errors  # already flagged by check_plugin_versions
+    try:
+        data = json.loads(pjson.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return errors  # already flagged
+    meta_v = data.get("version")
+    if meta_v != version:
+        errors.append(
+            f"agent-plus-meta/.claude-plugin/plugin.json#version ({meta_v!r}) "
+            f"!= root VERSION ({version!r}). The keystone plugin's version "
+            f"must match the umbrella — bump plugin.json on every framework "
+            f"release. (Other plugins version independently; meta does not.)"
+        )
+    return errors
+
+
 def check_recent_changelog() -> list[str]:
     """At least one plugin CHANGELOG must have an entry dated in the last
     7 days. Sanity check that we're shipping."""
@@ -172,6 +204,7 @@ def main() -> int:
     if version is not None:
         all_errors.extend(check_version_matches_tag(version))
         all_errors.extend(check_readme_badges(version))
+        all_errors.extend(check_meta_version_matches_root(version))
     all_errors.extend(check_plugin_versions())
     all_errors.extend(check_recent_changelog())
 

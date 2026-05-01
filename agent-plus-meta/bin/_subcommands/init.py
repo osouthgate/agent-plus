@@ -502,6 +502,97 @@ def _validate_manual_path(raw: str) -> tuple[Optional[Path], Optional[str]]:
     return p, None
 
 
+# ─── --dir validation (F2 — v0.15.6) ─────────────────────────────────────────
+
+
+# Common Git for Windows / MSYS install prefixes. If the user passed a POSIX
+# path like `/foo` and resolution lands under one of these, MSYS rewrote the
+# path before Python ever saw it. Detection is best-effort — false negatives
+# are acceptable (the error still names the resolved path), false positives
+# are not (we don't want to blame MSYS for a real perm denial).
+_MSYS_PREFIXES = (
+    r"C:\Program Files\Git",
+    r"C:\Program Files (x86)\Git",
+    r"C:\msys64",
+    r"C:\msys32",
+)
+
+
+def _looks_msys_mangled(dir_flag: str, resolved: Path) -> bool:
+    """True if the resolved path landed under a known Git/MSYS install
+    prefix on Windows. Indicates Git Bash's MSYS layer rewrote the arg
+    before Python saw it (a POSIX-absolute `/foo` becomes
+    `C:\\Program Files\\Git\\foo`).
+
+    Note we can't rely on `dir_flag.startswith("/")` — by the time Python
+    sees argv the rewrite has already happened and `args.dir` is the
+    mangled form. The resolved-path-prefix check is the only reliable
+    signal. False positive risk (user genuinely passing a path under
+    the Git install dir) is acceptable: that path also wouldn't be
+    writable, so the hint is still actionable.
+
+    Windows-only failure mode; on macOS/Linux this returns False.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        rstr = str(resolved)
+    except Exception:  # noqa: BLE001
+        return False
+    return any(rstr.startswith(p) for p in _MSYS_PREFIXES)
+
+
+def _safe_mkdir_or_raise(dir_flag: Optional[str], workspace: Path,
+                         host: Any) -> None:
+    """Create the workspace directory; on failure, raise StructuredError
+    (caught by host main) with a three-tier envelope.
+
+    Why this exists (F2 / v0.15.6): the old failure mode was to let
+    `workspace.mkdir(...)` raise `OSError`/`PermissionError`, which the
+    host's generic `except Exception` formatted as `{"error":
+    "[WinError 5] Access is denied: 'C:\\Program Files\\Git\\this'"}`
+    — both unhelpful (no fix hint) and misleading (the prefix wasn't in
+    the user's command; Git Bash MSYS rewrote it). This wrapper catches
+    the OSError and reformats with problem/cause/fix.
+
+    Note: we don't pre-check with `os.access(W_OK)` because on Windows
+    that doesn't actually check filesystem ACLs (only the read-only
+    attribute), so it returns True for `C:\\Program Files\\Git` even when
+    normal users can't write there. Try-then-catch is the only reliable
+    cross-platform check.
+    """
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # Only reframe when the user explicitly passed --dir; for the
+        # default resolution paths (git toplevel / cwd / home) the raw
+        # error is likely correct and a structured envelope would be
+        # misleading. Re-raise to let the host's generic handler format it.
+        if not dir_flag:
+            raise
+        parent = workspace.parent
+        msys_hint = ""
+        if _looks_msys_mangled(dir_flag, parent):
+            msys_hint = (
+                " The path landed under the Git install prefix, a strong "
+                "signal that Git Bash's MSYS layer rewrote a POSIX-style "
+                "path (e.g. /foo) into a Windows path before Python saw "
+                "it. To bypass MSYS path rewriting, pass a path that "
+                "starts with `~/` or with a Windows drive letter."
+            )
+        raise host.StructuredError(
+            "could not create workspace directory",
+            problem=f"directory {parent} is not writable",
+            cause=(
+                f"the OS rejected mkdir with: {exc}." + msys_hint
+            ),
+            fix=(
+                "use --dir with a path under your home directory, e.g.: "
+                "agent-plus-meta init --dir ~/test/foo"
+            ),
+        ) from exc
+
+
 # ─── main entry point ────────────────────────────────────────────────────────
 
 
@@ -522,7 +613,7 @@ def cmd_init(args: argparse.Namespace) -> dict:
 
     # ── 1. legacy bootstrap (preserves existing test contract) ──────────
     workspace, source = h.resolve_workspace(args.dir)
-    workspace.mkdir(parents=True, exist_ok=True)
+    _safe_mkdir_or_raise(args.dir, workspace, h)
 
     created: list[str] = []
     skipped: list[str] = []
