@@ -36,11 +36,13 @@ if [ "${SKIP_PRECOMMIT_TESTS:-0}" = "1" ]; then
     exit 0
 fi
 
-# Optimization: skip if the staged diff doesn't touch any Python or shell
-# files. Avoids running ~50s of tests for pure documentation commits.
+# Optimization: skip if the staged diff doesn't touch any code/test/CI/hook
+# surface. Avoids running ~50s of tests for pure documentation commits.
+# Includes .githooks/ and scripts/ so changes to the hook itself trigger
+# a self-test (otherwise we could land a broken hook).
 CHANGED=$(git diff --cached --name-only)
-if ! echo "$CHANGED" | grep -qE '\.(py|sh)$|/test_|^test/|^.github/'; then
-    echo "pre-commit: no Python/shell/CI changes staged — skipping tests."
+if ! echo "$CHANGED" | grep -qE '\.(py|sh)$|/test_|^test/|^.github/|^.githooks/|^scripts/|^install.sh$|^VERSION$'; then
+    echo "pre-commit: no code/test/CI/hook changes staged — skipping tests."
     exit 0
 fi
 
@@ -53,32 +55,76 @@ EOF
 REPO_ROOT=$(git rev-parse --show-toplevel)
 cd "$REPO_ROOT"
 
-# env -i: replace process env entirely. Whitelist:
-#   PATH                       — find python3, git, pytest
-#   HOME                       — Path.home() resolves correctly + tempfile root
-#   AGENT_PLUS_NO_ENV_FILES=1  — agent-plus-meta load_env skips .env walk-up,
-#                                 mirrors CI's hermeticity (no maintainer .env)
-# Don't pass any AGENT_PLUS_* state — keep it as clean as CI.
-CLEAN_ENV="env -i PATH=$PATH HOME=$HOME AGENT_PLUS_NO_ENV_FILES=1"
+# Mimic CI's hermeticity by stripping the maintainer's plugin-specific env
+# vars (the actual leak source) while preserving system state (PATH, HOME,
+# USERPROFILE on Windows, TEMP, TMPDIR, etc.) so Python's Path.home() and
+# tempfile work. This is more portable than `env -i HOME=$HOME` which
+# breaks on Windows Git Bash because Python looks at USERPROFILE first
+# and `env -i` strips it.
+#
+# Subshell keeps the unsets local so the rest of the hook still has the
+# maintainer's env if it needs to print things etc.
+clean_env() {
+    (
+        # Strip every env var that affects PLUGIN_ENV_SPEC readiness or the
+        # marketplaces root. Keep this list aligned with the test class's
+        # _clean_env helper at agent-plus-meta/test/test_agent_plus.py.
+        unset GITHUB_TOKEN GITHUB_REPO
+        unset VERCEL_TOKEN VERCEL_TEAM_ID
+        unset COOLIFY_URL COOLIFY_API_KEY
+        unset HCLOUD_TOKEN
+        unset HERMES_URL HERMES_CHAT_API_KEY
+        unset LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY LANGFUSE_BASE_URL LANGFUSE_HOST
+        unset OPENROUTER_API_KEY OPENROUTER_PROVISIONING_KEY
+        unset SUPABASE_ACCESS_TOKEN SUPABASE_PROJECT_REF SUPABASE_DB_URL
+        unset LINEAR_API_KEY
+        # AGENT_PLUS_NO_ENV_FILES=1 prevents the bin's load_env from walking
+        # up from cwd and finding the maintainer's ~/.env (which has the
+        # same plugin env vars we just stripped).
+        AGENT_PLUS_NO_ENV_FILES=1 "$@"
+    )
+}
 
-echo
-echo "  [1/3] agent-plus-meta + skill-feedback unittest..."
-$CLEAN_ENV python3 -m unittest \
-    agent-plus-meta/test/test_agent_plus.py \
-    agent-plus-meta/test/test_marketplace_lifecycle.py \
-    agent-plus-meta/test/test_installer_skill.py \
-    agent-plus-meta/test/test_upgrade_check.py \
-    agent-plus-meta/test/test_upgrade.py \
-    agent-plus-meta/test/test_migrations.py \
-    agent-plus-meta/test/test_uninstall.py 2>&1 | tail -2
+# Run a labelled test step. We can't pipe through `tail` because POSIX `set -e`
+# doesn't catch failures inside a pipeline (exit code is the LAST stage's).
+# Solution: write to a temp file, capture rc, then tail-print on success or
+# full-print + exit on failure. Tempfile cleaned up via trap.
+TMPOUT=$(mktemp)
+trap 'rm -f "$TMPOUT"' EXIT INT TERM HUP
 
-echo
-echo "  [2/3] skill-plus + skill-feedback pytest..."
-$CLEAN_ENV python3 -m pytest skill-plus/test/ skill-feedback/test/ 2>&1 | tail -2
+run_step() {
+    label="$1"
+    shift
+    echo
+    echo "  $label"
+    if "$@" > "$TMPOUT" 2>&1; then
+        tail -2 "$TMPOUT"
+    else
+        rc=$?
+        echo "  ✗ FAILED (rc=$rc) — full output below:"
+        echo
+        cat "$TMPOUT"
+        echo
+        echo "pre-commit: tests failed under clean env. Bypass with: git commit --no-verify"
+        exit "$rc"
+    fi
+}
 
-echo
-echo "  [3/3] install.sh shell tests..."
-$CLEAN_ENV python3 -m unittest discover -s test -p "test_install_script.py" 2>&1 | tail -2
+run_step "[1/3] agent-plus-meta + skill-feedback unittest..." \
+    clean_env python3 -m unittest \
+        agent-plus-meta/test/test_agent_plus.py \
+        agent-plus-meta/test/test_marketplace_lifecycle.py \
+        agent-plus-meta/test/test_installer_skill.py \
+        agent-plus-meta/test/test_upgrade_check.py \
+        agent-plus-meta/test/test_upgrade.py \
+        agent-plus-meta/test/test_migrations.py \
+        agent-plus-meta/test/test_uninstall.py
+
+run_step "[2/3] skill-plus + skill-feedback pytest..." \
+    clean_env python3 -m pytest skill-plus/test/ skill-feedback/test/
+
+run_step "[3/3] install.sh shell tests..." \
+    clean_env python3 -m unittest discover -s test -p "test_install_script.py"
 
 echo
 echo "pre-commit: all tests passed under clean env."
