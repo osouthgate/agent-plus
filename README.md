@@ -1,6 +1,8 @@
 # agent-plus
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Version](https://img.shields.io/github/v/release/osouthgate/agent-plus?label=version&color=green)](https://github.com/osouthgate/agent-plus/releases) [![CI](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml) [![Tests](https://img.shields.io/badge/tests-526%20passing-brightgreen.svg)](#) [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#) [![Stdlib only](https://img.shields.io/badge/stdlib-only-yellowgreen.svg)](#)
+[![Website](https://img.shields.io/badge/website-youragentplus.xyz-a6e22e?style=flat&labelColor=1e1e1e)](https://youragentplus.xyz) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Version](https://img.shields.io/github/v/release/osouthgate/agent-plus?label=version&color=green)](https://github.com/osouthgate/agent-plus/releases) [![CI](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml) [![Tests](https://img.shields.io/badge/tests-526%20passing-brightgreen.svg)](#) [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#) [![Stdlib only](https://img.shields.io/badge/stdlib-only-yellowgreen.svg)](#)
+
+**Website:** [youragentplus.xyz](https://youragentplus.xyz) · **Install:** `curl -fsSL youragentplus.xyz/install.sh | sh`
 
 **Cut tokens. Kill context bloat. Run 20x faster.**
 
@@ -74,12 +76,12 @@ Deterministic shape in, deterministic shape out. Permanent across every future s
 </p>
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/osouthgate/agent-plus/main/install.sh | sh
+curl -fsSL youragentplus.xyz/install.sh | sh
 ```
 
 That's it. The wizard takes it from here.
 
-**Jump to:** [Tour](#a-90-second-tour) · [Install](#install) · [Before / after](#before--after) · [Marketplace](#the-marketplace-convention) · [Status](#project-status) · [Contributing](#contributing)
+**Jump to:** [Tour](#a-90-second-tour) · [Install](#install) · [Before / after](#before--after) · [Marketplace](#the-marketplace-convention) · [Status](#project-status) · [Contributing](#contributing) · [Website](https://youragentplus.xyz)
 
 ---
 
@@ -153,7 +155,7 @@ $ skill-plus scaffold railway-probe --from-candidate 8ad12e3f9be1   # turn patte
 One-line install — drops you straight into the wizard:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/osouthgate/agent-plus/main/install.sh | sh
+curl -fsSL youragentplus.xyz/install.sh | sh
 ```
 
 That installs all five primitives, then chains into `agent-plus-meta init`. The wizard detects your state (new to Claude Code? returning on a fresh machine? skill author with `.claude/skills/` already?) and runs the right first command for you. No flag-juggling, no doc-hunting.
@@ -185,6 +187,28 @@ The `--non-interactive --auto` envelope is a frozen public contract — see [`ag
 ### Uninstalling
 
 agent-plus owns its off-ramp end-to-end. `install.sh --uninstall` (or `agent-plus-meta uninstall`) removes the 5 primitive bins by default and KEEPS your workspaces, marketplaces, plugins, sessions, and skills unless you opt in with `--workspace`, `--marketplaces`, `--all`, or `--purge`. Full flag matrix and the JSON envelope schema: see [`agent-plus-meta/README.md`](./agent-plus-meta/README.md#uninstall).
+
+### Trust
+
+You're about to `curl | sh`. The short URL above proxies (HTTP 200) to a **pinned release tag** of this repo via Netlify edge. Pushing to `main` does NOT auto-ship a new install script — updates require an explicit website redeploy with a new tag.
+
+**Audit-first install** if you want to read the script before running it:
+
+```bash
+# pick any released tag
+curl -fsSL https://raw.githubusercontent.com/osouthgate/agent-plus/v0.16.0/install.sh \
+  | tee /tmp/install-agent-plus.sh \
+  | less                       # read it
+sh /tmp/install-agent-plus.sh  # then run
+```
+
+**What the script does:** detects your shell + OS, downloads the framework tarball from the matching GitHub release, drops the five primitives into `~/.claude/plugins/`, then chains into `agent-plus-meta init` (idempotent, runs the wizard).
+
+**What you're trusting** (in order): this repo and its release tags · `youragentplus.xyz` DNS · Netlify edge · your local TLS chain.
+
+**Coming:** SHA-256 tarball verification (the install script will verify the downloaded payload against a checksums file served from a different origin). Specced internally, not yet implemented.
+
+**Report suspected issues:** [github.com/osouthgate/agent-plus/issues](https://github.com/osouthgate/agent-plus/issues).
 
 ### Manual install
 
