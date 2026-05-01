@@ -2650,5 +2650,82 @@ class TestDoctorPrimitivesMultiSource(unittest.TestCase):
             self.assertEqual(sources[prim], "install_dir")
 
 
+class TestDoctorSelfMultiSourceAndVerdict(unittest.TestCase):
+    """v0.15.3 follow-up to v0.15.2: same multi-source pattern applied to
+    the self-check (was PATH-only), plus the verdict logic now treats
+    `ready_count = 0 + missing_count > 0` as a fresh-install healthy
+    state (not-yet-configured) rather than degraded. The lifecycle ring
+    claim "install → healthy" requires both.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.mp_root = tempfile.TemporaryDirectory()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+        self.mp_root.cleanup()
+
+    def _clean_env(self, extra: dict | None = None) -> dict:
+        out: dict[str, str] = {}
+        for k, v in os.environ.items():
+            if any(k.startswith(prefix) for prefix in (
+                "GITHUB_", "VERCEL_", "COOLIFY_", "HCLOUD_", "HERMES_",
+                "LANGFUSE_", "OPENROUTER_", "SUPABASE_", "LINEAR_",
+            )):
+                continue
+            if k == "PATH":
+                continue
+            out[k] = v
+        out["PATH"] = ""  # explicit empty PATH
+        out["AGENT_PLUS_MARKETPLACES_ROOT"] = self.mp_root.name
+        if extra:
+            out.update(extra)
+        return out
+
+    def _doctor(self, extra_env: dict | None = None) -> dict:
+        rc, out, err = _run("doctor", "--dir", str(self.dir),
+                            env=self._clean_env(extra_env),
+                            cwd=self.tmp.name)
+        return json.loads(out)
+
+    def test_self_detected_via_install_dir_no_warn(self) -> None:
+        # Stage agent-plus-meta wrapper in $INSTALL_DIR; PATH is empty.
+        # Self-check should detect it and NOT emit a "not on PATH" warn —
+        # instead an `info` severity hint about adding $INSTALL_DIR to PATH.
+        install_dir = self.dir / "bin"
+        install_dir.mkdir(parents=True)
+        (install_dir / "agent-plus-meta").write_text(
+            "#!/bin/sh\n", encoding="utf-8"
+        )
+        result = self._doctor({"AGENT_PLUS_INSTALL_DIR": str(install_dir)})
+        self_section = result["self"]
+        self.assertEqual(self_section["on_path_source"], "install_dir")
+        self.assertTrue(self_section["reachable"])
+        # No warn-severity self issue; possibly an info-severity hint.
+        self_issues = [i for i in result["issues"] if i["category"] == "self"]
+        warn_self = [i for i in self_issues if i["severity"] == "warn"]
+        self.assertEqual(len(warn_self), 0,
+                         msg=f"unexpected warn issues: {warn_self}")
+        # Info hint about PATH should be present.
+        info_self = [i for i in self_issues if i["severity"] == "info"]
+        self.assertEqual(len(info_self), 1)
+        self.assertIn("not on $PATH yet", info_self[0]["message"])
+
+    def test_self_truly_unreachable_emits_warn(self) -> None:
+        # Neither $INSTALL_DIR nor $PREFIX has agent-plus-meta. Warn fires.
+        result = self._doctor({
+            "AGENT_PLUS_INSTALL_DIR": str(self.dir / "nope-bin"),
+            "AGENT_PLUS_PREFIX": str(self.dir / "nope-prefix"),
+        })
+        self_section = result["self"]
+        self.assertEqual(self_section["on_path_source"], "missing")
+        self.assertFalse(self_section["reachable"])
+        self_warns = [i for i in result["issues"]
+                      if i["category"] == "self" and i["severity"] == "warn"]
+        self.assertEqual(len(self_warns), 1)
+        self.assertIn("not found on PATH", self_warns[0]["message"])
+
 if __name__ == "__main__":
     unittest.main()
