@@ -116,7 +116,10 @@ run_step() {
     fi
 }
 
-run_step "[1/3] agent-plus-meta + skill-feedback unittest..." \
+run_step "[1/4] doc-drift check (VERSION/CHANGELOG/keystone-plugin invariants)..." \
+    python3 "$REPO_ROOT/.github/scripts/doc-drift-check.py"
+
+run_step "[2/4] agent-plus-meta + skill-feedback unittest..." \
     clean_env python3 -m unittest \
         agent-plus-meta/test/test_agent_plus.py \
         agent-plus-meta/test/test_marketplace_lifecycle.py \
@@ -126,10 +129,10 @@ run_step "[1/3] agent-plus-meta + skill-feedback unittest..." \
         agent-plus-meta/test/test_migrations.py \
         agent-plus-meta/test/test_uninstall.py
 
-run_step "[2/3] skill-plus + skill-feedback pytest..." \
+run_step "[3/4] skill-plus + skill-feedback pytest..." \
     clean_env python3 -m pytest skill-plus/test/ skill-feedback/test/
 
-run_step "[3/3] install.sh shell tests..." \
+run_step "[4/4] install.sh shell tests..." \
     clean_env python3 -m unittest discover -s test -p "test_install_script.py"
 
 echo
