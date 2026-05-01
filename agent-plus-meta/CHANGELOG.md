@@ -4,6 +4,27 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.16.0 - 2026-05-01
+
+Companion bump for the `skill-plus@0.4.0` inquire slice — agent-plus-meta itself unchanged in this release. The framework version bump tracks the inquire pattern landing as a new public surface, per the v0.15.6 keystone-plugin discipline (agent-plus-meta's version IS the umbrella version; other plugins like skill-feedback and the wrappers version independently). The doc-drift gate `check_meta_version_matches_root` from v0.15.6 enforces this invariant.
+
+### Companion changes (skill-plus v0.4.0)
+
+- New `skill-plus inquire <tool>` subcommand: universal skill recommender + auditor. Probes tools across 4 source classes (CLI, plugin, web search, OpenAPI) with cross-source confidence rating. Web probe uses DuckDuckGo HTML via stdlib `urllib.request` + `html.parser` — no API key, no `pip install`, runs from CI.
+- New `--audit <plugin> --plugin-path <path>` mode: runs the inquiry against an existing agent-plus marketplace plugin, diffs current state vs achievable maturity, returns a paste-ready `pr_body_draft` envelope field.
+- Maturity ladder placement (Q1 errors_surface + Q3 wait_async): each tool gets placed on a 4-rung ladder rather than binary "gap or no gap." Audits read as "Plugin is at Level 2/3, here's Level 3" instead of doom signal.
+- Per-tool `MAX_ACHIEVABLE_OVERRIDES` + `_platform_limit_note`: vercel-remote correctly placed at Q1 ceiling=2 because Vercel API doesn't expose source-location records. Audit returns `ok` at the ceiling instead of recommending impossible upgrades.
+- 61 new tests in skill-plus (`test_inquire.py`).
+- Cache at `~/.agent-plus/inquire-cache/<tool>.json`, 7-day TTL, bypass via `--no-cache`/`--refresh`/`--clear-cache`.
+
+### Companion changes (github-remote v0.5.0, in agent-plus-skills)
+
+- Worked example for the inquire pattern: new `github-remote ci errors <ref>` subcommand using GitHub's check-run annotations API. Hybrid REST+GraphQL (GraphQL for batch when annotation count <40, REST for safety when high; `output.annotations_count` as cheap pre-filter). Outputs structured records (path/line/level/title/message), not log scrapes. Accepts branch/PR#/commit-sha/run-id as `<ref>`. 19 new tests.
+
+### Doc-drift
+
+- README badges synced: `version-0.15.6` → `version-0.16.0`; `tests-419` → `tests-526`. Doc-drift CI gate (including the v0.15.6 keystone-plugin check) green.
+
 ## 0.15.6 - 2026-05-01
 
 DX-audit follow-up: closes the two friction points the v0.15.5 live `/devex-review` surfaced. F1 is the version-surface fix (every fresh user hit it within seconds); F2 is the bad-`--dir` error (Git-Bash MSYS path-mangling + raw `WinError 5` instead of three-tier explanation).

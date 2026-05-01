@@ -366,7 +366,7 @@ def _stub(name: str):
 
 SUBCOMMANDS = (
     "scan", "propose", "install-cron", "scaffold", "list", "feedback", "promote",
-    "globalize", "localize", "where", "team-sync", "collisions",
+    "globalize", "localize", "where", "team-sync", "collisions", "inquire",
 )
 
 
@@ -527,6 +527,32 @@ def build_parser() -> argparse.ArgumentParser:
                          "Example: --rename foo:global:foo-global")
     sp.add_argument("--auto", action="store_true",
                     help="deterministic: project wins, global gets '-global' suffix")
+    _add_envelope_args(sp)
+
+    # inquire (v0.4.0) — universal tool inquiry + plugin auditor
+    sp = sub.add_parser(
+        "inquire",
+        help="probe a tool (Q1-Q7) and emit a recommended skill scaffold; "
+             "with --audit, diff an existing plugin against the same probe matrix",
+    )
+    sp.add_argument("tool", nargs="?", default=None,
+                    help="tool name (e.g. 'github') or plugin name when --audit")
+    sp.add_argument("--audit", action="store_true",
+                    help="auditor mode — probe an existing agent-plus plugin")
+    sp.add_argument("--plugin-path", dest="plugin_path", default=None,
+                    help="path to the plugin directory (audit mode)")
+    sp.add_argument("--cli", default=None,
+                    help="override the CLI binary name (default: same as tool)")
+    sp.add_argument("--spec", default=None,
+                    help="OpenAPI spec URL for HTTP probe (Phase A: not fully wired)")
+    sp.add_argument("--repo", default=None,
+                    help="repo path for usage-signal probe (Phase A: not fully wired)")
+    sp.add_argument("--no-cache", dest="no_cache", action="store_true",
+                    help="bypass the inquire cache for this run")
+    sp.add_argument("--refresh", action="store_true",
+                    help="force re-probe and overwrite the cache entry")
+    sp.add_argument("--clear-cache", dest="clear_cache", action="store_true",
+                    help="wipe the entire inquire cache directory and exit")
     _add_envelope_args(sp)
 
     return p
