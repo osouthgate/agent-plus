@@ -2533,5 +2533,122 @@ class TestDoctor(unittest.TestCase):
         )
 
 
+class TestDoctorPrimitivesMultiSource(unittest.TestCase):
+    """v0.15.2 P2 fix: doctor's primitives detection must be multi-source.
+
+    PATH-only detection broke for v0.15.1 tarball installs where the
+    user's PATH didn't include $AGENT_PLUS_INSTALL_DIR yet (fresh install,
+    tempdir test, or CI dogfood). Now doctor checks PATH → INSTALL_DIR →
+    PREFIX in that order, recording the source per-primitive.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.mp_root = tempfile.TemporaryDirectory()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+        self.mp_root.cleanup()
+
+    def _clean_env(self, extra: dict | None = None) -> dict:
+        out: dict[str, str] = {}
+        for k, v in os.environ.items():
+            if any(k.startswith(prefix) for prefix in (
+                "GITHUB_", "VERCEL_", "COOLIFY_", "HCLOUD_", "HERMES_",
+                "LANGFUSE_", "OPENROUTER_", "SUPABASE_", "LINEAR_",
+            )):
+                continue
+            # Strip the user's real PATH so shutil.which doesn't find
+            # the maintainer's installed agent-plus-meta during the test.
+            if k == "PATH":
+                continue
+            out[k] = v
+        out["PATH"] = ""  # explicit empty PATH
+        out["AGENT_PLUS_MARKETPLACES_ROOT"] = self.mp_root.name
+        if extra:
+            out.update(extra)
+        return out
+
+    def _doctor(self, extra_env: dict | None = None) -> dict:
+        rc, out, err = _run("doctor", "--dir", str(self.dir),
+                            env=self._clean_env(extra_env),
+                            cwd=self.tmp.name)
+        return json.loads(out)
+
+    def test_primitives_detected_via_install_dir(self) -> None:
+        # Stage fake wrapper bins in $AGENT_PLUS_INSTALL_DIR; PATH is empty.
+        install_dir = self.dir / "bin"
+        install_dir.mkdir(parents=True)
+        for prim in ap.FRAMEWORK_PRIMITIVES:
+            (install_dir / prim).write_text(
+                "#!/bin/sh\necho stub\n", encoding="utf-8"
+            )
+        result = self._doctor({
+            "AGENT_PLUS_INSTALL_DIR": str(install_dir),
+            # Ensure prefix dir doesn't accidentally satisfy detection too.
+            "AGENT_PLUS_PREFIX": str(self.dir / "nonexistent-prefix"),
+        })
+        self.assertIn("primitives_source", result)
+        sources = result["primitives_source"]
+        for prim in ap.FRAMEWORK_PRIMITIVES:
+            self.assertEqual(
+                sources[prim], "install_dir",
+                msg=f"{prim} should be detected via install_dir, got {sources[prim]}",
+            )
+            self.assertEqual(result["primitives"][prim], "installed")
+
+    def test_primitives_detected_via_prefix_tree(self) -> None:
+        # Stage tarball-style $PREFIX layout; INSTALL_DIR is empty.
+        prefix = self.dir / "share"
+        for prim in ap.FRAMEWORK_PRIMITIVES:
+            cp = prefix / prim / ".claude-plugin"
+            cp.mkdir(parents=True)
+            (cp / "plugin.json").write_text(
+                json.dumps({"name": prim, "version": "0.0.1"}),
+                encoding="utf-8",
+            )
+        result = self._doctor({
+            "AGENT_PLUS_INSTALL_DIR": str(self.dir / "nonexistent-bin"),
+            "AGENT_PLUS_PREFIX": str(prefix),
+        })
+        sources = result["primitives_source"]
+        for prim in ap.FRAMEWORK_PRIMITIVES:
+            self.assertEqual(
+                sources[prim], "prefix",
+                msg=f"{prim} should be detected via prefix, got {sources[prim]}",
+            )
+            self.assertEqual(result["primitives"][prim], "installed")
+
+    def test_primitives_missing_when_nowhere(self) -> None:
+        result = self._doctor({
+            "AGENT_PLUS_INSTALL_DIR": str(self.dir / "nope-bin"),
+            "AGENT_PLUS_PREFIX": str(self.dir / "nope-prefix"),
+        })
+        sources = result["primitives_source"]
+        for prim in ap.FRAMEWORK_PRIMITIVES:
+            self.assertEqual(sources[prim], "missing")
+            self.assertEqual(result["primitives"][prim], "missing")
+
+    def test_install_dir_takes_precedence_over_prefix(self) -> None:
+        # When both are present, INSTALL_DIR wins (matches the resolution
+        # order: PATH → install_dir → prefix). Shows source=install_dir.
+        install_dir = self.dir / "bin"
+        install_dir.mkdir(parents=True)
+        prefix = self.dir / "share"
+        for prim in ap.FRAMEWORK_PRIMITIVES:
+            (install_dir / prim).write_text("#!/bin/sh\n", encoding="utf-8")
+            cp = prefix / prim / ".claude-plugin"
+            cp.mkdir(parents=True)
+            (cp / "plugin.json").write_text("{}", encoding="utf-8")
+        result = self._doctor({
+            "AGENT_PLUS_INSTALL_DIR": str(install_dir),
+            "AGENT_PLUS_PREFIX": str(prefix),
+        })
+        sources = result["primitives_source"]
+        for prim in ap.FRAMEWORK_PRIMITIVES:
+            self.assertEqual(sources[prim], "install_dir")
+
+
 if __name__ == "__main__":
     unittest.main()

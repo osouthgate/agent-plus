@@ -3166,12 +3166,45 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
             "message": f"workspace not initialised at {workspace}; run `agent-plus-meta init`",
         })
 
-    # 3. Sibling primitives on PATH ────────────────────────────────────────
+    # 3. Sibling primitives — multi-source detection ───────────────────────
+    # v0.15.2: doctor used to only check `shutil.which(prim)` which finds
+    # primitives only when $AGENT_PLUS_INSTALL_DIR is on the system PATH.
+    # The v0.15.1 tarball install layout puts the real plugin tree under
+    # $AGENT_PLUS_PREFIX/<prim>/ with a thin wrapper at $INSTALL_DIR/<prim>;
+    # if the user hasn't added $INSTALL_DIR to PATH yet (fresh install,
+    # tempdir test, or CI dogfood), `shutil.which` returns None and doctor
+    # incorrectly reported all primitives missing → verdict=degraded for an
+    # otherwise-correct install. Check three sources, return the first hit:
+    #   1. PATH (covers normal install + claude-plugin-installed primitives)
+    #   2. $AGENT_PLUS_INSTALL_DIR/<prim> (the wrapper, when PATH isn't set)
+    #   3. $AGENT_PLUS_PREFIX/<prim>/.claude-plugin/plugin.json (the tree)
+    # Source recorded in the envelope for transparency.
     checks_run += 1
+    install_dir = Path(
+        os.environ.get("AGENT_PLUS_INSTALL_DIR")
+        or str(Path.home() / ".local" / "bin")
+    )
+    prefix_dir = Path(
+        os.environ.get("AGENT_PLUS_PREFIX")
+        or str(Path.home() / ".local" / "share" / "agent-plus")
+    )
     primitives_section: dict[str, str] = {}
+    primitives_source: dict[str, str] = {}
     for prim in FRAMEWORK_PRIMITIVES:
-        primitives_section[prim] = "installed" if shutil.which(prim) else "missing"
-        if primitives_section[prim] == "missing":
+        source = "missing"
+        if shutil.which(prim) is not None:
+            source = "path"
+        else:
+            try:
+                if (install_dir / prim).exists():
+                    source = "install_dir"
+                elif (prefix_dir / prim / ".claude-plugin" / "plugin.json").is_file():
+                    source = "prefix"
+            except OSError:
+                pass
+        primitives_section[prim] = "installed" if source != "missing" else "missing"
+        primitives_source[prim] = source
+        if source == "missing":
             issues.append({
                 "severity": "warn",
                 "category": "primitives",
@@ -3274,6 +3307,7 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
         "self": self_section,
         "workspace": workspace_section,
         "primitives": primitives_section,
+        "primitives_source": primitives_source,
         "envcheck": envcheck_section,
         "marketplaces": marketplaces_section,
         "stale_services_entries": stale_entries,

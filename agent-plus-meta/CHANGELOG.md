@@ -4,6 +4,27 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.15.2 - 2026-05-01
+
+P2 follow-up from the v0.15.1 hotfix's dogfood gate: `agent-plus-meta doctor` correctly reported `degraded` when bins were installed via the new v0.15.1 tarball layout into a `$AGENT_PLUS_INSTALL_DIR` that wasn't on the user's `$PATH` (fresh install before the user adds `~/.local/bin` to PATH; tempdir-overridden test/CI runs; or any non-default install location). The check used only `shutil.which(prim)` which only sees PATH. Net effect: a perfectly correct install reported `primitives: 0/5 installed` because doctor was looking through the wrong window.
+
+### Fixed
+
+- **doctor primitives check is now multi-source.** Three detection paths, returned as `primitives_source[<prim>]: "path" | "install_dir" | "prefix" | "missing"`:
+  1. `shutil.which(prim)` — system `$PATH` (covers post-install when user has added `$INSTALL_DIR` to PATH; also covers Claude-plugin-installed primitives).
+  2. `$AGENT_PLUS_INSTALL_DIR/<prim>` exists — the wrapper shim, even when `$INSTALL_DIR` isn't on PATH yet (fresh install, tempdir, CI).
+  3. `$AGENT_PLUS_PREFIX/<prim>/.claude-plugin/plugin.json` is a file — the v0.15.1 tarball-install plugin tree, when neither PATH nor wrapper detection succeeded.
+- **`primitives_source` field added to doctor envelope.** Additive — non-breaking. Visible in `doctor --json` so tooling can surface the resolution path. The `primitives` field's enum is unchanged (`installed | missing`).
+
+### Tests
+
+- 4 new tests in `TestDoctorPrimitivesMultiSource`: `install_dir` detection, `prefix` detection, missing-everywhere, install_dir-precedence-over-prefix. Existing 7 doctor tests all still pass.
+- agent-plus-meta unittest: 263 → 267. Total framework: 405 → 409 (267 + 15 + 127).
+
+### Cross-platform
+
+- `pathlib` everywhere; `os.environ.get` for the env vars (no shell interpretation); existing `shutil.which` semantics preserved as path #1.
+
 ## 0.15.1 - 2026-04-30
 
 Hotfix: install.sh on public main was fundamentally broken — the per-file `curl` loop downloaded only entrypoint scripts but missed each plugin's `_subcommands/` package directories and `plugin.json`, so every `from _subcommands import ...` ImportError'd at first invocation. Fresh installs reported `--version: unknown` and every wizard / upgrade / uninstall died on import. Plus 5 doc-drift fixes from the outside-opinion review and a doc-drift CI gate so this class of bug can't recur.
