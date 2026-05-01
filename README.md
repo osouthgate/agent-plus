@@ -1,19 +1,83 @@
 # agent-plus
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Version](https://img.shields.io/badge/version-0.17.0-green.svg)](https://github.com/osouthgate/agent-plus/releases) [![CI](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml) [![Tests](https://img.shields.io/badge/tests-263%20passing-brightgreen.svg)](#) [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#) [![Stdlib only](https://img.shields.io/badge/stdlib-only-yellowgreen.svg)](#)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Version](https://img.shields.io/badge/version-0.16.0-green.svg)](https://github.com/osouthgate/agent-plus/releases) [![CI](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml) [![Tests](https://img.shields.io/badge/tests-526%20passing-brightgreen.svg)](#) [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#) [![Stdlib only](https://img.shields.io/badge/stdlib-only-yellowgreen.svg)](#)
 
-**Drop-in plugins that turn 30-tool-call dances into 1-tool-call answers.**
+**Cut tokens. Kill context bloat. Run 20x faster.**
 
-Five universal primitives (workspace bootstrap, repo orientation, diff triage, skill self-rating, session-log mining) plus a marketplace convention for publishing service wrappers under your GitHub handle. Mined from real Claude Code session transcripts, not guessed at. Stdlib Python, also runs standalone.
+Drop-in plugins for Claude Code that turn 127-tool-call dances into 1-tool-call answers. **No SDK, no config file, no auth dance.**
 
-![agent-plus 90-second tour](./assets/tour.gif)
+Five plugins. Zero dependencies. Mined from real Claude Code session transcripts — not guessed at. Stdlib Python, also runs standalone.
 
-```bash
-claude plugin marketplace add osouthgate/agent-plus
-claude plugin install repo-analyze@agent-plus
+### It collapses every cold start.
+
+<p align="center">
+  <img src="./assets/hero-v1-side-by-side.png" alt="every cold start vs with agent-plus — 127 tool calls collapsed into 1" width="100%">
+  <br>
+  <sub><i>One call replaces the cold-start grep dance. That's the whole product.</i></sub>
+</p>
+
+### It learns from how you actually work.
+
+<p align="center">
+  <img src="./assets/scan-side-by-side.png" alt="your raw session log vs skill-plus scan — 3 patterns mined" width="100%">
+  <br>
+  <sub><i>Three commands you typed 30+ times this week — ready to scaffold.</i></sub>
+</p>
+
+### And turns those patterns into deterministic scripts.
+
+<p align="center">
+  <img src="./assets/scaffold-side-by-side.png" alt="a mined candidate vs a directory with SKILL.md, a real Python script, and docs" width="100%">
+  <br>
+  <sub><i>Real scripts that run. Cuts tokens. Faster than the agent loop.</i></sub>
+</p>
+
+A scaffolded skill is **three files in your repo, and one of them runs**:
+
+```text
+.claude/skills/railway-logs/
+├── SKILL.md          # how the agent discovers the skill
+├── bin/railway-logs  # stdlib python, runs deterministically
+└── README.md         # auto-generated docs
 ```
 
-That's it. No SDK, no config file, no auth dance.
+The script is real stdlib Python. The boilerplate is pre-wired (argparse, envelope contract, secret redaction, layered env resolver — ~200 lines you don't write). You fill in the killer-command body. Here's a real one from the [`railway-ops`](https://github.com/osouthgate/agent-plus-skills/tree/main/railway-ops) skill (sibling marketplace):
+
+```python
+# Real, shipped: agent-plus-skills/railway-ops/bin/railway-ops
+# Stdlib only. Agent invokes the binary directly — no LLM in the loop.
+
+def parse_log_entries(raw: str) -> list[dict[str, Any]]:
+    """Parse `railway logs --json` output. Soft-fails on malformed lines."""
+    entries: list[dict[str, Any]] = []
+    for raw_line in raw.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            entries.append(obj if isinstance(obj, dict)
+                           else {"message": str(obj), "_non_object": True})
+        except json.JSONDecodeError:
+            entries.append({"message": line, "_non_json": True})
+    return entries
+```
+
+Deterministic shape in, deterministic shape out. Permanent across every future session — no LLM loop, no token cost beyond the call.
+
+### Then you use it. Every session.
+
+<p align="center">
+  <img src="./assets/use-side-by-side.png" alt="manual railway logs dance vs one railway-logs call" width="100%">
+  <br>
+  <sub><i>One clean call where 14 used to be — same skill, every service, forever.</i></sub>
+</p>
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/osouthgate/agent-plus/main/install.sh | sh
+```
+
+That's it. The wizard takes it from here.
 
 **Jump to:** [Tour](#a-90-second-tour) · [Install](#install) · [Before / after](#before--after) · [Marketplace](#the-marketplace-convention) · [Status](#project-status) · [Contributing](#contributing)
 
@@ -52,7 +116,7 @@ That's one plugin. The framework ships **five universal primitives**:
 | [`repo-analyze`](./repo-analyze) | The ~67-grep + ~60-ls cold-start dance for unfamiliar repos | `repo-analyze [--output] [--shape-depth] [--pretty]` |
 | [`diff-summary`](./diff-summary) | The 5–20 Read calls to triage a PR ("test? source? config? did the public API change?") | `diff-summary [--staged \| --base BRANCH \| --range A..B] [--public-api-only] [--risk MIN]` |
 | [`skill-feedback`](./skill-feedback) | "Was that skill any good?" — agent self-rates, JSONL on disk, optional bundle into a GitHub issue | `log <skill> --rating --outcome [--friction]`, `report`, `submit` |
-| [`skill-plus`](./skill-plus) | "I keep typing this by hand" → mine the session log, scaffold a real skill, promote it to your marketplace; `inquire` probes a tool or audits an existing plugin/skill for capability + usage gaps (transcript-sourced) | `scan`, `propose`, `scaffold <name> --from-candidate <id>`, `list`, `feedback`, `promote <name>`, `inquire <tool> [--audit]` |
+| [`skill-plus`](./skill-plus) | "I keep typing this by hand" → mine the session log, scaffold a real skill, audit it, promote it to your marketplace | `scan`, `propose`, `scaffold <name> --from-candidate <id>`, `inquire <tool> [--audit]`, `list`, `feedback`, `promote <name>` |
 
 Plus a **marketplace convention** — `<user>/agent-plus-skills` — for publishing your own service-specific wrappers (GitHub, Vercel, Supabase, Railway, Linear, OpenRouter, Coolify, Hetzner, Hermes, Langfuse, etc.). Reference marketplace lives at [`osouthgate/agent-plus-skills`](https://github.com/osouthgate/agent-plus-skills) — install it, fork it, or use it as a template.
 
@@ -165,7 +229,7 @@ Standalone (no Claude Code): every `bin/<plugin>` is one stdlib Python 3 file. C
 | `~67 grep + ~60 ls` per cold start | `repo-analyze` — 1 call |
 | `git diff` + 5–20 Reads to triage a PR | `diff-summary --staged` — 1 call with role + risk per file |
 | Manual `gh pr view --json` + `gh run list` + `gh pr checks` triage | `github-remote pr <name>` — one structured overview |
-| "Did that skill work? Should I keep using it?" — never tracked | `skill-feedback log` after each use; `report` aggregates locally for any skill (project / global / marketplace); `submit` files a GitHub issue against the upstream repo when the skill came from a marketplace (auto-detected via `plugin.json#repository`). For your own authored skills with no upstream, just edit the SKILL.md — the feedback log gives you the evidence to act on. |
+| "Did that skill work? Should I keep using it?" — never tracked | `skill-feedback log` after each use; `report` aggregates; `submit` files an upstream issue. Evidence you can act on. |
 | "I keep typing this by hand" — stays manual forever | `skill-plus scan` mines the session log, `scaffold` writes the skill |
 | UUID-shaped IDs leaking into the agent's context | Name-resolved IDs everywhere; UUIDs never enter the transcript |
 | Env-var values, tokens, secrets in command output | NAMES-only — values stripped on read paths, scrub-on-write on log paths |
@@ -206,11 +270,13 @@ agent-plus-meta marketplace remove <user>/<repo>
 
 ### Versioning
 
-The umbrella `VERSION` file (and the badge above) is **tag-bound** — it tracks the framework release tag (e.g. `0.15.1`). Each plugin under `agent-plus-meta/`, `repo-analyze/`, `diff-summary/`, `skill-feedback/`, and `skill-plus/` carries its own `plugin.json#version` that bumps **independently** when that specific plugin changes. So `repo-analyze@0.2.1` shipping inside framework `0.15.1` is normal, not drift.
+The umbrella `VERSION` file (and the badge above) is **tag-bound** — it tracks the framework release tag (e.g. `0.16.0`). Each plugin under `agent-plus-meta/`, `repo-analyze/`, `diff-summary/`, `skill-feedback/`, and `skill-plus/` carries its own `plugin.json#version` that bumps **independently** when that specific plugin changes. So `repo-analyze@0.2.1` shipping inside framework `0.16.0` is normal, not drift.
 
 ## Project status
 
-Pre-1.0. The four core primitives (`agent-plus-meta`, `repo-analyze`, `diff-summary`, `skill-feedback`) and the marketplace lifecycle have been dogfooded for months. `skill-plus` is the latest addition (0.1.0). The framework is for **Claude Code** — claude.ai web Skills and Cowork are out of scope (no Bash, no filesystem, no plugin loader). For prompt-template skill generation, see [`claude-reflect`](https://github.com/cnocon/claude-reflect)'s `/reflect-skills` — it complements agent-plus rather than competes with it.
+Five primitives. Four (`agent-plus-meta`, `repo-analyze`, `diff-summary`, `skill-feedback`) plus the marketplace lifecycle have been dogfooded for months. `skill-plus` is the newer addition (0.4.0 — `scan`/`scaffold`/`inquire` are stable; the rest of the surface is settling). Pre-1.0 — but cold-start orientation and diff triage are production-stable.
+
+The framework is for **Claude Code** — claude.ai web Skills and Cowork are out of scope (no Bash, no filesystem, no plugin loader). For prompt-template skill generation, see [`claude-reflect`](https://github.com/cnocon/claude-reflect)'s `/reflect-skills` — it complements agent-plus rather than competes with it.
 
 Service wrappers — `github-remote`, `vercel-remote`, `supabase-remote`, `railway-ops`, `linear-remote`, `openrouter-remote`, `langfuse-remote`, `hermes-remote`, `coolify-remote`, `hcloud-remote` — live in [`osouthgate/agent-plus-skills`](https://github.com/osouthgate/agent-plus-skills).
 
