@@ -61,7 +61,7 @@ jobs:
         env:
           AGENT_PLUS_PLUGINS_DIR: ${{ github.workspace }}/plugins
         run: |
-          python -m pytest framework/agent-plus-meta/test/contract/test_envelope_contract.py -v
+          python -m unittest discover -s framework/agent-plus-meta/test/contract -p "test_envelope_contract.py" -v
 
   # v0.13.5: VERSION-vs-tag gate. Without this, the upgrade probe lies on
   # day one — the single-root VERSION file is the source of truth and MUST
