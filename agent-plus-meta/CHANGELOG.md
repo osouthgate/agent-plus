@@ -4,6 +4,30 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.15.3 - 2026-05-01
+
+Follow-up to v0.15.2: dogfood gate against v0.15.2 surfaced that the multi-source primitives detection worked correctly (`primitives_source` populated, all values `"install_dir"` as expected) but doctor STILL reported `verdict: degraded` because the **self-check** still used `shutil.which("agent-plus-meta")` only — same blind spot as the primitives check before v0.15.2. On a fresh tarball install where `$INSTALL_DIR` isn't on `$PATH` yet, `self.on_path: false` → warn-severity issue → cosmetic noise (warns don't trigger degraded but appear as red flags in the report). v0.15.3 closes the loop.
+
+### Fixed
+
+- **doctor self-check is now multi-source.** Same 3-path resolution as the primitives check from v0.15.2: `shutil.which → $AGENT_PLUS_INSTALL_DIR → $AGENT_PLUS_PREFIX/<bin>/.claude-plugin/plugin.json`. Records the source in a new `self.on_path_source` envelope field (`"path" | "install_dir" | "prefix" | "missing"`) plus a derived `self.reachable` boolean.
+- **Self-check warning is now scope-aware.** Three states:
+  - `reachable=false` → severity `warn` (genuine problem — bin can't be invoked by name from any known location)
+  - `reachable=true && on_path is None` → severity `info` with hint to add `$INSTALL_DIR` to `$PATH` (reachable, just not in shell convenience yet)
+  - `on_path is not None` → no issue
+- **Envelope additions.** New fields on `self`: `on_path_source`, `reachable`. Existing `on_path` and `on_path_location` semantics preserved (PATH-specific). Additive — non-breaking.
+
+### Tests
+
+- 2 new tests in `TestDoctorSelfMultiSourceAndVerdict`:
+  - `test_self_detected_via_install_dir_no_warn` — confirms wrapper-only install yields `info` not `warn`
+  - `test_self_truly_unreachable_emits_warn` — confirms truly-missing self bin still warns
+- agent-plus-meta unittest: 267 → 269. Total framework: 409 → 411 (269 + 15 + 127).
+
+### Not changed (verdict semantics preserved)
+
+The verdict logic still treats `envcheck.missing_count > 0` as `degraded`. This is correct: env-var configuration gaps legitimately mean some plugins won't work, and surfacing that as `degraded` is honest and actionable. The "fresh install → healthy" lifecycle-ring claim is satisfied by the v0.15.2 + v0.15.3 multi-source detection fixes (primitives + self), NOT by relaxing envcheck verdict semantics. A draft change to count only "user-configured" plugins (excluding trivially-ready ones with no required env vars) was prototyped + reverted: it was over-reach and the existing semantics are correct.
+
 ## 0.15.2 - 2026-05-01
 
 P2 follow-up from the v0.15.1 hotfix's dogfood gate: `agent-plus-meta doctor` correctly reported `degraded` when bins were installed via the new v0.15.1 tarball layout into a `$AGENT_PLUS_INSTALL_DIR` that wasn't on the user's `$PATH` (fresh install before the user adds `~/.local/bin` to PATH; tempdir-overridden test/CI runs; or any non-default install location). The check used only `shutil.which(prim)` which only sees PATH. Net effect: a perfectly correct install reported `primitives: 0/5 installed` because doctor was looking through the wrong window.

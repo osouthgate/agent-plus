@@ -3078,9 +3078,44 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
     checks_run = 0
 
     # 1. Self-check ────────────────────────────────────────────────────────
+    # v0.15.3: same multi-source detection as the primitives check (v0.15.2),
+    # applied to agent-plus-meta's own reachability. PATH-only would warn
+    # about "not found on PATH" on a perfectly correct fresh install whose
+    # $INSTALL_DIR isn't yet on the user's PATH (the post-install footer
+    # prompts them to add it; before they do, this warning kept verdict at
+    # `degraded`). Now: only warn when the bin isn't reachable via ANY of
+    # PATH / $INSTALL_DIR / $PREFIX — i.e. the user couldn't actually run it
+    # without knowing the absolute path.
     checks_run += 1
     on_path = shutil.which(TOOL_NAME)
     bin_path = Path(__file__).resolve()
+    install_dir_self = Path(
+        os.environ.get("AGENT_PLUS_INSTALL_DIR")
+        or str(Path.home() / ".local" / "bin")
+    )
+    prefix_dir_self = Path(
+        os.environ.get("AGENT_PLUS_PREFIX")
+        or str(Path.home() / ".local" / "share" / "agent-plus")
+    )
+    # Resolve self via the same 3-source ladder, recording the source.
+    on_path_source = "missing"
+    on_path_location: Optional[str] = None
+    if on_path is not None:
+        on_path_source = "path"
+        on_path_location = on_path
+    else:
+        try:
+            wrapper = install_dir_self / TOOL_NAME
+            tree_manifest = prefix_dir_self / TOOL_NAME / ".claude-plugin" / "plugin.json"
+            if wrapper.exists():
+                on_path_source = "install_dir"
+                on_path_location = str(wrapper)
+            elif tree_manifest.is_file():
+                on_path_source = "prefix"
+                on_path_location = str(tree_manifest.parent.parent / "bin" / TOOL_NAME)
+        except OSError:
+            pass
+    reachable = on_path_source != "missing"
     # `shutil.which` already verifies the candidate is executable on POSIX.
     # If it found us on PATH, trust that. Otherwise fall back to a direct
     # X_OK check against the bin file we're running from — but tolerate
@@ -3105,17 +3140,33 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
     version_known = self_version != "unknown"
     self_section = {
         "on_path": on_path is not None,
-        "on_path_location": on_path,
+        "on_path_location": on_path_location,
+        "on_path_source": on_path_source,
+        "reachable": reachable,
         "version_known": version_known,
         "executable": executable,
         "version": self_version,
         "bin_path": str(bin_path),
     }
-    if on_path is None:
+    if not reachable:
+        # The bin is genuinely unreachable — nothing the user could run by
+        # name from a shell. This is a real warn condition.
         issues.append({
             "severity": "warn",
             "category": "self",
-            "message": f"{TOOL_NAME} not found on PATH; install via install.sh or symlink the bin",
+            "message": f"{TOOL_NAME} not found on PATH, in $AGENT_PLUS_INSTALL_DIR, "
+                       f"or under $AGENT_PLUS_PREFIX; install via install.sh or symlink the bin",
+        })
+    elif on_path is None:
+        # Reachable via INSTALL_DIR or PREFIX but not on PATH. Hint, don't
+        # warn — verdict stays healthy. The user just needs to add the
+        # install dir to PATH (the install.sh footer covers this).
+        issues.append({
+            "severity": "info",
+            "category": "self",
+            "message": f"{TOOL_NAME} reachable via {on_path_source}={on_path_location} "
+                       f"but not on $PATH yet; add {install_dir_self} to PATH for "
+                       f"`{TOOL_NAME}` to work from any directory",
         })
     if not executable:
         issues.append({
@@ -3294,6 +3345,13 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
         })
 
     # 7. Verdict ───────────────────────────────────────────────────────────
+    # Verdict logic preserved from v0.15.0: env-var configuration gaps
+    # legitimately count as `degraded` because the affected plugins won't
+    # work. This is honest and actionable — user knows to either configure
+    # the missing env vars or stop using those plugins. The "fresh install
+    # → healthy" narrative for the lifecycle-ring story is satisfied by
+    # the v0.15.2/v0.15.3 multi-source detection fixes (primitives + self),
+    # NOT by relaxing the envcheck verdict.
     self_broken = (not self_section["executable"]) or (not version_known)
     if self_broken or not ws_exists:
         verdict = "broken"
