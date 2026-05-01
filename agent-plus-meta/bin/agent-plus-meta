@@ -230,11 +230,19 @@ def _parse_env_file(path: Path) -> dict[str, str]:
 def load_env(env_file: Optional[str] = None) -> dict[str, str]:
     """Layered env autoload. Returns dict of var_name -> value; we ONLY use
     this to determine which vars are SET. Values never leave this function
-    boundary unless explicitly needed for an outbound API call (refresh)."""
+    boundary unless explicitly needed for an outbound API call (refresh).
+
+    AGENT_PLUS_NO_ENV_FILES=1 (any non-empty value) disables the project
+    `.env.local` / `.env` walk-up from cwd. Used by tests to prevent the
+    maintainer's `~/.env` from leaking into hermetic test envcheck assertions.
+    Document as test-friendly; users who want explicit shell-env-only control
+    can also use it.
+    """
     cfg: dict[str, str] = dict(os.environ)
-    env_files = _find_env_files(Path.cwd())
-    for p in reversed(env_files):
-        cfg.update(_parse_env_file(p))
+    if not os.environ.get("AGENT_PLUS_NO_ENV_FILES"):
+        env_files = _find_env_files(Path.cwd())
+        for p in reversed(env_files):
+            cfg.update(_parse_env_file(p))
     if env_file:
         p = Path(env_file)
         if not p.is_file():
@@ -3263,11 +3271,21 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
             })
 
     # 4. Env vars (reuse envcheck logic) ───────────────────────────────────
+    # v0.15.4: track `user_configured_count` separately from `ready_count`.
+    # ready_count includes "trivially ready" plugins (those with `required: []`
+    # and any CLI deps satisfied) which are always ready regardless of user
+    # action. user_configured_count only counts plugins that became ready
+    # BECAUSE the user set their required env vars — the real signal of
+    # "user has started configuring." Used by verdict logic: fresh install
+    # (user_configured_count == 0, missing_count > 0) is the expected
+    # not-yet-configured state, NOT degradation. Partial config
+    # (user_configured_count > 0 AND missing_count > 0) IS real degradation.
     checks_run += 1
     cfg = load_env(getattr(args, "env_file", None))
     envcheck_plugins: dict[str, dict] = {}
     ready_count = 0
     missing_count = 0
+    user_configured_count = 0
     for plugin, spec in sorted(PLUGIN_ENV_SPEC.items()):
         plugin_missing_req: list[str] = []
         for name in spec["required"]:
@@ -3278,12 +3296,20 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
         if bin_name:
             bin_ok = shutil.which(bin_name) is not None
         ready = (not plugin_missing_req) and bin_ok
+        # A plugin counts as "user-configured" only when it had required
+        # env vars to set AND the user set them all. Plugins with
+        # `required: []` are trivially ready and don't signal user intent.
+        had_required = bool(spec.get("required"))
+        is_user_configured = ready and had_required
         envcheck_plugins[plugin] = {
             "ready": ready,
+            "user_configured": is_user_configured,
             "missing_required": plugin_missing_req,
         }
         if ready:
             ready_count += 1
+            if is_user_configured:
+                user_configured_count += 1
         else:
             missing_count += 1
             if plugin_missing_req:
@@ -3301,6 +3327,7 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
     envcheck_section = {
         "ready_count": ready_count,
         "missing_count": missing_count,
+        "user_configured_count": user_configured_count,
         "plugins": envcheck_plugins,
     }
 
@@ -3345,19 +3372,28 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
         })
 
     # 7. Verdict ───────────────────────────────────────────────────────────
-    # Verdict logic preserved from v0.15.0: env-var configuration gaps
-    # legitimately count as `degraded` because the affected plugins won't
-    # work. This is honest and actionable — user knows to either configure
-    # the missing env vars or stop using those plugins. The "fresh install
-    # → healthy" narrative for the lifecycle-ring story is satisfied by
-    # the v0.15.2/v0.15.3 multi-source detection fixes (primitives + self),
-    # NOT by relaxing the envcheck verdict.
+    # v0.15.4: nuanced envcheck signal using the new user_configured_count.
+    # Previous logic collapsed every `missing_count > 0` into degraded, but
+    # on a fresh install nothing is configured yet (user_configured_count = 0,
+    # missing_count = N for plugins with required env vars) — that's the
+    # expected "not-yet-configured" state, NOT degradation. Real degradation
+    # is partial config: user_configured_count > 0 AND missing_count > 0
+    # (user fixed some plugins and left others half-done). The "fresh
+    # install → healthy" lifecycle-ring claim is now satisfied end-to-end,
+    # without lying about partial-config users.
     self_broken = (not self_section["executable"]) or (not version_known)
     if self_broken or not ws_exists:
         verdict = "broken"
-    elif any(i["severity"] == "error" for i in issues) or missing_count > 0 or stale_entries:
+    elif any(i["severity"] == "error" for i in issues) or stale_entries:
+        verdict = "degraded"
+    elif user_configured_count > 0 and missing_count > 0:
+        # Partial configuration — user started picking plugins, missed some.
+        # Real degradation worth surfacing.
         verdict = "degraded"
     else:
+        # Either everything's configured (missing_count == 0) or nothing
+        # user-configured yet (user_configured_count == 0; missing_count
+        # is all waiting-for-config). Both are healthy lifecycle states.
         verdict = "healthy"
 
     return {

@@ -2727,5 +2727,76 @@ class TestDoctorSelfMultiSourceAndVerdict(unittest.TestCase):
         self.assertEqual(len(self_warns), 1)
         self.assertIn("not found on PATH", self_warns[0]["message"])
 
+    def _setup_install_and_workspace(self) -> Path:
+        """Stage wrapper bins in $INSTALL_DIR and init the workspace so
+        ws_exists=True (otherwise verdict=broken regardless of envcheck).
+        Returns install_dir."""
+        install_dir = self.dir / "bin"
+        install_dir.mkdir(parents=True)
+        for prim in ap.FRAMEWORK_PRIMITIVES:
+            (install_dir / prim).write_text("#!/bin/sh\n", encoding="utf-8")
+        # Init workspace so doctor doesn't return verdict=broken.
+        ws = self.dir / ".agent-plus"
+        ws.mkdir(parents=True)
+        for fname, default in ap._initial_files().items():
+            (ws / fname).write_text(json.dumps(default, indent=2) + "\n",
+                                     encoding="utf-8")
+        return install_dir
+
+    def _doctor_with_envfile(self, install_dir: Path,
+                             extra_env: dict | None = None) -> dict:
+        """Run doctor with AGENT_PLUS_NO_ENV_FILES=1 to suppress the .env
+        walk-up. CRITICAL: bypasses the shared `_run` helper because it
+        merges os.environ BACK on top of the cleaned env, defeating the
+        strip. We directly subprocess.run with env= (replace, no merge)
+        so the child process gets ONLY what we pass — no maintainer env
+        leaks in."""
+        clean_env = self._clean_env({
+            "AGENT_PLUS_INSTALL_DIR": str(install_dir),
+            "AGENT_PLUS_NO_ENV_FILES": "1",
+            **(extra_env or {}),
+        })
+        proc = subprocess.run(
+            [sys.executable, str(BIN), "doctor", "--dir", str(self.dir)],
+            capture_output=True, text=True, env=clean_env,
+            cwd=self.tmp.name, timeout=15,
+        )
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"doctor failed: rc={proc.returncode}\n"
+                f"stderr={proc.stderr!r}\nstdout={proc.stdout!r}"
+            )
+        return json.loads(proc.stdout)
+
+    def test_verdict_healthy_on_fresh_install_no_user_config(self) -> None:
+        # v0.15.4: fresh install — bins reachable via $INSTALL_DIR,
+        # workspace exists, NO env vars set for any service plugin.
+        # user_configured_count = 0, missing_count > 0. Verdict = healthy.
+        install_dir = self._setup_install_and_workspace()
+        result = self._doctor_with_envfile(install_dir)
+        envcheck = result["envcheck"]
+        self.assertEqual(envcheck["user_configured_count"], 0,
+                         msg=f"no env vars set → no user-configured plugins; "
+                             f"got envcheck: {envcheck}")
+        self.assertGreater(envcheck["missing_count"], 0)
+        self.assertEqual(result["verdict"], "healthy",
+                         msg=f"fresh install should be healthy, got "
+                             f"{result['verdict']}; issues: {result['issues']}")
+
+    def test_verdict_degraded_on_partial_user_config(self) -> None:
+        # v0.15.4: partial config — linear-remote configured, others not.
+        # user_configured_count >= 1, missing_count > 0 → degraded.
+        install_dir = self._setup_install_and_workspace()
+        result = self._doctor_with_envfile(
+            install_dir, {"LINEAR_API_KEY": "test-key-not-real"}
+        )
+        envcheck = result["envcheck"]
+        self.assertGreaterEqual(envcheck["user_configured_count"], 1)
+        self.assertGreater(envcheck["missing_count"], 0)
+        self.assertEqual(result["verdict"], "degraded",
+                         msg=f"partial config should be degraded, got "
+                             f"{result['verdict']}")
+
+
 if __name__ == "__main__":
     unittest.main()
