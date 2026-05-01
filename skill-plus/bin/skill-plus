@@ -538,9 +538,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("tool", nargs="?", default=None,
                     help="tool name (e.g. 'github') or plugin name when --audit")
     sp.add_argument("--audit", action="store_true",
-                    help="auditor mode — probe an existing agent-plus plugin")
+                    help="auditor mode - probe an existing agent-plus plugin "
+                         "OR Claude Code skill (auto-detected from path/name)")
     sp.add_argument("--plugin-path", dest="plugin_path", default=None,
-                    help="path to the plugin directory (audit mode)")
+                    help="path to the plugin OR skill directory (audit mode)")
+    sp.add_argument("--no-transcripts", dest="no_transcripts",
+                    action="store_true",
+                    help="skip transcript scan "
+                         "(also via AGENT_PLUS_INQUIRE_NO_TRANSCRIPTS=1)")
     sp.add_argument("--cli", default=None,
                     help="override the CLI binary name (default: same as tool)")
     sp.add_argument("--spec", default=None,

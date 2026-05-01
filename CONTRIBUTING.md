@@ -65,6 +65,10 @@ claude --plugin-dir ./<plugin-name>
 
 Stack multiple plugins by repeating `--plugin-dir`.
 
+## The inquiry pattern (skill-plus inquire)
+
+`inquire` is the canonical way to answer "does this plugin cover what users actually do?" The pipeline stacks multiple source classes (cli, plugin, web, openapi, repo, transcripts) and classifies gaps as Type A (missing), B (misaligned), or C (aligned) against the target's existing subcommands. Transcript mining is the key addition to v0.5.0 of skill-plus: raw command tuples are clustered in-memory using a two-tier fingerprint scheme and never written to disk or the envelope. The `well_used` verdict means no action is needed -- the canned command matches real usage. When writing a new `--audit` mode for a plugin, the Type A/B/C labels and priority field are the contract; presentation details are free to evolve.
+
 ## Tests
 
 ```bash

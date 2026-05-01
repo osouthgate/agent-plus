@@ -61,6 +61,11 @@ def _load_inquire_module():
 
 inquire = _load_inquire_module()
 
+# Hermetic default: don't walk the developer's real ~/.claude/projects when
+# running build_envelope in tests. Specific transcript adapter tests below
+# clear this var locally to exercise the discovery path.
+os.environ["AGENT_PLUS_INQUIRE_NO_TRANSCRIPTS"] = "1"
+
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -701,6 +706,1024 @@ class TestPRBodyDraft(unittest.TestCase):
         # R4 fix: ASCII arrow, not em-dash.
         self.assertNotIn("—", body)  # em-dash U+2014 must not appear
         self.assertNotIn("–", body)  # en-dash U+2013 must not appear
+
+
+# ─── Gate A.1: transcript adapters ──────────────────────────────────────────
+
+
+def _load_adapters_pkg():
+    """Import the inquire_adapters package directly for unit tests."""
+    import importlib.util
+    pkg_init = ROOT / "bin" / "_subcommands" / "inquire_adapters" / "__init__.py"
+    spec = importlib.util.spec_from_file_location(
+        "inquire_adapters_test_pkg", pkg_init,
+        submodule_search_locations=[str(pkg_init.parent)],
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["inquire_adapters_test_pkg"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestClaudeCodeAdapter(unittest.TestCase):
+    def test_parses_fixture_jsonl(self):
+        # Load adapter module directly.
+        import importlib.util
+        mod_path = (ROOT / "bin" / "_subcommands"
+                    / "inquire_adapters" / "claude_code.py")
+        spec = importlib.util.spec_from_file_location("cc_adapter", mod_path)
+        cc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cc)
+        fixture = ROOT / "test" / "fixtures" / "transcripts" / "claude_code_sample.jsonl"
+        self.assertTrue(fixture.exists(), f"missing fixture: {fixture}")
+        tuples = list(cc.iter_tuples(fixture))
+        # Fixture has 3 tool_use entries (2 Bash + 1 Read).
+        self.assertEqual(len(tuples), 3, f"expected 3 tool_use tuples, got {len(tuples)}")
+        for t in tuples:
+            self.assertEqual(len(t), 5, "tuple must have shape (ts, src, tool, cmd, args)")
+            ts, src, tool, cmd, args = t
+            self.assertIsInstance(ts, str)
+            self.assertIsInstance(src, str)
+            self.assertIsInstance(tool, str)
+            self.assertIsInstance(cmd, str)
+            self.assertIsInstance(args, dict)
+        # First Bash tuple — verify command extraction.
+        bash_tuples = [t for t in tuples if t[2] == "Bash"]
+        self.assertEqual(len(bash_tuples), 2)
+        self.assertEqual(bash_tuples[0][3], "git status -s")
+        self.assertIn("description", bash_tuples[0][4])
+        # Loamdb-db query in the second.
+        self.assertIn("loamdb-db", bash_tuples[1][3])
+        # Non-Bash (Read) tuple still surfaces a command-like field.
+        read_tuples = [t for t in tuples if t[2] == "Read"]
+        self.assertEqual(len(read_tuples), 1)
+        self.assertEqual(read_tuples[0][3], "/tmp/x.txt")
+
+    def test_handles_missing_file_silently(self):
+        import importlib.util
+        mod_path = (ROOT / "bin" / "_subcommands"
+                    / "inquire_adapters" / "claude_code.py")
+        spec = importlib.util.spec_from_file_location("cc_adapter2", mod_path)
+        cc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cc)
+        # Adapter must yield nothing rather than raise on a missing file.
+        tuples = list(cc.iter_tuples(Path("/definitely/not/here.jsonl")))
+        self.assertEqual(tuples, [])
+
+
+class TestAdapterRegistry(unittest.TestCase):
+    def test_builtin_registry_contains_claude_code(self):
+        pkg = _load_adapters_pkg()
+        reg = pkg.build_registry()
+        self.assertIn("claude_code", reg)
+        self.assertTrue(callable(reg["claude_code"]))
+
+    def test_discover_files_handles_missing_roots(self):
+        pkg = _load_adapters_pkg()
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            with mock.patch.dict(os.environ,
+                                 {"HOME": str(home), "USERPROFILE": str(home)}):
+                # All four default roots are absent under this fake HOME.
+                files = pkg.discover_files()
+        self.assertEqual(files, [])
+
+    def test_discover_files_finds_jsonl_when_present(self):
+        pkg = _load_adapters_pkg()
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            proj_root = home / ".claude" / "projects" / "C--dev-fake"
+            proj_root.mkdir(parents=True)
+            (proj_root / "session.jsonl").write_text("{}\n", encoding="utf-8")
+            with mock.patch.dict(os.environ,
+                                 {"HOME": str(home), "USERPROFILE": str(home)}):
+                files = pkg.discover_files()
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0][0], "claude_code")
+
+    def test_user_config_loads_extra_sources(self):
+        pkg = _load_adapters_pkg()
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            cfg_dir = home / ".agent-plus"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "inquire-sources.json").write_text(
+                json.dumps({"sources": [
+                    {"name": "harness", "root": str(home / "logs"),
+                     "format": "claude_code"}
+                ]}),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ,
+                                 {"HOME": str(home), "USERPROFILE": str(home)}):
+                cfg = pkg.load_user_config()
+        self.assertIn("sources", cfg)
+        self.assertEqual(cfg["sources"][0]["format"], "claude_code")
+
+    def test_user_supplied_adapter_loaded_and_callable(self):
+        pkg = _load_adapters_pkg()
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            adapters_dir = home / ".agent-plus" / "inquire-adapters"
+            adapters_dir.mkdir(parents=True)
+            (adapters_dir / "myfmt.py").write_text(
+                "from pathlib import Path\n"
+                "def iter_tuples(path):\n"
+                "    yield ('2026-01-01T00:00:00Z', str(path), 'Bash',"
+                "           'echo hi', {'desc': 'x'})\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ,
+                                 {"HOME": str(home), "USERPROFILE": str(home)}):
+                user = pkg.load_user_adapters()
+        self.assertIn("myfmt", user)
+        # Call it with any path — adapter ignores file existence.
+        out = list(user["myfmt"](Path("anything")))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][2], "Bash")
+
+    def test_collect_tuples_with_fixture(self):
+        """End-to-end: point HOME at a tempdir with a synthetic
+        ~/.claude/projects/<slug>/x.jsonl that's a copy of the fixture,
+        confirm collect_tuples finds it via auto-discovery."""
+        pkg = _load_adapters_pkg()
+        fixture = ROOT / "test" / "fixtures" / "transcripts" / "claude_code_sample.jsonl"
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            proj = home / ".claude" / "projects" / "C--dev-fake"
+            proj.mkdir(parents=True)
+            (proj / "session.jsonl").write_text(
+                fixture.read_text(encoding="utf-8"), encoding="utf-8")
+            with mock.patch.dict(os.environ,
+                                 {"HOME": str(home), "USERPROFILE": str(home)}):
+                result = pkg.collect_tuples()
+        self.assertEqual(result["files_scanned"], 1)
+        self.assertEqual(result["by_format"].get("claude_code"), 3)
+        self.assertEqual(len(result["tuples"]), 3)
+
+
+class TestTranscriptsSourceClass(unittest.TestCase):
+    """Inquire.py registers `transcripts` as a source class. Must show up
+    in target.sources_used or target.sources_unavailable."""
+
+    def test_transcripts_appears_in_envelope_sources(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _make_fake_plugin(Path(td), "fake", PLUGIN_LEVEL1)
+            target = {"tool": "fake", "name": "fake", "cli": "no-such",
+                      "plugin_path": str(p)}
+            with mock.patch.object(inquire, "cli_on_path", return_value=None):
+                with mock.patch.object(inquire, "web_search", return_value=[]):
+                    env = inquire.build_envelope(target, mode="audit")
+        all_sources = (set(env["target"]["sources_used"])
+                       | set(env["target"]["sources_unavailable"]))
+        self.assertIn("transcripts", all_sources,
+                      "transcripts must appear as a registered source class")
+
+    def test_envelope_carries_usage_signal(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _make_fake_plugin(Path(td), "fake", PLUGIN_LEVEL1)
+            target = {"tool": "fake", "name": "fake", "cli": "no-such",
+                      "plugin_path": str(p)}
+            with mock.patch.object(inquire, "cli_on_path", return_value=None):
+                with mock.patch.object(inquire, "web_search", return_value=[]):
+                    env = inquire.build_envelope(target, mode="audit")
+        self.assertIn("usage_signal", env)
+        for key in ("files_scanned", "tuple_count", "by_format", "errors"):
+            self.assertIn(key, env["usage_signal"])
+        # tuples are NOT persisted to the envelope (can contain secrets).
+        self.assertNotIn("tuples", env["usage_signal"])
+        # Hermetic env: no transcripts walked.
+        self.assertEqual(env["usage_signal"]["tuple_count"], 0)
+        self.assertEqual(env["usage_signal"]["files_scanned"], 0)
+
+    def test_transcripts_marks_used_when_tuples_present(self):
+        # Temporarily allow walking; mock _collect_transcripts to return
+        # a non-empty result without touching disk.
+        with tempfile.TemporaryDirectory() as td:
+            p = _make_fake_plugin(Path(td), "fake", PLUGIN_LEVEL1)
+            target = {"tool": "fake", "name": "fake", "cli": "no-such",
+                      "plugin_path": str(p)}
+            fake_signal = {
+                "files_scanned": 1,
+                "files_skipped": 0,
+                "tuples": [("2026-01-01T00:00:00Z", "/x", "Bash", "ls", {})],
+                "by_format": {"claude_code": 1},
+                "errors": [],
+            }
+            with mock.patch.object(inquire, "cli_on_path", return_value=None):
+                with mock.patch.object(inquire, "web_search", return_value=[]):
+                    with mock.patch.object(inquire, "_collect_transcripts",
+                                           return_value=fake_signal):
+                        env = inquire.build_envelope(target, mode="audit")
+        self.assertIn("transcripts", env["target"]["sources_used"])
+        self.assertEqual(env["usage_signal"]["tuple_count"], 1)
+
+
+def _load_cluster_module():
+    cluster_path = ROOT / "bin" / "_subcommands" / "inquire_cluster.py"
+    spec = importlib.util.spec_from_file_location(
+        "_skill_plus_inquire_cluster_test", cluster_path
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+cluster_mod = _load_cluster_module()
+
+
+class TestSqlExtraction(unittest.TestCase):
+    """Tier 1: pulling SQL out of shell command strings."""
+
+    def test_extract_sql_from_quoted_raw(self):
+        sql = cluster_mod.extract_sql(
+            'mytool raw "SELECT id FROM widgets WHERE x=1"'
+        )
+        self.assertIsNotNone(sql)
+        self.assertIn("SELECT", sql.upper())
+
+    def test_extract_sql_from_query_subcmd(self):
+        sql = cluster_mod.extract_sql("foo query 'UPDATE t SET y=2'")
+        self.assertIsNotNone(sql)
+        self.assertIn("UPDATE", sql.upper())
+
+    def test_extract_sql_returns_none_for_non_sql(self):
+        self.assertIsNone(cluster_mod.extract_sql("ls -la /tmp"))
+        self.assertIsNone(cluster_mod.extract_sql("git commit -m 'select something'"))
+
+    def test_extract_sql_for_bare_select(self):
+        sql = cluster_mod.extract_sql("SELECT 1")
+        self.assertIsNotNone(sql)
+
+
+class TestSqlParsing(unittest.TestCase):
+    """Top-level FROM/WHERE/SELECT extraction."""
+
+    def test_simple_select_one_table(self):
+        p = cluster_mod.parse_sql("SELECT id, name FROM widgets WHERE x = 1")
+        self.assertEqual(p["verb"], "select")
+        self.assertEqual(p["tables"], ["widgets"])
+        self.assertEqual(sorted(p["select_cols"]), ["id", "name"])
+        self.assertEqual(p["where_cols"], ["x"])
+
+    def test_join_two_tables(self):
+        p = cluster_mod.parse_sql(
+            "SELECT a.id FROM aa a JOIN bb b ON a.id=b.aid WHERE a.flag IS NULL"
+        )
+        self.assertEqual(p["verb"], "select")
+        self.assertEqual(p["tables"], ["aa", "bb"])
+        self.assertIn("flag", p["where_cols"])
+
+    def test_alias_via_AS(self):
+        p = cluster_mod.parse_sql(
+            "SELECT c.id FROM contents AS c WHERE c.org_id = 1"
+        )
+        self.assertEqual(p["tables"], ["contents"])
+        self.assertEqual(p["select_cols"], ["id"])
+        self.assertEqual(p["where_cols"], ["org_id"])
+
+    def test_schema_qualified_table(self):
+        p = cluster_mod.parse_sql(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'x'"
+        )
+        # last segment of dotted name wins
+        self.assertEqual(p["tables"], ["columns"])
+
+    def test_update_delete_insert(self):
+        u = cluster_mod.parse_sql("UPDATE widgets SET x=1 WHERE id=2")
+        self.assertEqual(u["verb"], "update")
+        self.assertEqual(u["tables"], ["widgets"])
+        d = cluster_mod.parse_sql("DELETE FROM gizmos WHERE id=1")
+        self.assertEqual(d["verb"], "delete")
+        self.assertEqual(d["tables"], ["gizmos"])
+        ins = cluster_mod.parse_sql("INSERT INTO logs (a,b) VALUES (1,2)")
+        self.assertEqual(ins["verb"], "insert")
+        self.assertEqual(ins["tables"], ["logs"])
+
+    def test_parse_failure_returns_none(self):
+        # Garbage that mentions a SQL verb but isn't parseable.
+        self.assertIsNone(cluster_mod.parse_sql("SELECT"))
+        self.assertIsNone(cluster_mod.parse_sql("SELECT 1"))  # no FROM
+        self.assertIsNone(cluster_mod.parse_sql(""))
+
+
+class TestTier1Threshold(unittest.TestCase):
+    def test_below_threshold_dropped(self):
+        tuples = [
+            ["t", "/x", "Bash", 'foo raw "SELECT id FROM rare WHERE id=1"', {}],
+            ["t", "/x", "Bash", 'foo raw "SELECT id FROM rare WHERE id=2"', {}],
+        ]
+        out = cluster_mod.cluster_invocations(tuples, [])
+        self.assertEqual(out["stats"]["unique_tier1"], 0)
+
+    def test_at_threshold_kept(self):
+        tuples = [
+            ["t", "/x", "Bash", f'foo raw "SELECT id FROM hot WHERE id={i}"', {}]
+            for i in range(3)
+        ]
+        out = cluster_mod.cluster_invocations(tuples, [])
+        self.assertEqual(out["stats"]["unique_tier1"], 1)
+        self.assertEqual(out["tier1_clusters"][0]["shape"], "select: hot")
+        self.assertEqual(out["tier1_clusters"][0]["count"], 3)
+
+
+class TestTier2Fingerprint(unittest.TestCase):
+    def test_same_select_diff_where_groups_by_intent(self):
+        # Three with WHERE org_id, three with WHERE id - same Tier 1, two
+        # Tier 2 buckets.
+        tuples = []
+        for _ in range(3):
+            tuples.append(
+                ["t", "/x", "Bash",
+                 'foo raw "SELECT id FROM widgets WHERE org_id=1"', {}]
+            )
+        for _ in range(3):
+            tuples.append(
+                ["t", "/x", "Bash",
+                 'foo raw "SELECT id FROM widgets WHERE id=2"', {}]
+            )
+        out = cluster_mod.cluster_invocations(tuples, [])
+        self.assertEqual(out["stats"]["unique_tier1"], 1)
+        self.assertEqual(out["stats"]["unique_tier2"], 2)
+
+    def test_singleton_tier2_dropped(self):
+        # All same Tier 1, but each Tier 2 has count 1 -> threshold drops.
+        tuples = [
+            ["t", "/x", "Bash",
+             f'foo raw "SELECT col{i} FROM tbl WHERE k{i}=1"', {}]
+            for i in range(3)
+        ]
+        out = cluster_mod.cluster_invocations(tuples, [])
+        self.assertEqual(out["stats"]["unique_tier1"], 1)
+        # Each tier2 has 1 occurrence -> all dropped.
+        self.assertEqual(out["tier1_clusters"][0]["tier2"], [])
+
+
+class TestClassifierABC(unittest.TestCase):
+    def _tuples_for(self, table: str, n: int = 3,
+                    select: str = "id", where: str = "org_id"):
+        return [
+            ["t", "/x", "Bash",
+             f'foo raw "SELECT {select} FROM {table} WHERE {where}=1"', {}]
+            for _ in range(n)
+        ]
+
+    def test_type_a_missing(self):
+        tuples = self._tuples_for("orphan_table")
+        out = cluster_mod.cluster_invocations(tuples, [{"name": "totally_unrelated"}])
+        c = out["tier1_clusters"][0]["tier2"][0]
+        self.assertEqual(c["promotion_kind"], "missing")
+        self.assertIn("recommended_name", c)
+        self.assertIn("orphan_table", c["recommended_name"])
+
+    def test_type_c_aligned_via_name_match(self):
+        # Subcommand name 'widget' substring-matches table 'widgets'.
+        tuples = self._tuples_for("widgets")
+        out = cluster_mod.cluster_invocations(
+            tuples, [{"name": "widget"}]
+        )
+        c = out["tier1_clusters"][0]["tier2"][0]
+        self.assertEqual(c["promotion_kind"], "aligned")
+
+    def test_type_b_misaligned_via_columns_metadata(self):
+        # Subcommand name matches but its `columns` metadata doesn't
+        # cover any of the cluster's columns.
+        tuples = self._tuples_for("widgets", select="weight", where="height")
+        out = cluster_mod.cluster_invocations(
+            tuples,
+            [{"name": "widget", "columns": ["foo", "bar", "baz"]}],
+        )
+        c = out["tier1_clusters"][0]["tier2"][0]
+        self.assertEqual(c["promotion_kind"], "misaligned")
+
+    def test_type_c_aligned_via_explicit_tables(self):
+        tuples = self._tuples_for("contents")
+        out = cluster_mod.cluster_invocations(
+            tuples,
+            [{"name": "org", "tables": ["contents"]}],
+        )
+        c = out["tier1_clusters"][0]["tier2"][0]
+        self.assertEqual(c["promotion_kind"], "aligned")
+
+
+class TestAntiConfirmationBias(unittest.TestCase):
+    """The algorithm must surface things the test author didn't predict.
+    We seed a fixture with the 6 hot shapes from the delta plan but
+    only assert on aggregate properties + ONE shape we name; the rest
+    are surprise findings the test deliberately doesn't enumerate."""
+
+    def _delta_plan_fixture(self):
+        # 6 hot shapes (counts trimmed for unit-test scale - threshold is
+        # >=3, not the production 38). The test author knows ONE of them
+        # explicitly: chunk_sets/contents combo. The others must be
+        # discovered by the algorithm without being named here.
+        tuples = []
+
+        def add(cmd, n):
+            for _ in range(n):
+                tuples.append(["t", "/x", "Bash", cmd, {}])
+
+        # Shape 1 (named in assertions): contents
+        add('xtool raw "SELECT id FROM contents WHERE org_id=1"', 5)
+        # Shape 2 (un-named): information_schema-style
+        add('xtool raw "SELECT column_name FROM information_schema.columns WHERE table_name=\'x\'"', 4)
+        # Shape 3 (un-named)
+        add('xtool raw "SELECT id FROM connector_connections WHERE id=7"', 4)
+        # Shape 4 (un-named, JOIN)
+        add('xtool raw "SELECT c.id FROM contents AS c JOIN chunk_sets cs ON cs.id=c.chunk_set_id WHERE cs.id=1"', 3)
+        # Shape 5 (un-named)
+        add('xtool raw "SELECT id FROM sync_runs WHERE status=2"', 3)
+        # Shape 6 (un-named)
+        add('xtool raw "SELECT id FROM entities WHERE entity_type=2"', 3)
+        return tuples
+
+    def test_surfaces_at_least_5_of_6_hot_shapes(self):
+        tuples = self._delta_plan_fixture()
+        out = cluster_mod.cluster_invocations(tuples, [])
+        # Aggregate floor, not exact equality.
+        self.assertGreaterEqual(
+            len(out["tier1_clusters"]), 5,
+            "Expected at least 5 of 6 hot shapes to clear Tier 1 threshold",
+        )
+        # Surprise findings: at least one shape is discovered that the
+        # test does not explicitly name in this assertion. This is the
+        # F3 anti-confirmation discipline check.
+        named_in_test = {"select: contents"}
+        discovered_shapes = {c["shape"] for c in out["tier1_clusters"]}
+        surprise = discovered_shapes - named_in_test
+        self.assertGreater(
+            len(surprise), 0,
+            "Algorithm must surface shapes the test didn't hardcode "
+            f"(saw: {discovered_shapes})",
+        )
+
+    def test_no_hardcoded_table_names_in_module_source(self):
+        """Hard rule from the delta plan: the algorithm must not mention
+        any specific table name. Scan the cluster module source for
+        anti-pattern markers."""
+        src = (ROOT / "bin" / "_subcommands" / "inquire_cluster.py").read_text(
+            encoding="utf-8"
+        )
+        forbidden = ["loamdb", "entity_type", "chunk_set", "contents",
+                     "information_schema", "connector_connection"]
+        for token in forbidden:
+            self.assertNotIn(
+                token, src.lower(),
+                f"Cluster algorithm must not reference {token!r} - "
+                "violates anti-confirmation-bias discipline",
+            )
+
+
+class TestParseFailureFailSoft(unittest.TestCase):
+    def test_unparseable_sql_increments_counter_not_crash(self):
+        # Mix of valid and broken SQL. Algorithm must not crash; broken
+        # ones counted in parse_failures.
+        tuples = [
+            ["t", "/x", "Bash", 'foo raw "SELECT id FROM tbl WHERE k=1"', {}],
+            ["t", "/x", "Bash", 'foo raw "SELECT id FROM tbl WHERE k=2"', {}],
+            ["t", "/x", "Bash", 'foo raw "SELECT id FROM tbl WHERE k=3"', {}],
+            # Garbage that looks SQL-ish.
+            ["t", "/x", "Bash", 'foo raw "SELECT 1"', {}],
+        ]
+        out = cluster_mod.cluster_invocations(tuples, [])
+        self.assertEqual(out["stats"]["parse_failures"], 1)
+        self.assertEqual(out["stats"]["unique_tier1"], 1)
+
+
+class TestEnvelopeWiring(unittest.TestCase):
+    """Inquire.py calls cluster_invocations during --audit and stashes
+    the result on the envelope as `usage_clusters`."""
+
+    def test_usage_clusters_present_on_audit_envelope(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _make_fake_plugin(Path(td), "fake", PLUGIN_LEVEL1)
+            target = {"tool": "fake", "name": "fake", "cli": "no-such",
+                      "plugin_path": str(p)}
+            with mock.patch.object(inquire, "cli_on_path", return_value=None):
+                with mock.patch.object(inquire, "web_search", return_value=[]):
+                    env = inquire.build_envelope(target, mode="audit")
+        self.assertIn("usage_clusters", env)
+        self.assertIn("tier1_clusters", env["usage_clusters"])
+        self.assertIn("stats", env["usage_clusters"])
+
+    def test_usage_clusters_absent_on_generate_envelope(self):
+        target = {"tool": "fake", "name": "fake", "cli": "no-such"}
+        with mock.patch.object(inquire, "cli_on_path", return_value=None):
+            with mock.patch.object(inquire, "web_search", return_value=[]):
+                env = inquire.build_envelope(target, mode="generate")
+        # Generator mode skips clustering (no existing subcommands to
+        # compare against).
+        self.assertNotIn("usage_clusters", env)
+
+    def test_clustering_runs_against_injected_tuples(self):
+        # Inject synthetic tuples via _collect_transcripts mock and
+        # verify clustering picks them up.
+        with tempfile.TemporaryDirectory() as td:
+            p = _make_fake_plugin(Path(td), "fake", PLUGIN_LEVEL1)
+            target = {"tool": "fake", "name": "fake", "cli": "no-such",
+                      "plugin_path": str(p)}
+            cmd = 'sometool raw "SELECT id FROM widgets WHERE org_id=1"'
+            fake_signal = {
+                "files_scanned": 1, "files_skipped": 0,
+                "tuples": [
+                    ("2026-01-01T00:00:00Z", "/x", "Bash", cmd, {})
+                    for _ in range(5)
+                ],
+                "by_format": {"claude_code": 5}, "errors": [],
+            }
+            with mock.patch.object(inquire, "cli_on_path", return_value=None):
+                with mock.patch.object(inquire, "web_search", return_value=[]):
+                    with mock.patch.object(
+                        inquire, "_collect_transcripts", return_value=fake_signal
+                    ):
+                        env = inquire.build_envelope(target, mode="audit")
+        clusters = env["usage_clusters"]["tier1_clusters"]
+        self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["shape"], "select: widgets")
+
+
+# ─── Gate A.3: priority calc, well_used, skill detection, envelope v1.1 ─────
+
+
+class TestPriorityCalc(unittest.TestCase):
+    """8+ unit tests covering priority edge cases."""
+
+    def test_aligned_is_na(self):
+        self.assertEqual(inquire._priority("aligned", 100), "n/a")
+        self.assertEqual(inquire._priority("aligned", 0), "n/a")
+
+    def test_missing_high_at_10(self):
+        self.assertEqual(inquire._priority("missing", 10), "high")
+        self.assertEqual(inquire._priority("missing", 99), "high")
+
+    def test_missing_medium_at_3_to_9(self):
+        self.assertEqual(inquire._priority("missing", 3), "medium")
+        self.assertEqual(inquire._priority("missing", 9), "medium")
+
+    def test_missing_low_below_3(self):
+        self.assertEqual(inquire._priority("missing", 2), "low")
+        self.assertEqual(inquire._priority("missing", 0), "low")
+
+    def test_missing_boundary_3(self):
+        self.assertEqual(inquire._priority("missing", 2), "low")
+        self.assertEqual(inquire._priority("missing", 3), "medium")
+
+    def test_missing_boundary_10(self):
+        self.assertEqual(inquire._priority("missing", 9), "medium")
+        self.assertEqual(inquire._priority("missing", 10), "high")
+
+    def test_misaligned_high_at_10(self):
+        self.assertEqual(inquire._priority("misaligned", 10), "high")
+        self.assertEqual(inquire._priority("misaligned", 50), "high")
+
+    def test_misaligned_medium_below_10(self):
+        self.assertEqual(inquire._priority("misaligned", 1), "medium")
+        self.assertEqual(inquire._priority("misaligned", 9), "medium")
+
+    def test_unknown_kind_defaults_low(self):
+        self.assertEqual(inquire._priority("totally-bogus", 100), "low")
+
+
+class TestEnvelopeVersion(unittest.TestCase):
+    def test_envelope_version_is_1_1(self):
+        self.assertEqual(inquire.ENVELOPE_VERSION, "1.1")
+
+    def test_envelope_carries_version_field(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _make_fake_plugin(Path(td), "fake", PLUGIN_LEVEL1)
+            target = {"tool": "fake", "name": "fake", "cli": "no-such",
+                      "plugin_path": str(p)}
+            with mock.patch.object(inquire, "cli_on_path", return_value=None):
+                with mock.patch.object(inquire, "web_search", return_value=[]):
+                    env = inquire.build_envelope(target, mode="audit")
+        self.assertEqual(env.get("envelope_version"), "1.1")
+        self.assertIn("promotions", env)
+        self.assertIsInstance(env["promotions"], list)
+
+
+class TestV10ConsumerCompat(unittest.TestCase):
+    """A v1.0 consumer reads only the original fields. Verify the new
+    additive fields don't break that reader against either a synthetic
+    v1.0 envelope or a fresh v1.1 envelope.
+    """
+
+    def _v10_consumer(self, env: dict) -> dict:
+        # Simulates a v1.0 downstream that reads ONLY the original fields.
+        out = {
+            "verdict": env["verdict"],
+            "mode": env["mode"],
+            "target_kind": env["target"]["kind"],
+            "target_name": env["target"]["name"],
+            "questions_asked": env["summary"]["questions_asked"],
+            "results_count": len(env["results"]),
+        }
+        for r in env["results"]:
+            # v1.0 only knows these keys
+            assert "q_id" in r
+            assert "answer" in r
+        return out
+
+    def test_v10_envelope_consumed_without_crash(self):
+        v10_env = {
+            "verdict": "ok",
+            "mode": "audit",
+            "target": {"kind": "plugin", "name": "x",
+                       "sources_used": [], "sources_unavailable": []},
+            "summary": {"questions_asked": 1, "ok": 1, "gaps": 0,
+                        "na": 0, "unknown": 0, "high_confidence_gaps": 0},
+            "results": [{"q_id": "Q1", "q_label": "errors_surface",
+                         "answer": "ok", "confidence": "high", "evidence": []}],
+            "pr_body_draft": "no gaps",
+        }
+        out = self._v10_consumer(v10_env)
+        self.assertEqual(out["target_kind"], "plugin")
+        self.assertEqual(out["results_count"], 1)
+
+    def test_v11_envelope_works_with_v10_consumer(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _make_fake_plugin(Path(td), "fake", PLUGIN_LEVEL1)
+            target = {"tool": "fake", "name": "fake", "cli": "no-such",
+                      "plugin_path": str(p)}
+            with mock.patch.object(inquire, "cli_on_path", return_value=None):
+                with mock.patch.object(inquire, "web_search", return_value=[]):
+                    env = inquire.build_envelope(target, mode="audit")
+        out = self._v10_consumer(env)
+        self.assertIn(out["target_kind"], ("plugin", "skill"))
+        self.assertGreaterEqual(out["results_count"], 1)
+
+
+class TestWellUsedVerdict(unittest.TestCase):
+    """well_used triggers when no gaps + >=50% aligned clusters."""
+
+    def test_well_used_when_no_gaps_and_aligned_clusters(self):
+        summary = {"questions_asked": 7, "ok": 7, "gaps": 0,
+                   "na": 0, "unknown": 0, "high_confidence_gaps": 0}
+        clusters = {"tier1_clusters": [
+            {"shape": "select: x", "count": 5,
+             "tier2": [{"promotion_kind": "aligned", "count": 3}]},
+            {"shape": "select: y", "count": 4,
+             "tier2": [{"promotion_kind": "aligned", "count": 2}]},
+        ]}
+        v = inquire._verdict(summary, usage_clusters=clusters)
+        self.assertEqual(v, "well_used")
+
+    def test_not_well_used_with_gaps(self):
+        summary = {"questions_asked": 7, "ok": 5, "gaps": 2,
+                   "na": 0, "unknown": 0, "high_confidence_gaps": 1}
+        clusters = {"tier1_clusters": [
+            {"shape": "select: x", "count": 5,
+             "tier2": [{"promotion_kind": "aligned", "count": 3}]},
+        ]}
+        v = inquire._verdict(summary, usage_clusters=clusters)
+        self.assertEqual(v, "gaps_found")
+
+    def test_falls_back_to_ok_if_clusters_mostly_missing(self):
+        summary = {"questions_asked": 7, "ok": 7, "gaps": 0,
+                   "na": 0, "unknown": 0, "high_confidence_gaps": 0}
+        clusters = {"tier1_clusters": [
+            {"shape": "select: x", "count": 5,
+             "tier2": [
+                 {"promotion_kind": "missing", "count": 3},
+                 {"promotion_kind": "missing", "count": 2},
+             ]},
+        ]}
+        v = inquire._verdict(summary, usage_clusters=clusters)
+        self.assertEqual(v, "ok")
+
+    def test_no_clusters_returns_ok(self):
+        summary = {"questions_asked": 7, "ok": 7, "gaps": 0,
+                   "na": 0, "unknown": 0, "high_confidence_gaps": 0}
+        v = inquire._verdict(summary, usage_clusters={"tier1_clusters": []})
+        self.assertEqual(v, "ok")
+
+
+class TestSkillFrontmatter(unittest.TestCase):
+    def test_reads_basic_frontmatter(self):
+        fixture = ROOT / "test" / "fixtures" / "skills" / "sample" / "SKILL.md"
+        fm = inquire._read_skill_frontmatter(str(fixture))
+        self.assertIsNotNone(fm)
+        self.assertEqual(fm.get("name"), "sample")
+        self.assertIn("allowed-tools", fm)
+        self.assertIn("Bash(", fm["allowed-tools"])
+
+    def test_returns_none_for_missing_file(self):
+        self.assertIsNone(inquire._read_skill_frontmatter(
+            "/definitely/not/a/file"))
+
+    def test_returns_none_for_no_frontmatter(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "x.md"
+            p.write_text("# no frontmatter here\n", encoding="utf-8")
+            self.assertIsNone(inquire._read_skill_frontmatter(str(p)))
+
+
+class TestTargetKindDetection(unittest.TestCase):
+    def test_detects_plugin_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _make_fake_plugin(Path(td), "fake", "x = 1\n")
+            kind, resolved = inquire._detect_target_kind(str(p))
+        self.assertEqual(kind, "plugin")
+
+    def test_detects_skill_dir(self):
+        fixture = ROOT / "test" / "fixtures" / "skills" / "sample"
+        kind, resolved = inquire._detect_target_kind(str(fixture))
+        self.assertEqual(kind, "skill")
+        self.assertEqual(resolved, str(fixture))
+
+    def test_detects_skill_md_file(self):
+        fixture = ROOT / "test" / "fixtures" / "skills" / "sample" / "SKILL.md"
+        kind, resolved = inquire._detect_target_kind(str(fixture))
+        self.assertEqual(kind, "skill")
+        # resolved should be the parent dir
+        self.assertEqual(resolved, str(fixture.parent))
+
+    def test_unknown_for_random_dir(self):
+        with tempfile.TemporaryDirectory() as td:
+            kind, _ = inquire._detect_target_kind(td)
+        self.assertEqual(kind, "unknown")
+
+
+class TestSkillBinResolution(unittest.TestCase):
+    def test_resolves_via_allowed_tools(self):
+        fixture = ROOT / "test" / "fixtures" / "skills" / "sample"
+        fm = inquire._read_skill_frontmatter(str(fixture / "SKILL.md"))
+        bin_dir = inquire._skill_bin_from_allowed_tools(
+            fm.get("allowed-tools", ""), fixture, "sample"
+        )
+        self.assertIsNotNone(bin_dir)
+        self.assertTrue(bin_dir.is_dir())
+        self.assertEqual(bin_dir.name, "sample")
+
+    def test_falls_back_to_skill_name(self):
+        fixture = ROOT / "test" / "fixtures" / "skills" / "sample"
+        # No allowed-tools at all -> fallback should still find bin/sample.
+        bin_dir = inquire._skill_bin_from_allowed_tools("", fixture, "sample")
+        self.assertIsNotNone(bin_dir)
+        self.assertEqual(bin_dir.name, "sample")
+
+
+class TestSkillAuditEnvelope(unittest.TestCase):
+    """End-to-end skill audit: build_envelope on a SKILL.md target."""
+
+    def test_skill_target_kind_is_skill(self):
+        fixture = ROOT / "test" / "fixtures" / "skills" / "sample"
+        fm = inquire._read_skill_frontmatter(str(fixture / "SKILL.md"))
+        bin_dir = inquire._skill_bin_from_allowed_tools(
+            fm.get("allowed-tools", ""), fixture, "sample"
+        )
+        target = {
+            "kind": "skill",
+            "name": fm.get("name") or "sample",
+            "tool": fm.get("name") or "sample",
+            "cli": "no-such",
+            "plugin_path": str(fixture),
+            "skill_bin": str(bin_dir) if bin_dir else None,
+            "skill_frontmatter": fm,
+        }
+        with mock.patch.object(inquire, "cli_on_path", return_value=None):
+            with mock.patch.object(inquire, "web_search", return_value=[]):
+                env = inquire.build_envelope(target, mode="audit")
+        self.assertEqual(env["target"]["kind"], "skill")
+        self.assertEqual(env["target"]["name"], "sample")
+        self.assertIn("description", env["target"])
+        # Subcommand discovery via skill_bin should have found overview/status.
+        # We can't directly assert subcommands enumerated in the envelope
+        # (cluster module is the consumer), but we can confirm the audit
+        # didn't crash.
+        self.assertIn("usage_clusters", env)
+
+
+class TestPluginAuditRegression(unittest.TestCase):
+    """Plugin auto-detection still works (regression)."""
+
+    def test_plugin_target_kind_via_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            home.mkdir()
+            p = _make_fake_plugin(Path(td), "regress", PLUGIN_LEVEL1)
+            res = _run_bin(
+                "inquire", "regress", "--audit", "--plugin-path", str(p),
+                "--no-cache", "--cli", "definitely-not-on-path",
+                home=home,
+            )
+            self.assertEqual(res.returncode, 0, res.stderr + res.stdout)
+            env = json.loads(res.stdout)
+        self.assertEqual(env["target"]["kind"], "plugin")
+        self.assertEqual(env.get("envelope_version"), "1.1")
+
+
+class TestPromotionsField(unittest.TestCase):
+    def test_promotions_present_audit_no_clusters(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _make_fake_plugin(Path(td), "fake", PLUGIN_LEVEL1)
+            target = {"tool": "fake", "name": "fake", "cli": "no-such",
+                      "plugin_path": str(p)}
+            with mock.patch.object(inquire, "cli_on_path", return_value=None):
+                with mock.patch.object(inquire, "web_search", return_value=[]):
+                    env = inquire.build_envelope(target, mode="audit")
+        self.assertIn("promotions", env)
+        self.assertEqual(env["promotions"], [])
+
+    def test_promotions_built_from_clusters(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = _make_fake_plugin(Path(td), "fake", PLUGIN_LEVEL1)
+            target = {"tool": "fake", "name": "fake", "cli": "no-such",
+                      "plugin_path": str(p)}
+            cmd = 'sometool raw "SELECT id FROM widgets WHERE org_id=1"'
+            fake_signal = {
+                "files_scanned": 7, "files_skipped": 0,
+                "tuples": [
+                    ("2026-01-01T00:00:00Z", "/x", "Bash", cmd, {})
+                    for _ in range(12)
+                ],
+                "by_format": {"claude_code": 12}, "errors": [],
+            }
+            with mock.patch.object(inquire, "cli_on_path", return_value=None):
+                with mock.patch.object(inquire, "web_search", return_value=[]):
+                    with mock.patch.object(
+                        inquire, "_collect_transcripts", return_value=fake_signal
+                    ):
+                        env = inquire.build_envelope(target, mode="audit")
+        self.assertGreater(len(env["promotions"]), 0)
+        promo = env["promotions"][0]
+        self.assertIn("usage_evidence", promo)
+        self.assertIn("promotion_kind", promo)
+        self.assertIn("priority", promo)
+        # 12 invocations should land in the high bucket.
+        self.assertEqual(promo["priority"], "high")
+        self.assertEqual(promo["usage_evidence"]["transcripts_scanned"], 7)
+        self.assertEqual(promo["usage_evidence"]["date_range"],
+                         "2026-01-01..2026-01-01")
+
+
+# ─── Fix 6: 6 test gaps ─────────────────────────────────────────────────────
+
+
+class TestAdapterDiscoveryRoots(unittest.TestCase):
+    """Gap 1: non-claude adapter roots (gstack, codex, cursor) surface files."""
+
+    def _make_root(self, home: Path, fmt: str, rel_root: str, rel_file: str) -> None:
+        f = home / rel_root / rel_file
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text('{"type":"tool_use"}\n', encoding="utf-8")
+
+    @unittest.skipIf(sys.platform == "win32", "symlink-dependent glob on non-Windows only")
+    def test_discover_gstack_files(self):
+        pkg = _load_adapters_pkg()
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            self._make_root(home, "gstack", ".gstack/projects/proj1", "session.jsonl")
+            with mock.patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+                files = pkg.discover_files()
+        fmts = [f for f, _ in files]
+        self.assertIn("gstack", fmts)
+        self.assertEqual(files[0][0], "gstack")
+
+    def test_discover_codex_files(self):
+        pkg = _load_adapters_pkg()
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            self._make_root(home, "codex", ".codex/sessions", "s1.jsonl")
+            with mock.patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+                files = pkg.discover_files()
+        fmts = [f for f, _ in files]
+        self.assertIn("codex", fmts)
+
+    def test_discover_cursor_files(self):
+        pkg = _load_adapters_pkg()
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            self._make_root(home, "cursor", ".cursor/chats", "c1.jsonl")
+            with mock.patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+                files = pkg.discover_files()
+        fmts = [f for f, _ in files]
+        self.assertIn("cursor", fmts)
+
+
+class TestTier2ThresholdBoundary(unittest.TestCase):
+    """Gap 2: Tier 2 threshold boundary at count == 2."""
+
+    def _make_tuples(self, cmd: str, n: int) -> list:
+        return [["t", "/x", "Bash", cmd, {}] for _ in range(n)]
+
+    def test_tier2_at_threshold_kept(self):
+        # Exactly 2 identical Tier-2 invocations inside a Tier-1 cluster of >=3.
+        base_cmd = 'foo raw "SELECT id FROM kept WHERE org_id=1"'
+        other_cmd = 'foo raw "SELECT id FROM kept WHERE status=2"'
+        tuples = (self._make_tuples(base_cmd, 2)
+                  + self._make_tuples(other_cmd, 1))
+        # Need at least 3 for Tier-1; the first bucket has count=2 (kept).
+        # Add a third for Tier-1 with a different WHERE column.
+        tuples += self._make_tuples('foo raw "SELECT id FROM kept WHERE flag=0"', 1)
+        out = cluster_mod.cluster_invocations(tuples, [])
+        # Tier 2 with count=2 must appear.
+        t1 = out["tier1_clusters"][0]
+        counts = [e["count"] for e in t1["tier2"]]
+        self.assertIn(2, counts, "Tier 2 bucket at exactly count=2 must be kept")
+
+    def test_tier2_at_count1_dropped(self):
+        # 4 unique Tier-2 fingerprints, each appearing once — all should be dropped.
+        tuples = [
+            ["t", "/x", "Bash", f'foo raw "SELECT col{i} FROM shared WHERE k{i}=1"', {}]
+            for i in range(4)
+        ]
+        out = cluster_mod.cluster_invocations(tuples, [])
+        if out["stats"]["unique_tier1"] == 1:
+            self.assertEqual(out["tier1_clusters"][0]["tier2"], [],
+                             "Tier 2 buckets with count=1 must be dropped")
+
+
+class TestColOverlapBoundary(unittest.TestCase):
+    """Gap 3: 50% column overlap boundary for aligned/misaligned classification."""
+
+    def _tuples(self, select: str, where: str, n: int = 3) -> list:
+        cmd = f'foo raw "SELECT {select} FROM boundary WHERE {where}=1"'
+        return [["t", "/x", "Bash", cmd, {}] for _ in range(n)]
+
+    def test_type_c_at_50_pct_aligned(self):
+        # 1-of-2 cols overlap (50%) -> aligned.
+        tuples = self._tuples("id, name", "id")
+        out = cluster_mod.cluster_invocations(
+            tuples, [{"name": "boundary", "columns": ["id", "other"]}]
+        )
+        c = out["tier1_clusters"][0]["tier2"][0]
+        self.assertEqual(c["promotion_kind"], "aligned")
+
+    def test_type_b_below_50_pct_misaligned(self):
+        # 1-of-3 cluster cols overlap (33%) -> misaligned.
+        tuples = self._tuples("a, b, c", "a")
+        out = cluster_mod.cluster_invocations(
+            tuples, [{"name": "boundary", "columns": ["a", "x", "y"]}]
+        )
+        # cluster_cols = {a, b, c} (3); sub_cols = {a, x, y}; overlap = {a} = 1/3 < 50%
+        c = out["tier1_clusters"][0]["tier2"][0]
+        self.assertEqual(c["promotion_kind"], "misaligned")
+
+
+class TestHyphenatedSkillName(unittest.TestCase):
+    """Gap 4: skills with hyphenated names resolve bin dir via Bash(my-skill:*)."""
+
+    def test_hyphenated_skill_bin_resolution(self):
+        with tempfile.TemporaryDirectory() as td:
+            skill_dir = Path(td) / "my-skill"
+            bin_dir = skill_dir / "bin" / "my-skill"
+            bin_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: my-skill\nallowed-tools: Bash(my-skill:*)\n---\n",
+                encoding="utf-8"
+            )
+            result = inquire._skill_bin_from_allowed_tools(
+                "Bash(my-skill:*)", skill_dir, "my-skill"
+            )
+        self.assertIsNotNone(result, "Hyphenated skill name must resolve a bin dir")
+        self.assertEqual(result.name, "my-skill")
+
+
+class TestAllowedToolsWithoutBash(unittest.TestCase):
+    """Gap 5: allowed-tools with no Bash entry -> _skill_bin_from_allowed_tools returns None."""
+
+    def test_no_bash_entry_returns_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            skill_dir = Path(td) / "readskill"
+            skill_dir.mkdir()
+            result = inquire._skill_bin_from_allowed_tools(
+                "Read(file)", skill_dir, "readskill"
+            )
+        # No Bash(...:*) entry, no bin/<name> dir either -> None.
+        self.assertIsNone(result, "No Bash entry + no bin dir must return None")
+
+
+class TestWellUsedBoundary(unittest.TestCase):
+    """Gap 6: well_used 50% boundary."""
+
+    def _summary_ok(self) -> dict:
+        return {"questions_asked": 7, "ok": 7, "gaps": 0,
+                "na": 0, "unknown": 0, "high_confidence_gaps": 0}
+
+    def test_exactly_50_pct_aligned_is_well_used(self):
+        # 1 aligned + 1 missing = 50% -> well_used.
+        clusters = {"tier1_clusters": [
+            {"shape": "select: t", "count": 5,
+             "tier2": [
+                 {"promotion_kind": "aligned", "count": 3},
+                 {"promotion_kind": "missing", "count": 2},
+             ]},
+        ]}
+        v = inquire._verdict(self._summary_ok(), usage_clusters=clusters)
+        self.assertEqual(v, "well_used")
+
+    def test_below_50_pct_aligned_is_not_well_used(self):
+        # 1 aligned + 2 missing = 33% -> not well_used -> ok.
+        clusters = {"tier1_clusters": [
+            {"shape": "select: t", "count": 5,
+             "tier2": [
+                 {"promotion_kind": "aligned", "count": 3},
+                 {"promotion_kind": "missing", "count": 2},
+                 {"promotion_kind": "missing", "count": 2},
+             ]},
+        ]}
+        v = inquire._verdict(self._summary_ok(), usage_clusters=clusters)
+        self.assertEqual(v, "ok")
 
 
 if __name__ == "__main__":

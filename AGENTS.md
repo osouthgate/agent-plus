@@ -11,7 +11,7 @@ Durable instructions for any coding agent (Claude Code, Codex, Cursor, Aider) wo
 - `diff-summary` — per-file role + risk classification of a git diff
 - `skill-feedback` — local-first agent self-assessment for any Claude Code skill
 
-A fifth (`skill-plus`, session-mining-driven skill discovery + scaffolding + feedback aggregation) is in design.
+- `skill-plus` -- session-mining-driven skill discovery + scaffolding + feedback aggregation + tool inquiry (v0.5.0: transcript-sourced capability + usage auditor)
 
 Service wrappers (`github-remote`, `vercel-remote`, `supabase-remote`, `railway-ops`, `linear-remote`, `openrouter-remote`, `langfuse-remote`, `hermes-remote`, `coolify-remote`, `hcloud-remote`) previously shipped here. They moved to a separate marketplace at `osouthgate/agent-plus-skills` and now iterate independently.
 

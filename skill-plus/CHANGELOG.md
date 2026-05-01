@@ -4,6 +4,23 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.5.0 - 2026-05-01
+
+### Added
+- **Transcripts as a first-class source class** alongside `cli`, `plugin`, `web`, `openapi`, `repo`. Auto-discovered from `~/.claude/projects/`, `~/.gstack/projects/`, `~/.codex/sessions/`, `~/.cursor/chats/`. Extend via `~/.agent-plus/inquire-sources.json` + user-supplied adapters at `~/.agent-plus/inquire-adapters/<name>.py`. Symlinks in the adapter dir are skipped.
+- **Two-tier clustering.** Tier 1 = `(verb, sorted(tables))` shape fingerprint (threshold: count >= 3). Tier 2 = `(select_cols, where_cols)` column fingerprint within parent (threshold: count >= 2). Generic SQL-grammar normalisation only -- no per-tool regex.
+- **Type A/B/C promotion classifier.** A = Missing (no canned command, heavy raw use). B = Misaligned (canned exists but shape differs). C = Aligned (canned covers it correctly). Determined by diffing clusters against the target plugin or skill's existing subcommands.
+- **Friction-ranked priority.** Capability gap + heavy usage = `high`; light usage = `low`. New verdict state `well_used` for targets with no gaps where canned commands are actually being used.
+- **Skill-as-target support.** `--audit` now resolves against SKILL.md frontmatter (in addition to `plugin.json`). Subcommand bin auto-resolved from `Bash(<name>:*)` allowed-tools entry. Both plugin and skill kinds are supported.
+- **`--no-transcripts` flag** (also `AGENT_PLUS_INQUIRE_NO_TRANSCRIPTS=1` env var) to skip transcript sourcing entirely.
+- **ENVELOPE_VERSION 1.1** (additive only -- v1.0 consumers unaffected). New fields: `usage_signal`, `usage_clusters`, `promotions`, optional per-Q `usage_evidence` / `promotion_kind` / `priority`.
+- **Security:** raw command-string tuples are never persisted to envelope or cache -- clustering is in-memory only.
+- **67 new tests** across clustering, transcript adapter, envelope shape, priority calc, skill-kind detection. Total: 263 passing, 1 skipped.
+
+### Notes
+- Real-data dogfood: 13 Tier 1 shapes discovered across 27,026 tuples from 238 jsonl files. Cluster reference fixture at `skill-plus/test/fixtures/loamdb_db_clusters_reference.json` (structured shapes only -- no raw command strings committed).
+- Type B/C absent in current dogfood because A.2 discovery doesn't yet introspect argparse subcommands inside single-file CLIs. Noted as a follow-up.
+
 ## 0.4.0 - 2026-05-01
 
 ### Added

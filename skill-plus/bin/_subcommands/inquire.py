@@ -1,14 +1,28 @@
-"""skill-plus inquire — universal tool inquiry + plugin auditor (Phase A).
+"""skill-plus inquire — universal tool inquiry + plugin/skill auditor (Phase A).
 
 Two modes share one probe pipeline:
 
   skill-plus inquire <tool>                       # generator: probe + scaffold suggestion
-  skill-plus inquire <plugin> --audit             # auditor: probe an existing plugin
+  skill-plus inquire <plugin-or-skill> --audit    # auditor: probe an existing target
 
 Each Q (Q1..Q7) runs across every available source class (cli, plugin, web,
-openapi, repo). Sources stack — at least 2 sources required for non-`unknown`
-confidence. Web probe uses DuckDuckGo HTML (D1). Cache lives at
+openapi, repo, transcripts). Sources stack — at least 2 sources required for
+non-`unknown` confidence. Web probe uses DuckDuckGo HTML (D1). Cache lives at
 ~/.agent-plus/inquire-cache/<tool>.json with 7-day TTL (D2).
+
+Audit-mode targets are auto-detected:
+  - **plugin**: directory contains `.claude-plugin/plugin.json`
+  - **skill**:  directory contains `SKILL.md` with frontmatter; subcommand
+    bin discovered via the `Bash(<name>:*)` allowed-tools entry.
+
+Transcripts (claude_code/codex/cursor/gstack JSONL) are a first-class source.
+Disabled by passing `--no-transcripts` or env `AGENT_PLUS_INQUIRE_NO_TRANSCRIPTS=1`.
+
+ENVELOPE_VERSION contract: this is an ADDITIVE-ONLY field set. v1.1 envelopes
+add `usage_signal`, `usage_clusters`, `promotions`, per-Q `usage_evidence`,
+per-Q `promotion_kind`/`priority`, and the `well_used` verdict — but NEVER
+remove or change semantics of v1.0 fields. Any v1.0 consumer must keep
+working against v1.1 envelopes (regression-tested in `test_inquire.py`).
 
 Stdlib only — no third-party libraries. Subprocess timeouts everywhere.
 MSYS-aware: subprocess uses list form (no shell=True) and we set
@@ -39,7 +53,10 @@ from typing import Any, Optional
 CACHE_TTL_SECONDS = 7 * 24 * 3600
 CLI_PROBE_TIMEOUT = 10
 WEB_PROBE_TIMEOUT = 5
-ENVELOPE_VERSION = "1.0"
+ENVELOPE_VERSION = "1.1"
+PRIORITY_HIGH_MIN = 10     # Tier 1 count >=10 with capability gap = high-priority promotion.
+PRIORITY_LOW_MAX = 3       # Tier 1 count <3 with capability gap = low-priority (probably theoretical).
+MAX_INLINE_TUPLES = 5000   # In-memory cap for cluster pipeline (NOT persisted — see usage_signal field stripping).
 
 # Q metadata: (id, label, applies_always)
 QUESTIONS: list[tuple[str, str, bool]] = [
@@ -123,6 +140,163 @@ def _cap_confidence(q_id: str, confidence: str) -> str:
     if _CONFIDENCE_RANK.get(confidence, 0) > _CONFIDENCE_RANK.get(ceiling, 3):
         return ceiling
     return confidence
+
+
+# ─── priority calc (Gate A.3) ─────────────────────────────────────────────────
+
+
+def _priority(promotion_kind: str, tier1_count: int) -> str:
+    """Pure mapping from (promotion_kind, tier1_count) -> priority string.
+
+    Rules (per delta plan §"Priority calculation"):
+      high   = (gap or misaligned) AND tier1_count >= 10
+      medium = gap AND 3 <= tier1_count < 10, OR misaligned AND tier1_count >= 10
+      low    = gap AND tier1_count < 3
+      n/a    = aligned
+    """
+    if promotion_kind == "aligned":
+        return "n/a"
+    if promotion_kind == "missing":
+        if tier1_count >= PRIORITY_HIGH_MIN:
+            return "high"
+        if tier1_count >= PRIORITY_LOW_MAX:
+            return "medium"
+        return "low"
+    if promotion_kind == "misaligned":
+        if tier1_count >= PRIORITY_HIGH_MIN:
+            return "high"
+        # Misaligned with low usage is medium — even modest signal that the
+        # canned doesn't fit is worth surfacing because the fix is small.
+        return "medium"
+    # Unknown promotion_kind — be conservative.
+    return "low"
+
+
+# ─── skill frontmatter reader (Gate A.3) ──────────────────────────────────────
+
+# Minimal YAML-frontmatter reader. Supports:
+#   ---
+#   key: scalar
+#   key: "quoted scalar"
+#   key: value with spaces
+#   ---
+# Anything more exotic (block mappings, lists, multiline) is ignored — we
+# only need name/description/allowed-tools for skill auditing.
+_FRONTMATTER_RE = re.compile(
+    r"^---\s*\n(?P<body>.*?)\n---\s*(?:\n|$)", re.DOTALL
+)
+
+
+def _read_skill_frontmatter(skill_md_path: str) -> Optional[dict]:
+    """Parse a SKILL.md's --- frontmatter block. Returns dict or None."""
+    try:
+        text = Path(skill_md_path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return None
+    body = m.group("body")
+    out: dict[str, str] = {}
+    for line in body.splitlines():
+        line = line.rstrip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            continue
+        # Don't try to parse nested mappings — only top-level key: value.
+        if line.startswith(" ") or line.startswith("\t"):
+            continue
+        key, _, val = line.partition(":")
+        key = key.strip()
+        val = val.strip()
+        # Strip a single matched pair of surrounding quotes.
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        out[key] = val
+    return out
+
+
+def _skill_bin_from_allowed_tools(allowed_tools: str, skill_md_dir: Path,
+                                  skill_name: str) -> Optional[Path]:
+    """Given an allowed-tools string like
+    `Bash(.claude/skills/loamdb-db/bin/loamdb-db:*) Bash(other:*)`,
+    locate the bin directory we should walk for subcommand discovery.
+
+    Resolution order:
+      1. parse first `Bash(<path>:*)` entry; if path resolves under
+         <skill-md-dir>, use its parent dir (the bin/ folder containing
+         the launcher).
+      2. fallback: <skill-md-dir>/bin/<skill_name>.
+      3. fallback: <skill-md-dir>/bin/<bare-name-from-allowed-tools>.
+    """
+    bash_re = re.compile(r"Bash\(([^):]+):\*\)")
+    candidates: list[Path] = []
+    for m in bash_re.finditer(allowed_tools or ""):
+        raw = m.group(1).strip()
+        # Bare name (e.g., "skill-plus") — try <dir>/bin/<bare>.
+        if "/" not in raw and "\\" not in raw:
+            candidates.append(skill_md_dir / "bin" / raw)
+            continue
+        # Path-like (e.g., ".claude/skills/loamdb-db/bin/loamdb-db").
+        # The launcher is the FILE; we want the dir that holds subcommand bins.
+        rel = Path(raw)
+        # Strip a leading "./" or absolute marker.
+        if rel.is_absolute():
+            launcher = rel
+        else:
+            # Relative to the skill md's parent grandparent (repo root):
+            # try a few anchor points.
+            launcher = skill_md_dir.parent.parent.parent / rel
+            # Also try as if rel is rooted at skill_md_dir.parent.parent.
+            alt = skill_md_dir.parent.parent / rel
+            candidates.append(launcher.parent)
+            candidates.append(alt.parent)
+            continue
+        candidates.append(launcher.parent)
+    # Fallbacks.
+    if skill_name:
+        candidates.append(skill_md_dir / "bin" / skill_name)
+        candidates.append(skill_md_dir / "bin")
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+
+def _detect_target_kind(path_or_name: str) -> tuple[str, Optional[str]]:
+    """Auto-detect whether `path_or_name` points at a plugin or a skill.
+
+    Returns (kind, resolved_path) where kind is "plugin"|"skill"|"unknown".
+    """
+    if not path_or_name:
+        return "unknown", None
+    p = Path(path_or_name)
+    if p.is_dir():
+        if (p / ".claude-plugin" / "plugin.json").exists():
+            return "plugin", str(p)
+        if (p / "SKILL.md").exists():
+            return "skill", str(p)
+        return "unknown", str(p)
+    if p.is_file() and p.name == "SKILL.md":
+        return "skill", str(p.parent)
+    if p.is_file() and p.name == "plugin.json":
+        return "plugin", str(p.parent.parent)
+    return "unknown", None
+
+
+def _resolve_skill_by_name(name: str) -> Optional[str]:
+    """Search ~/.claude/skills/<name>/SKILL.md and CWD-relative locations."""
+    candidates = [
+        Path.home() / ".claude" / "skills" / name / "SKILL.md",
+        Path.cwd() / ".claude" / "skills" / name / "SKILL.md",
+        Path.cwd() / name / "SKILL.md",
+        Path.cwd() / name / "skills" / name / "SKILL.md",
+    ]
+    for c in candidates:
+        if c.exists():
+            return str(c.parent)
+    return None
 
 
 # ─── cache ────────────────────────────────────────────────────────────────────
@@ -617,7 +791,11 @@ def probe_q7_cli(target: dict) -> Optional[dict]:
 
 
 def _read_plugin_bins(plugin_path: str) -> Optional[str]:
-    """Concatenate the text of files under <plugin_path>/bin/ for grep purposes."""
+    """Concatenate the text of files under <plugin_path>/bin/ for grep purposes.
+
+    Walks recursively one level deep so skill layouts like
+    `<skill-dir>/bin/<name>/<subcommand>.py` are also picked up.
+    """
     pp = Path(plugin_path)
     if not pp.is_dir():
         return None
@@ -625,12 +803,26 @@ def _read_plugin_bins(plugin_path: str) -> Optional[str]:
     if not bin_dir.is_dir():
         return None
     chunks: list[str] = []
-    for entry in sorted(bin_dir.iterdir()):
-        if entry.is_file():
-            try:
-                chunks.append(entry.read_text(encoding="utf-8", errors="replace"))
-            except OSError:
-                continue
+
+    def _read_into(d: Path) -> None:
+        for entry in sorted(d.iterdir()):
+            if entry.is_file():
+                try:
+                    chunks.append(entry.read_text(encoding="utf-8",
+                                                  errors="replace"))
+                except OSError:
+                    continue
+            elif entry.is_dir():
+                # one level of subdir (skill's bin/<name>/, or _subcommands/)
+                for sub in sorted(entry.iterdir()):
+                    if sub.is_file():
+                        try:
+                            chunks.append(sub.read_text(encoding="utf-8",
+                                                         errors="replace"))
+                        except OSError:
+                            continue
+
+    _read_into(bin_dir)
     return "\n".join(chunks) if chunks else None
 
 
@@ -839,11 +1031,27 @@ def _summarize(results: list[dict]) -> dict:
     return s
 
 
-def _verdict(summary: dict) -> str:
+def _verdict(summary: dict, *, usage_clusters: Optional[dict] = None) -> str:
+    """Audit verdict (Gate A.3 adds `well_used`).
+
+    well_used: no capability gaps in Q1-Q7 AND usage_clusters non-empty AND
+    >= 50% of Tier 2 clusters classify as `aligned`. Indicates the tool is
+    in good shape and people are using its canned commands properly.
+    """
     if summary.get("unknown", 0) >= 4:
         return "mostly_unknown"
     if summary.get("gaps", 0) > 0:
         return "gaps_found"
+    # No gaps. Check whether transcripts show healthy canned usage.
+    if usage_clusters and isinstance(usage_clusters, dict):
+        all_t2: list[dict] = []
+        for t1 in usage_clusters.get("tier1_clusters") or []:
+            all_t2.extend(t1.get("tier2") or [])
+        if all_t2:
+            aligned = sum(1 for c in all_t2
+                          if c.get("promotion_kind") == "aligned")
+            if aligned / len(all_t2) >= 0.5:
+                return "well_used"
     return "ok"
 
 
@@ -891,6 +1099,45 @@ def _pr_body_draft(target_name: str, results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _collect_transcripts() -> dict:
+    """Run transcript adapters via the inquire_adapters package. Returns
+    the same structure as inquire_adapters.collect_tuples(), or an empty
+    skeleton if the package is missing/broken (fail-soft).
+
+    Set AGENT_PLUS_INQUIRE_NO_TRANSCRIPTS=1 to skip the walk entirely (used
+    by the test suite to avoid hitting the real ~/.claude/projects tree).
+    """
+    if os.environ.get("AGENT_PLUS_INQUIRE_NO_TRANSCRIPTS") == "1":
+        return {
+            "files_scanned": 0,
+            "files_skipped": 0,
+            "tuples": [],
+            "by_format": {},
+            "errors": [],
+        }
+    try:
+        # Ensure the parent _subcommands directory is on sys.path so the
+        # `inquire_adapters` package is importable. The bin/skill-plus
+        # loader runs this module via spec_from_file_location which does
+        # NOT add the file's parent to sys.path automatically.
+        import importlib
+        import sys as _sys
+        from pathlib import Path as _Path
+        here = _Path(__file__).resolve().parent
+        if str(here) not in _sys.path:
+            _sys.path.insert(0, str(here))
+        adapters = importlib.import_module("inquire_adapters")
+        return adapters.collect_tuples()
+    except Exception as e:  # noqa: BLE001 — fail-soft.
+        return {
+            "files_scanned": 0,
+            "files_skipped": 0,
+            "tuples": [],
+            "by_format": {},
+            "errors": [f"adapter_load_failed: {type(e).__name__}: {str(e)[:80]}"],
+        }
+
+
 def build_envelope(target: dict, *, mode: str) -> dict:
     sources_used: set[str] = set()
     sources_unavailable: set[str] = set()
@@ -899,22 +1146,44 @@ def build_envelope(target: dict, *, mode: str) -> dict:
         results.append(run_question(q_id, target,
                                     sources_used=sources_used,
                                     sources_unavailable=sources_unavailable))
-    summary = _summarize(results)
-    verdict = _verdict(summary)
 
+    # Gate A.1: collect transcript usage tuples. A.2 will cluster these.
+    # The probe is always run; if no tuples come back, the transcripts
+    # source is unavailable rather than used.
+    transcript_signal = _collect_transcripts()
+    if transcript_signal["tuples"]:
+        sources_used.add("transcripts")
+    else:
+        sources_unavailable.add("transcripts")
+
+    summary = _summarize(results)
+
+    # Gate A.3: target kind (plugin|skill) inferred from the target dict.
+    target_kind = target.get("kind") or ("plugin" if mode == "audit" else "tool")
     target_block: dict = {
-        "kind": "plugin" if mode == "audit" else "tool",
+        "kind": target_kind,
         "name": target.get("name") or target.get("tool"),
         "sources_used": sorted(sources_used),
         "sources_unavailable": sorted(sources_unavailable - sources_used),
     }
     if mode == "audit":
+        # Use plugin_path as canonical "where the bin sits" for both kinds —
+        # it points at the plugin dir for plugins, or the skill md dir for
+        # skills (the skill's bin is a child of skill_md_dir).
         target_block["path"] = target.get("plugin_path")
-        manifest = _read_plugin_manifest(target.get("plugin_path") or "")
-        target_block["version"] = manifest.get("version", "unknown")
+        if target_kind == "skill":
+            fm = target.get("skill_frontmatter") or {}
+            target_block["version"] = fm.get("version", "unknown")
+            target_block["description"] = fm.get("description", "")
+        else:
+            manifest = _read_plugin_manifest(target.get("plugin_path") or "")
+            target_block["version"] = manifest.get("version", "unknown")
 
     envelope: dict = {
-        "verdict": verdict,
+        "envelope_version": ENVELOPE_VERSION,
+        # `verdict` is finalized below once usage_clusters is computed
+        # (the well_used state needs cluster alignment data).
+        "verdict": "ok",  # placeholder — replaced below
         "mode": mode,
         "target": target_block,
         "summary": summary,
@@ -922,11 +1191,180 @@ def build_envelope(target: dict, *, mode: str) -> dict:
         "pr_body_draft": _pr_body_draft(target_block["name"] or "tool", results),
     }
 
+    # Gate A.1: stash raw usage tuples for A.2 clustering. Note the
+    # envelope shape is additive - no existing field mutated. ENVELOPE_VERSION
+    # is NOT bumped here; A.3 owns the version bump.
+    #
+    # Don't persist raw command strings — they can contain API keys, tokens, DSNs.
+    # Tuples are passed in-memory to the clustering pipeline only; the cluster
+    # output (structured + secret-free) is what gets persisted on the envelope.
+    raw_tuples = transcript_signal["tuples"][:MAX_INLINE_TUPLES]
+    envelope["usage_signal"] = {
+        "files_scanned": transcript_signal["files_scanned"],
+        "files_skipped": transcript_signal["files_skipped"],
+        "tuple_count": len(transcript_signal["tuples"]),
+        "by_format": transcript_signal["by_format"],
+        "errors": transcript_signal["errors"],
+    }
+
+    # Gate A.2: cluster the tuples into Tier 1 / Tier 2 with A/B/C
+    # classification when --audit is set. Generator mode skips this -
+    # there's no "existing subcommands" set to compare against.
+    # Failure here is fail-soft: clustering is additive intel.
+    if mode == "audit":
+        try:
+            import importlib
+            import sys as _sys
+            from pathlib import Path as _Path
+            here = _Path(__file__).resolve().parent
+            if str(here) not in _sys.path:
+                _sys.path.insert(0, str(here))
+            cluster_mod = importlib.import_module("inquire_cluster")
+            # Skill targets discover bins under their resolved skill_bin
+            # path; plugins use the plugin root (cluster module finds bin/).
+            sub_root = target.get("skill_bin") or target.get("plugin_path")
+            existing_subs = cluster_mod.discover_subcommands_from_plugin(sub_root)
+            envelope["usage_clusters"] = cluster_mod.cluster_invocations(
+                raw_tuples, existing_subs
+            )
+        except Exception as e:  # noqa: BLE001 - never crash the audit
+            envelope["usage_clusters"] = {
+                "tier1_clusters": [],
+                "stats": {
+                    "total_invocations": 0,
+                    "unique_tier1": 0,
+                    "unique_tier2": 0,
+                    "parse_failures": 0,
+                    "error": f"cluster_failed: {type(e).__name__}: {str(e)[:80]}",
+                },
+            }
+
+        # Gate A.3: build envelope-level `promotions` from usage_clusters.
+        # Q <-> cluster mapping note: clusters describe raw commands
+        # observed across the whole tool, not per-Q. So the canonical
+        # home for cluster-driven recommendations is the envelope-level
+        # `promotions[]` field. Per-Q `usage_evidence` is OPTIONAL — we
+        # attach it ONLY when a cluster's domain words match a Q's
+        # label (currently a simple keyword overlap; future gates can
+        # tighten this). This keeps Q rows scoped to capability gaps and
+        # lets `promotions[]` carry the friction signal.
+        envelope["promotions"] = _build_promotions(
+            envelope.get("usage_clusters") or {},
+            transcripts_scanned=transcript_signal["files_scanned"],
+            tuples=raw_tuples,
+        )
+
+        # Optionally enrich per-Q rows with usage_evidence / promotion_kind /
+        # priority when a cluster's domain matches the Q's label.
+        _attach_usage_evidence_to_questions(results, envelope["promotions"])
+
+    # Now that usage_clusters is final (or absent), pick the verdict.
+    envelope["verdict"] = _verdict(summary,
+                                   usage_clusters=envelope.get("usage_clusters"))
+
     # Generator mode adds a recommended skill scaffold.
     if mode == "generate":
         envelope["recommended_skill"] = _recommended_skill(target_block["name"] or "tool", results)
 
     return envelope
+
+
+def _build_promotions(usage_clusters: dict, *,
+                      transcripts_scanned: int,
+                      tuples: list) -> list[dict]:
+    """Flatten usage_clusters into a list of envelope-level promotion entries.
+
+    Each entry has the shape documented in the delta plan:
+      {
+        "usage_evidence": {tier1_shape, tier1_count, tier2_clusters,
+                           transcripts_scanned, date_range},
+        "promotion_kind": "missing"|"misaligned"|"aligned",
+        "priority": "high"|"medium"|"low"|"n/a",
+      }
+
+    The `priority` is computed per Tier-2 cluster (each tier2 entry yields
+    one promotion). `tier1_count` is the parent Tier-1 cluster count.
+    """
+    promotions: list[dict] = []
+    date_range = _date_range_from_tuples(tuples)
+    for t1 in usage_clusters.get("tier1_clusters") or []:
+        shape = t1.get("shape", "")
+        t1_count = int(t1.get("count") or 0)
+        t2_list = t1.get("tier2") or []
+        for t2 in t2_list:
+            promo_kind = t2.get("promotion_kind", "missing")
+            entry = {
+                "usage_evidence": {
+                    "tier1_shape": shape,
+                    "tier1_count": t1_count,
+                    "tier2_clusters": [{
+                        "select_cols": t2.get("select_cols") or [],
+                        "where_cols": t2.get("where_cols") or [],
+                        "count": t2.get("count") or 0,
+                        "sample_query": t2.get("sample_query") or "",
+                    }],
+                    "transcripts_scanned": transcripts_scanned,
+                    "date_range": date_range,
+                },
+                "promotion_kind": promo_kind,
+                "priority": _priority(promo_kind, t1_count),
+            }
+            if t2.get("recommended_name"):
+                entry["recommended_name"] = t2["recommended_name"]
+            promotions.append(entry)
+    return promotions
+
+
+def _date_range_from_tuples(tuples: list) -> str:
+    """Best-effort YYYY-MM-DD..YYYY-MM-DD from the (timestamp, ...) tuples."""
+    dates: list[str] = []
+    for t in tuples or []:
+        if not t:
+            continue
+        ts = t[0] if isinstance(t, (list, tuple)) and t else None
+        if isinstance(ts, str) and len(ts) >= 10:
+            dates.append(ts[:10])
+    if not dates:
+        return ""
+    dates.sort()
+    return f"{dates[0]}..{dates[-1]}"
+
+
+# Q label -> domain keywords. Used ONLY to decide whether a cluster's
+# tier1 shape might be domain-relevant to a Q row. Generic — no plugin
+# names, no table names. Keep this list short; broader matches dilute
+# signal-to-noise.
+_Q_DOMAIN_KEYWORDS: dict = {
+    "Q3": ("wait", "poll", "status", "run", "job", "queue"),
+    # Q1/Q2/Q4-Q7 are not currently mapped — leaving them out is the
+    # default behaviour and keeps the per-Q usage_evidence signal sparse.
+}
+
+
+def _attach_usage_evidence_to_questions(results: list[dict],
+                                        promotions: list[dict]) -> None:
+    """OPTIONALLY decorate Q rows with usage_evidence when a cluster
+    plausibly maps to that Q's domain. Most Qs get nothing — that's the
+    point. The bulk of usage signal lives in envelope-level `promotions`.
+    """
+    for r in results:
+        q_id = r.get("q_id")
+        keywords = _Q_DOMAIN_KEYWORDS.get(q_id)
+        if not keywords:
+            continue
+        matches = [
+            p for p in promotions
+            if any(kw in (p.get("usage_evidence", {}).get("tier1_shape") or "").lower()
+                   for kw in keywords)
+        ]
+        if not matches:
+            continue
+        # Pick the highest-count match for inline summary.
+        best = max(matches,
+                   key=lambda p: p.get("usage_evidence", {}).get("tier1_count", 0))
+        r["usage_evidence"] = best["usage_evidence"]
+        r["promotion_kind"] = best["promotion_kind"]
+        r["priority"] = best["priority"]
 
 
 def _recommended_skill(tool_name: str, results: list[dict]) -> dict:
@@ -968,6 +1406,9 @@ def run(args, emit_fn) -> int:
     repo_path = getattr(args, "repo", None)  # noqa: F841 — Phase A doesn't fully wire repo signals
     no_cache = bool(getattr(args, "no_cache", False))
     refresh = bool(getattr(args, "refresh", False))
+    no_transcripts = bool(getattr(args, "no_transcripts", False))
+    if no_transcripts:
+        os.environ["AGENT_PLUS_INQUIRE_NO_TRANSCRIPTS"] = "1"
 
     # Cache key includes the audit mode so a generate result doesn't masquerade
     # as an audit result and vice versa.
@@ -988,7 +1429,48 @@ def run(args, emit_fn) -> int:
         "cli": cli_override or tool_name,
     }
     if audit_mode:
-        target["plugin_path"] = plugin_path
+        # Gate A.3: auto-detect plugin vs skill target. Precedence:
+        #   1. explicit --plugin-path that points at a plugin OR a skill dir.
+        #   2. tool_name interpreted as a directory path.
+        #   3. tool_name as a name -> plugin lookup, then skill lookup.
+        candidate_path = plugin_path
+        if not candidate_path:
+            # Try interpreting tool_name as a path first.
+            p = Path(tool_name)
+            if p.exists():
+                candidate_path = str(p)
+        kind: str = "unknown"
+        resolved: Optional[str] = None
+        if candidate_path:
+            kind, resolved = _detect_target_kind(candidate_path)
+        if kind == "unknown":
+            # Skill-by-name lookup.
+            sk = _resolve_skill_by_name(tool_name)
+            if sk:
+                kind, resolved = "skill", sk
+        if kind == "skill" and resolved:
+            target["kind"] = "skill"
+            target["plugin_path"] = resolved  # carries skill md dir
+            fm = _read_skill_frontmatter(str(Path(resolved) / "SKILL.md")) or {}
+            target["skill_frontmatter"] = fm
+            # Resolve subcommand bin dir from allowed-tools.
+            sb = _skill_bin_from_allowed_tools(
+                fm.get("allowed-tools", ""), Path(resolved),
+                fm.get("name") or tool_name,
+            )
+            if sb:
+                target["skill_bin"] = str(sb)
+            # Override name from frontmatter when present.
+            if fm.get("name"):
+                target["name"] = fm["name"]
+                target["tool"] = fm["name"]
+        elif kind == "plugin" and resolved:
+            target["kind"] = "plugin"
+            target["plugin_path"] = resolved
+        else:
+            # Default: keep prior behaviour (plugin_path may be None).
+            target["kind"] = "plugin"
+            target["plugin_path"] = candidate_path
 
     mode = "audit" if audit_mode else "generate"
     envelope = build_envelope(target, mode=mode)
