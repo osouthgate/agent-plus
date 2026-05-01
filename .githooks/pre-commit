@@ -62,22 +62,28 @@ cd "$REPO_ROOT"
 # breaks on Windows Git Bash because Python looks at USERPROFILE first
 # and `env -i` strips it.
 #
+# Single source of truth: derive the strip list from PLUGIN_ENV_SPEC at
+# hook time via scripts/_dump_plugin_env_vars.py. This keeps the hook in
+# sync with the framework — when a new plugin lands with new required env
+# vars, the dump picks them up automatically. No drift between hook and
+# contract. Hard-fail if the dump fails (silently skipping the strip is
+# the bug class the hook exists to prevent).
+PLUGIN_ENV_VARS=$(python3 "$REPO_ROOT/scripts/_dump_plugin_env_vars.py" 2>&1)
+if [ -z "$PLUGIN_ENV_VARS" ] || ! echo "$PLUGIN_ENV_VARS" | grep -q '^[A-Z_]'; then
+    echo "pre-commit: failed to derive plugin env vars from PLUGIN_ENV_SPEC:" >&2
+    echo "$PLUGIN_ENV_VARS" >&2
+    echo "  (this would let the maintainer's env leak into tests — refusing to proceed)" >&2
+    exit 2
+fi
+
 # Subshell keeps the unsets local so the rest of the hook still has the
 # maintainer's env if it needs to print things etc.
 clean_env() {
     (
-        # Strip every env var that affects PLUGIN_ENV_SPEC readiness or the
-        # marketplaces root. Keep this list aligned with the test class's
-        # _clean_env helper at agent-plus-meta/test/test_agent_plus.py.
-        unset GITHUB_TOKEN GITHUB_REPO
-        unset VERCEL_TOKEN VERCEL_TEAM_ID
-        unset COOLIFY_URL COOLIFY_API_KEY
-        unset HCLOUD_TOKEN
-        unset HERMES_URL HERMES_CHAT_API_KEY
-        unset LANGFUSE_PUBLIC_KEY LANGFUSE_SECRET_KEY LANGFUSE_BASE_URL LANGFUSE_HOST
-        unset OPENROUTER_API_KEY OPENROUTER_PROVISIONING_KEY
-        unset SUPABASE_ACCESS_TOKEN SUPABASE_PROJECT_REF SUPABASE_DB_URL
-        unset LINEAR_API_KEY
+        # Unset every plugin env var (derived dynamically — see above).
+        for _var in $PLUGIN_ENV_VARS; do
+            unset "$_var"
+        done
         # AGENT_PLUS_NO_ENV_FILES=1 prevents the bin's load_env from walking
         # up from cwd and finding the maintainer's ~/.env (which has the
         # same plugin env vars we just stripped).
