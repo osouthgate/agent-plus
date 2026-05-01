@@ -84,6 +84,28 @@ def _with_tool_meta(payload: Any) -> Any:
     return payload
 
 
+class StructuredError(Exception):
+    """User-facing error with three-tier (problem/cause/fix) framing.
+
+    Subcommands raise this when they want to surface a domain-aware
+    failure envelope instead of the generic `{"error": str(e)}` fallback.
+    `main()` catches it and emits:
+
+        {"tool": ..., "error": <summary>, "problem": ..., "cause": ...,
+         "fix": ..., "cmd": ...}
+
+    Introduced in v0.15.6 for F2 (bad `--dir` + Git Bash MSYS path
+    mangling) — see CHANGELOG entry for the original incident.
+    """
+
+    def __init__(self, summary: str, *, problem: str, cause: str, fix: str):
+        super().__init__(summary)
+        self.summary = summary
+        self.problem = problem
+        self.cause = cause
+        self.fix = fix
+
+
 # ─── constants ───────────────────────────────────────────────────────────────
 
 WORKSPACE_DIRNAME = ".agent-plus"
@@ -3729,6 +3751,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         payload = handlers[args.cmd](args)
     except SystemExit:
         raise
+    except StructuredError as e:
+        err = {
+            "tool": _tool_meta(),
+            "error": e.summary,
+            "problem": e.problem,
+            "cause": e.cause,
+            "fix": e.fix,
+            "cmd": args.cmd,
+        }
+        print(json.dumps(err, ensure_ascii=False), file=sys.stderr)
+        return 1
     except Exception as e:  # noqa: BLE001 — never crash with a stack trace
         err = {"tool": _tool_meta(), "error": str(e), "cmd": args.cmd}
         print(json.dumps(err), file=sys.stderr)

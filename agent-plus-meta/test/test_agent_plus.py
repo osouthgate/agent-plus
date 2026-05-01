@@ -152,6 +152,59 @@ class TestInit(unittest.TestCase):
             self.assertIn(k, result)
 
 
+class TestInitBadDirError(unittest.TestCase):
+    """F2 (v0.15.6): `init --dir <unwritable>` returns a structured
+    three-tier envelope (problem/cause/fix) instead of leaking raw OS
+    errors. See agent-plus-meta CHANGELOG entry for the original incident.
+    """
+
+    def test_bad_dir_returns_structured_envelope(self) -> None:
+        # Pick a path whose deepest existing ancestor is read-only on every
+        # platform: on POSIX this is `/proc/1` (owned by root), on Windows
+        # we use a path under the system root that's reliably write-denied
+        # for unprivileged users. We just need ANY OSError on mkdir to
+        # exercise the structured-error path; the contents of `cause` are
+        # platform-specific by design.
+        if sys.platform == "win32":
+            bad = r"C:\Windows\System32\agent-plus-test-deny-xxx"
+        else:
+            bad = "/proc/1/agent-plus-test-deny-xxx"
+        rc, out, err = _run("init", "--non-interactive", "--auto",
+                            "--dir", bad)
+        self.assertEqual(rc, 1, msg=f"expected rc=1, got {rc}; stderr={err!r}")
+        # Structured envelope is emitted on stderr (matches the existing
+        # generic-error contract).
+        try:
+            payload = json.loads(err.strip())
+        except json.JSONDecodeError:
+            self.fail(f"stderr was not JSON: {err!r}")
+        self.assertEqual(payload.get("error"),
+                         "could not create workspace directory")
+        for k in ("problem", "cause", "fix", "tool", "cmd"):
+            self.assertIn(k, payload, f"missing {k} in {payload!r}")
+        # The `fix` line must point users toward a writable home-relative
+        # path — this is the actionable bit that distinguishes the new
+        # envelope from the old `[WinError 5]` leak.
+        self.assertIn("--dir", payload["fix"])
+        self.assertIn("~/", payload["fix"])
+
+    def test_msys_detection_helper_handles_git_prefix(self) -> None:
+        """Unit-level check on the MSYS-prefix helper. Independent of the
+        running platform — we just verify the prefix list catches the
+        Git for Windows install dir when sys.platform=='win32'.
+        """
+        # Force-import the init submodule (uses _load_init_module above).
+        with patch.object(_init_mod.sys, "platform", "win32"):
+            self.assertTrue(_init_mod._looks_msys_mangled(
+                "/foo", Path(r"C:\Program Files\Git\foo")))
+            self.assertFalse(_init_mod._looks_msys_mangled(
+                "/foo", Path(r"C:\Users\me\foo")))
+        with patch.object(_init_mod.sys, "platform", "linux"):
+            # Non-Windows: never flag MSYS even if path matches.
+            self.assertFalse(_init_mod._looks_msys_mangled(
+                "/foo", Path(r"C:\Program Files\Git\foo")))
+
+
 # ─── init wizard (v0.12.0) ───────────────────────────────────────────────────
 
 
