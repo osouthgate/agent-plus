@@ -4,6 +4,33 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.15.4 - 2026-05-01
+
+Closes the lifecycle-ring "install → healthy" semantic gap that v0.15.2 + v0.15.3 left open. Plus the doc-drift CI gate caught a real one — README badges fell behind through the v0.15.2/v0.15.3 churn.
+
+### Fixed
+
+- **Verdict logic now distinguishes "not yet configured" from "partially configured."** New `envcheck.user_configured_count` field counts only plugins that became ready BECAUSE the user set their required env vars (excludes "trivially ready" plugins like `github-remote`, `railway-ops`, `skill-feedback` that have `required: []` and are always ready). New verdict path:
+  - `user_configured_count == 0 && missing_count > 0` → fresh install, **healthy** (the lifecycle-ring win)
+  - `user_configured_count > 0 && missing_count > 0` → partial config, **degraded** (real signal worth surfacing)
+  - `missing_count == 0` → fully configured, **healthy**
+  - error severity OR stale_entries → **degraded** (unchanged)
+  - self_broken OR !ws_exists → **broken** (unchanged)
+- **`AGENT_PLUS_NO_ENV_FILES=1` env var** to suppress the `_find_env_files` walk-up from cwd. Test-friendly: prevents the maintainer's `~/.env` from leaking into hermetic test envcheck assertions. Documented as test-friendly + available to users who want explicit shell-env-only control.
+- **README badges synced.** Doc-drift CI gate caught that `version-0.15.1-green` and `tests-405%20passing` fell behind the actual VERSION (0.15.4) and test count (413). Both updated. The gate worked exactly as designed — failed CI on the v0.15.3 push, surfaced the drift, fix landed in this release. The unfair-advantage move from the outside-opinion review is paying off already.
+
+### Tests
+
+- 2 new tests in `TestDoctorSelfMultiSourceAndVerdict`:
+  - `test_verdict_healthy_on_fresh_install_no_user_config` — confirms fresh install with no env vars set → verdict=healthy
+  - `test_verdict_degraded_on_partial_user_config` — confirms `LINEAR_API_KEY` set + others unset → verdict=degraded
+- Test infrastructure: `_setup_install_and_workspace` (init workspace so doctor doesn't return broken) + `_doctor_with_envfile` (bypasses the shared `_run` helper which merges `os.environ` BACK on top of the cleaned env, defeating the strip — now uses `subprocess.run(env=)` directly for true env replacement).
+- agent-plus-meta unittest: 269 → 271. Total framework: 411 → 413 (271 + 15 install.sh + 127 skill-plus).
+
+### Cross-platform
+
+- `AGENT_PLUS_NO_ENV_FILES` checked via `os.environ.get` — works identically on Windows + macOS + Linux. No subprocess shell interpretation.
+
 ## 0.15.3 - 2026-05-01
 
 Follow-up to v0.15.2: dogfood gate against v0.15.2 surfaced that the multi-source primitives detection worked correctly (`primitives_source` populated, all values `"install_dir"` as expected) but doctor STILL reported `verdict: degraded` because the **self-check** still used `shutil.which("agent-plus-meta")` only — same blind spot as the primitives check before v0.15.2. On a fresh tarball install where `$INSTALL_DIR` isn't on `$PATH` yet, `self.on_path: false` → warn-severity issue → cosmetic noise (warns don't trigger degraded but appear as red flags in the report). v0.15.3 closes the loop.
