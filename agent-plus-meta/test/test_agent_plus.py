@@ -2502,16 +2502,24 @@ class TestDoctor(unittest.TestCase):
         self.assertTrue(payload["workspace"]["exists"])
         self.assertEqual(payload["envcheck"]["missing_count"], 0)
 
-    def test_doctor_degraded_when_envvar_missing(self) -> None:
-        # Workspace exists, but no env vars set → degraded.
+    def test_doctor_degraded_when_envvar_partially_configured(self) -> None:
+        # v0.15.4 corrected the verdict semantics:
+        #   - all-missing env vars (fresh install) = healthy (not-yet-configured)
+        #   - PARTIAL config (some plugins ready, others missing) = degraded
+        # This test exercises the partial-config path: set LINEAR_API_KEY only
+        # so user_configured_count >= 1 AND missing_count > 0 → degraded.
         rc0, _o, _e = _run("init", "--dir", str(self.dir))
         self.assertEqual(rc0, 0)
-        rc, payload, _err = self._doctor(dir_flag=str(self.dir))
+        rc, payload, _err = self._doctor(
+            dir_flag=str(self.dir),
+            extra_env={"LINEAR_API_KEY": "test-key-not-real"},
+        )
         self.assertEqual(rc, 0)
-        # Workspace OK so not broken; but envcheck has misses → degraded.
-        self.assertIn(payload["verdict"], ("degraded", "broken"))
+        # user_configured_count > 0 + missing_count > 0 → degraded.
+        self.assertEqual(payload["verdict"], "degraded",
+                         msg=f"partial config should be degraded, got {payload['verdict']}")
         self.assertGreater(len(payload["issues"]), 0)
-        # Confirm at least one envcheck issue.
+        # Confirm at least one envcheck issue surfaced.
         cats = [i["category"] for i in payload["issues"]]
         self.assertIn("envcheck", cats)
 
