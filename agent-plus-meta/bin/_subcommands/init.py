@@ -784,9 +784,19 @@ starts with / (slash command).
 \"\"\"
 from __future__ import annotations
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+
+def _msys_to_windows(p: str) -> str:
+    \"\"\"Convert MSYS/Git-Bash paths like /c/dev/foo -> C:/dev/foo on Windows.\"\"\"
+    if sys.platform == "win32":
+        m = re.match(r"^/([a-zA-Z])(/.*)$", p)
+        if m:
+            return m.group(1).upper() + ":" + m.group(2)
+    return p
 
 
 def _git_toplevel(cwd: Path) -> Path | None:
@@ -796,7 +806,7 @@ def _git_toplevel(cwd: Path) -> Path | None:
             cwd=cwd, capture_output=True, text=True, timeout=2,
         )
         if out.returncode == 0 and out.stdout.strip():
-            return Path(out.stdout.strip())
+            return Path(_msys_to_windows(out.stdout.strip()))
     except (OSError, subprocess.TimeoutExpired):
         pass
     return None

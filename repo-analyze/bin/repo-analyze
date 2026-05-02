@@ -1029,6 +1029,20 @@ def emit(data: Any, *, pretty: bool, output: Optional[str], shape_depth: int) ->
 # ──────────────────────────── stamp ────────────────────────────
 
 
+def _msys_to_windows(p: str) -> str:
+    """Convert MSYS/Git-Bash paths like /c/dev/foo -> C:/dev/foo on Windows.
+
+    Git for Windows on PATH may emit POSIX paths even when called from Python.
+    On non-Windows this is a no-op.
+    """
+    import re as _re
+    if sys.platform == "win32":
+        m = _re.match(r"^/([a-zA-Z])(/.*)$", p)
+        if m:
+            return m.group(1).upper() + ":" + m.group(2)
+    return p
+
+
 def _write_stamp(root: Path) -> None:
     """Write .agent-plus/repo-analyze.stamp at git root (fallback: root).
 
@@ -1041,11 +1055,10 @@ def _write_stamp(root: Path) -> None:
             ["git", "rev-parse", "--show-toplevel"],
             cwd=root, capture_output=True, text=True, timeout=2,
         )
-        git_root = (
-            Path(out.stdout.strip())
-            if out.returncode == 0 and out.stdout.strip()
-            else root
-        )
+        if out.returncode == 0 and out.stdout.strip():
+            git_root = Path(_msys_to_windows(out.stdout.strip()))
+        else:
+            git_root = root
     except (OSError, subprocess.TimeoutExpired):
         git_root = root
     try:
