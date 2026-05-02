@@ -4,6 +4,29 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.19.2 - 2026-05-02
+
+Post-install hardening, init UX overhaul, test suite restored.
+
+### Fixed
+- **Restored test_agent_plus.py** (185 test methods accidentally zeroed in v0.19.1). Pre-commit hook passed silently because Python unittest treats empty files as zero tests.
+- **`_plugin_is_installed` false positives.** Removed the external-CLI check from envcheck suppression — having `vercel` on PATH does not mean `vercel-remote` is installed. Eliminates 8 spurious envcheck warnings on fresh installs.
+- **`install.ps1` exit-code masking.** `& $ApmBin init | Out-Null` swallowed the init exit code; PowerShell resets `$LASTEXITCODE` to 0 after a pipeline. Now captured and warned on separately.
+- **`install.ps1 Resolve-Tag` silent fallback.** API errors (rate limit, proxy, network) now print a visible warning before falling back to `main`; previously the installer silently pulled unstable code.
+- **`install.ps1 Find-Python 2>&1`.** PS5.1 wraps stderr in `ErrorRecord` objects; swapped to `2>$null` so Python version detection is not broken by launchers that write to stderr.
+- **`shell=True` with paths containing spaces.** Quoted exe via `subprocess.list2cmdline` so `C:\Program Files\...` paths are not split by cmd.exe.
+- **`release.yml || true` swallowing errors.** Replaced with `gh release view || gh release create` so auth failures and rate limits surface instead of silently masking the root cause.
+- **`$Failed` uninitialized before `try`.** In PowerShell, `$null.Count == 0`; a pre-assignment error would silently print a success footer.
+
+### Added
+- **Init pause after cross-repo scan.** "Press Enter to continue to setup check..." so users can read scan results before doctor output appears.
+- **"Setup complete" summary before doctor.** Lists repos pre-warmed and other quick wins.
+- **ASCII art "wow moment" footer.** Shown at the end of interactive init: lists the three first prompts to try in Claude Code, links to doctor, and offers a Claude command for submitting GitHub issues.
+- **Doctor `[ACTION REQUIRED]` / `[OPTIONAL SETUP]` split.** Claude-plugin registration warnings (Claude is plugin-blind) are ACTION REQUIRED; envcheck credentials are OPTIONAL SETUP. Footer links to the issue tracker.
+- **`agent-plus-meta --json` flag.** Forces JSON output on stdout even when stdout is a TTY, for scripts piping from an interactive terminal.
+- **`_resolve_cmd()` helper in init.py.** Extracts duplicated Windows .cmd resolution + `shell=True` logic into a single module-level function.
+- **18 new tests.** Doctor heading labels, envcheck suppression, Windows .cmd subprocess handling, Windows uninstall .cmd wrapper detection.
+
 ## 0.19.1 - 2026-05-02
 
 Windows install polish and init UX improvements.
