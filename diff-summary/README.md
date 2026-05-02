@@ -154,6 +154,10 @@ Stdlib Python 3.11+ (uses `tomllib` from stdlib for the manifest read).
 python3 -m pytest diff-summary/test/ -v
 ```
 
+## nextSteps[] chaining
+
+Every output envelope includes a `nextSteps` array. When high-risk files are present the first entry names them (up to five, with overflow count). A second entry suggests `skill-feedback log diff-summary` to record usefulness. Claude follows these automatically.
+
 ## What it doesn't do
 
 - **No coverage analysis.** We flag "no co-changed test in this diff", which is not "no test coverage exists anywhere".

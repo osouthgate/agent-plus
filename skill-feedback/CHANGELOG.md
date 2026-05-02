@@ -6,6 +6,13 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.5.0 - 2026-05-02
+
+### Added
+- **`nextSteps[]` in output envelope.** Per-command follow-up hints injected into every response: `log` → `report`; `report` → `submit`; `show` → `log`. Lets Claude chain the feedback lifecycle automatically.
+- **Stop hook template in SKILL.md.** Documents how to configure a `.claude/settings.json` Stop hook so Claude is reminded to log skill feedback at the end of every session without relying on memory. Includes a smarter variant that reads installed skills by name. Controlled by `SKILL_FEEDBACK_QUIET=1` env var.
+- **`when_to_use` trigger phrases.** Added concrete confirmation phrases to the SKILL.md frontmatter: "that worked well", "that skill was useful", "this skill is broken", "rate that last skill", "log feedback for X". Concrete phrases improve Claude's skill-dispatch reliability over vague behavioral descriptions.
+
 ## 0.4.0 - 2026-05-01
 
 Provenance-aware advisor + submit. Slots into the v0.15.5 framework release.

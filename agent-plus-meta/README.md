@@ -463,6 +463,10 @@ The `kind` enum reserves slots for future additive use (`settings_hook`, `daemon
 
 Every other mode is recoverable via re-install. `--purge` removes user data we own (`.agent-plus/` workspace, feedback logs, marketplace state). It always prompts for the literal word `PURGE` — even under `--non-interactive`. Typing anything else aborts. The friction is intentional. PATH cleanup is NOT performed; if you added `~/.local/bin` to your shell rc, removing it is up to you.
 
+## nextSteps[] chaining
+
+Every command output envelope includes a `nextSteps` array. Per-command hints: `init` → `repo-analyze` + `diff-summary`; `doctor` (degraded) → fix-and-rerun; `doctor` (healthy) → `repo-analyze`; `envcheck` (missing vars) → remediate + rerun; `refresh` → doctor for verification. Claude follows these automatically without the user needing to know the workflow.
+
 ## What it doesn't do
 
 - **`refresh` is data-driven.** Each wrapper declares a `refresh_handler` block in its `plugin.json`; plugins without one are silently skipped. Extensions add your own.

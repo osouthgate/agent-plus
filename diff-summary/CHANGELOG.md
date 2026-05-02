@@ -4,6 +4,11 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.3.0 - 2026-05-02
+
+### Added
+- **`nextSteps[]` in output envelope.** Every `diff-summary` invocation now includes a `nextSteps` array. When high-risk files are present, the first entry names them (up to five, with overflow count). Remaining entries suggest `skill-feedback log diff-summary` to record usefulness. Lets Claude surface the review focus and close the feedback loop automatically.
+
 ## 0.2.1 - 2026-04-29
 
 ### Fixed

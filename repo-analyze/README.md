@@ -63,6 +63,10 @@ $ repo-analyze --pretty | head -40
 - **README.** First H1 → `title`. Text under H1 until next blank line / heading → `firstParagraph` (capped at 800 chars). All H2 headings → `headings` (capped at 20). No code blocks, no full sections — agents that want them call Read.
 - **Agent-plus enrichment.** If `.agent-plus/services.json` exists in the analyzed path or any ancestor, `agentPlusServices` is populated with **service names + statuses only** (Pattern 5 — no IDs, no project lists). Otherwise `null`.
 
+## nextSteps[] chaining
+
+Every output envelope includes a `nextSteps` array. When entrypoints are detected, the first entry suggests reading the top entrypoint. Remaining entries suggest `skill-plus scan` (mine session history for skill candidates) and `diff-summary`. Claude follows these automatically — no manual prompting needed after the first `repo-analyze` call.
+
 ## What it doesn't do
 
 - **No file content reading.** This is the map, not the territory. Use Read for actual content.

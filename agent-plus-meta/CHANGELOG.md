@@ -4,6 +4,15 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.19.0 - 2026-05-02
+
+Framework umbrella bump tracking the v0.19.0 DX polish release.
+
+### Added
+- **`doctor` check 6b — Claude Code plugin registration.** Runs `claude plugin list` and reports any of the five primitives not registered as Claude Code plugins. Emits `warn` severity with the exact `claude plugin install` fix command per unregistered primitive. Handles Windows cp1252 encoding by decoding bytes with `utf-8/replace` rather than relying on `text=True`. New `claude_plugin_registration` field in the doctor envelope. `_render_doctor_pretty` gains a `claude-plugins: N/5 registered` summary line.
+- **`nextSteps[]` field in all command outputs.** Each subcommand output envelope now includes a `nextSteps` array of 1–2 actionable follow-up hints so Claude can chain the workflow automatically. Doctor points at fix-and-rerun when issues exist, or `repo-analyze` when healthy. `init` points at `repo-analyze` and `diff-summary`. `envcheck` points at missing-var remediation or a full doctor run. `refresh` points at doctor for verification.
+- **`init` Claude-side CTA.** After step 7 (feedback invitation), the wizard now prints a 3-line block to stderr: `/reload-plugins`, `what is this repo?` → repo-analyze, `what changed on this branch?` → diff-summary. Bridges the "installed but Claude is session-blind" cold-start gap for interactive runs.
+
 ## 0.16.0 - 2026-05-01
 
 Companion bump for the `skill-plus@0.4.0` inquire slice — agent-plus-meta itself unchanged in this release. The framework version bump tracks the inquire pattern landing as a new public surface, per the v0.15.6 keystone-plugin discipline (agent-plus-meta's version IS the umbrella version; other plugins like skill-feedback and the wrappers version independently). The doc-drift gate `check_meta_version_matches_root` from v0.15.6 enforces this invariant.

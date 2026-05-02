@@ -133,6 +133,10 @@ If skill-plus isn't reachable, `feedback` and `submit` print a helpful install h
 - **Agent review at submit.** Regex covers token shapes, not PII or contextual leaks. The dry-run JSON exposes `agent_review_required: true` + `agent_review_checklist`; the existing Claude Code session is instructed (in SKILL.md) to scan the body for real names, customer/employer identifiers, and internal hostnames before `--no-dry-run`.
 - **Skill name whitelist.** `[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?` only — blocks path traversal and keeps JSONL filenames predictable.
 
+## nextSteps[] chaining
+
+Every output envelope includes a `nextSteps` array. Per-command hints: `log` → `report`; `report` → `submit`; `show` → `log`. Claude follows these automatically to close the feedback loop without the user needing to know the command sequence.
+
 ## What it doesn't do
 
 - **No retroactive transcript scraping.** Agent has to log explicitly.

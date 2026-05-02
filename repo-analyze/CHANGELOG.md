@@ -4,6 +4,11 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.3.0 - 2026-05-02
+
+### Added
+- **`nextSteps[]` in output envelope.** Every `repo-analyze` invocation now includes a `nextSteps` array. When entrypoints are detected, the first entry suggests reading the top entrypoint file. Remaining entries suggest `skill-plus scan` (mine session history for skill candidates) and `diff-summary` (summarise changes). Lets Claude follow the orientation workflow automatically without prompting.
+
 ## 0.2.1 - 2026-04-29
 
 ### Changed
