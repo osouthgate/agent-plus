@@ -4,6 +4,16 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## Unreleased
+
+### Changed
+- **Doctor `envcheck` summary line.** `N not ready` replaced with `N missing credentials`; the N ready plugins are now listed by name inline (e.g. `3 ready (github-remote, vercel-remote, railway-ops)`).
+- **Doctor `[OPTIONAL SETUP]` section header and description.** Header now reads `N installed plugin(s) missing credentials` (was generic "services you use"); body line reads "These are in your Claude plugin list but env vars aren't set" so users understand doctor found these plugins in their install, not surfacing random noise.
+
+### Added
+- **`doctor_blocking` on `--non-interactive --auto` JSON envelope.** Mirrors doctor's `[ACTION REQUIRED]` vs envcheck-only split; harnesses can gate on it without parsing pretty output. Documented in README; covered by `test_auto_envelope_schema_complete` and `_doctor_has_blocking_issues` unit tests.
+- **Auto-fix Claude plugin registration in interactive `init`.** When unregistered primitives are detected, `init` now runs `claude plugin marketplace add` + `claude plugin install` automatically before exiting. If the `claude` binary is not on PATH or a command fails the user gets the manual fallback commands. Either way `init` exits after with instructions to run `/reload-plugins` inside Claude Code, then re-run `init`. Non-interactive / `--auto` runs are unaffected. Covered by four `test_missing_claude_plugins_*` unit tests.
+
 ## 0.19.2 - 2026-05-02
 
 Post-install hardening, init UX overhaul, test suite restored.
@@ -17,6 +27,9 @@ Post-install hardening, init UX overhaul, test suite restored.
 - **`shell=True` with paths containing spaces.** Quoted exe via `subprocess.list2cmdline` so `C:\Program Files\...` paths are not split by cmd.exe.
 - **`release.yml || true` swallowing errors.** Replaced with `gh release view || gh release create` so auth failures and rate limits surface instead of silently masking the root cause.
 - **`$Failed` uninitialized before `try`.** In PowerShell, `$null.Count == 0`; a pre-assignment error would silently print a success footer.
+
+### Changed
+- **`install.sh` (repo root) real-install preflight** requires `python3` on PATH (wrapper shims use Python). **`--dry-run`** exits before those checks. If `agent-plus-meta init` fails, the script prints the exit code and suggests `agent-plus-meta doctor --pretty`.
 
 ### Added
 - **Init pause after cross-repo scan.** "Press Enter to continue to setup check..." so users can read scan results before doctor output appears.
