@@ -7,6 +7,7 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 ## Unreleased
 
 ### Changed
+- **Init footer prompts replaced with CLI commands.** `"what is this repo?"` / `"what changed on this branch?"` are natural-language suggestions that Claude often answers directly without invoking the plugin. Replaced with `repo-analyze --pretty` and `diff-summary --base main` — commands that always work regardless of routing rules.
 - **Doctor `envcheck` summary line.** `N not ready` replaced with `N missing credentials`; the N ready plugins are now listed by name inline (e.g. `3 ready (github-remote, vercel-remote, railway-ops)`).
 - **Doctor `[OPTIONAL SETUP]` section header and description.** Header now reads `N installed plugin(s) missing credentials` (was generic "services you use"); body line reads "These are in your Claude plugin list but env vars aren't set" so users understand doctor found these plugins in their install, not surfacing random noise.
 

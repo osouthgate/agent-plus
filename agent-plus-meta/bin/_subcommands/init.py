@@ -395,6 +395,134 @@ def _pick_branch(state: dict[str, Any]) -> tuple[str, Optional[str]]:
     return "new", None
 
 
+# ─── doctor / skill-plus scan helpers ────────────────────────────────────────
+
+
+def _doctor_has_blocking_issues(doc_payload: dict) -> bool:
+    """True when doctor lists issues outside envcheck-only (matches pretty
+    doctor's ACTION REQUIRED vs OPTIONAL SETUP split).
+    """
+    issues = doc_payload.get("issues") or []
+    if not isinstance(issues, list):
+        return False
+    return any(
+        isinstance(it, dict) and it.get("category") not in ("envcheck",)
+        for it in issues
+    )
+
+
+def _missing_claude_plugins(doc_payload: dict) -> list[str]:
+    """Return list of FRAMEWORK_PRIMITIVES not yet registered as Claude plugins.
+
+    Uses the ``claude_plugin_registration`` dict that ``cmd_doctor`` puts on
+    the payload ({prim: bool}).  Returns an empty list when the key is absent
+    (e.g. claude CLI not on PATH — we can't tell, so we don't block).
+    """
+    cpr = doc_payload.get("claude_plugin_registration")
+    if not isinstance(cpr, dict):
+        return []
+    return [p for p, registered in cpr.items() if not registered]
+
+
+def _parse_skill_plus_scan_stdout(stdout: str) -> dict[str, Any]:
+    """Parse skill-plus scan JSON stdout; tolerate partial / non-JSON."""
+    empty: dict[str, Any] = {
+        "sessions_scanned": None,
+        "candidates_new": None,
+        "candidates_updated": None,
+        "candidates_total": None,
+        "top_pattern_keys": None,
+        "fallback_len": 0,
+    }
+    try:
+        payload = json.loads(stdout.strip() or "{}")
+    except (json.JSONDecodeError, ValueError):
+        return empty
+    if not isinstance(payload, dict):
+        return empty
+    ss = payload.get("sessionsScanned")
+    cn = payload.get("candidatesNew")
+    cu = payload.get("candidatesUpdated")
+    ct = payload.get("candidatesTotal")
+    cand = payload.get("candidates")
+    keys: list[str] = []
+    if isinstance(cand, list):
+        empty["fallback_len"] = len(cand)
+        for rec in cand[:5]:
+            if isinstance(rec, dict) and rec.get("key"):
+                keys.append(str(rec["key"]))
+    if isinstance(ss, int):
+        empty["sessions_scanned"] = ss
+    if isinstance(cn, int):
+        empty["candidates_new"] = cn
+    if isinstance(cu, int):
+        empty["candidates_updated"] = cu
+    if isinstance(ct, int):
+        empty["candidates_total"] = ct
+    if keys:
+        empty["top_pattern_keys"] = keys
+    return empty
+
+
+def _skill_plus_done_stderr_line(res: dict[str, Any]) -> str:
+    """UK English one-line summary after a successful cross-repo scan."""
+    if res.get("status") != "ok":
+        return ""
+    ss = res.get("sessions_scanned")
+    cn = res.get("candidates_new")
+    cu = res.get("candidates_updated")
+    ct = res.get("candidates_total")
+    keys = res.get("top_pattern_keys") or []
+    cf = int(res.get("candidates_found") or 0)
+
+    bits: list[str] = []
+    if isinstance(ss, int):
+        bits.append(f"{ss} session{'s' if ss != 1 else ''} scanned")
+    if isinstance(cn, int) and isinstance(cu, int):
+        bits.append(f"{cn} new / {cu} updated clusters")
+    elif isinstance(cn, int) and cn:
+        bits.append(f"{cn} new cluster{'s' if cn != 1 else ''}")
+    elif isinstance(cu, int) and cu:
+        bits.append(f"{cu} updated cluster{'s' if cu != 1 else ''}")
+
+    if bits:
+        msg = "; ".join(bits)
+        if isinstance(ct, int):
+            msg += f" ({ct} in candidate log)"
+        if keys:
+            shown = ", ".join(keys[:5])
+            if len(keys) > 5:
+                shown += ", ..."
+            msg += f" -- top patterns: {shown}"
+        return f"     done  -- {msg}"
+
+    if cf:
+        return (
+            f"     done  -- {cf} skill candidate{'s' if cf != 1 else ''} found"
+        )
+    return "     done  -- workspace ready (no new skill candidates)"
+
+
+def _cross_repo_result_row(path_str: str, res: dict[str, Any]) -> dict[str, Any]:
+    """Envelope row for one cross-repo scan (additive fields when present)."""
+    line: dict[str, Any] = {
+        "path": path_str,
+        "candidates_found": res.get("candidates_found", 0),
+        "status": res.get("status"),
+        "reason": res.get("reason", ""),
+    }
+    for opt in (
+        "sessions_scanned",
+        "candidates_new",
+        "candidates_updated",
+        "candidates_total",
+        "top_pattern_keys",
+    ):
+        if opt in res and res[opt] is not None:
+            line[opt] = res[opt]
+    return line
+
+
 # ─── subprocess wrappers (mockable in tests) ─────────────────────────────────
 
 
@@ -423,9 +551,11 @@ def _run_first_win(branch: str, project_root: Path,
             import subprocess as _sp
             shell_cmd = '"' + exe + '" ' + _sp.list2cmdline(remaining_args)
             proc = subprocess.run(shell_cmd, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
                                   timeout=timeout, check=False, shell=True)
         else:
             proc = subprocess.run([exe] + remaining_args, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
                                   timeout=timeout, check=False)
     except (OSError, subprocess.SubprocessError) as e:
         return {"command": " ".join(cmd), "result": "failed",
@@ -455,9 +585,11 @@ def _run_skill_plus_scan(project_path: Path,
             import subprocess as _sp
             shell_cmd = '"' + exe + '" ' + _sp.list2cmdline(remaining_args)
             proc = subprocess.run(shell_cmd, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
                                   timeout=timeout, check=False, shell=True)
         else:
             proc = subprocess.run([exe] + remaining_args, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
                                   timeout=timeout, check=False)
     except (OSError, subprocess.SubprocessError) as e:
         return {"status": "failed", "candidates_found": 0,
@@ -465,19 +597,28 @@ def _run_skill_plus_scan(project_path: Path,
     if proc.returncode != 0:
         return {"status": "failed", "candidates_found": 0,
                 "reason": f"exit {proc.returncode}"}
-    # Best-effort parse of JSON for candidate count; tolerate non-JSON.
-    candidates = 0
-    try:
-        payload = json.loads(proc.stdout)
-        if isinstance(payload, dict):
-            cand = payload.get("candidates")
-            if isinstance(cand, list):
-                candidates = len(cand)
-            elif isinstance(payload.get("count"), int):
-                candidates = int(payload["count"])
-    except (json.JSONDecodeError, ValueError):
-        pass
-    return {"status": "ok", "candidates_found": candidates}
+    parsed = _parse_skill_plus_scan_stdout(proc.stdout)
+    cn = parsed.get("candidates_new")
+    cu = parsed.get("candidates_updated")
+    if isinstance(cn, int) and isinstance(cu, int):
+        cf = cn + cu
+    elif isinstance(cn, int) or isinstance(cu, int):
+        cf = int(cn or 0) + int(cu or 0)
+    else:
+        cf = int(parsed.get("fallback_len") or 0)
+
+    result: dict[str, Any] = {"status": "ok", "candidates_found": cf}
+    for k in (
+        "sessions_scanned",
+        "candidates_new",
+        "candidates_updated",
+        "candidates_total",
+        "top_pattern_keys",
+    ):
+        v = parsed.get(k)
+        if v is not None:
+            result[k] = v
+    return result
 
 
 # ─── observability ───────────────────────────────────────────────────────────
@@ -644,6 +785,113 @@ def cmd_init(args: argparse.Namespace) -> dict:
 
     errors: list[dict] = []
 
+    # ── 0. plugin preflight — auto-fix when Claude plugins are missing ──
+    #    Runs BEFORE any workspace changes.  When unregistered primitives are
+    #    found we attempt to register them automatically via the claude CLI
+    #    (claude plugin marketplace add + claude plugin install).  After the
+    #    fix commands run the user still needs to /reload-plugins inside their
+    #    Claude session, so we exit(1) with clear instructions.
+    #    Skipped in non-interactive / auto mode so CI pipelines still get
+    #    doctor_blocking in the JSON envelope.
+    if interactive:
+        _doc_pre: dict | None = None
+        try:
+            _pre_doctor_args = argparse.Namespace(
+                dir=getattr(args, "dir", None),
+                env_file=getattr(args, "env_file", None),
+                pretty=False,
+            )
+            _doc_pre = h.cmd_doctor(_pre_doctor_args)
+        except Exception:
+            _doc_pre = None
+
+        if isinstance(_doc_pre, dict):
+            _missing = _missing_claude_plugins(_doc_pre)
+            if _missing:
+                _eprint("")
+                _eprint("╔══════════════════════════════════════════════════════════════╗")
+                _eprint("║  INSTALLATION INCOMPLETE — agent-plus is not fully set up   ║")
+                _eprint("╚══════════════════════════════════════════════════════════════╝")
+                _eprint("")
+                _eprint(
+                    f"  {len(_missing)} primitive(s) are not registered as Claude Code plugins:"
+                )
+                for _p in _missing:
+                    _eprint(f"    • {_p}")
+                _eprint("")
+                _eprint("  Attempting to register them automatically …")
+                _eprint("")
+
+                _fix_ok = True
+
+                # 1. Ensure the marketplace is registered first.
+                _mp_cmd = ["claude", "plugin", "marketplace", "add", "osouthgate/agent-plus"]
+                _eprint(f"  $ {' '.join(_mp_cmd)}")
+                try:
+                    _mp_result = subprocess.run(
+                        _mp_cmd,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                    if _mp_result.returncode == 0:
+                        _eprint("    ✓ marketplace registered")
+                    elif _mp_result.returncode == 1:
+                        # exit code 1 typically means "already registered" — OK to continue
+                        _eprint("    (already registered)")
+                    else:
+                        _eprint(f"    ✗ exit {_mp_result.returncode} — marketplace add failed")
+                        _fix_ok = False
+                except FileNotFoundError:
+                    _eprint("    ✗ 'claude' binary not found on PATH")
+                    _fix_ok = False
+
+                # 2. Register each missing primitive.
+                if _fix_ok:
+                    for _p in _missing:
+                        _inst_cmd = ["claude", "plugin", "install", f"{_p}@agent-plus"]
+                        _eprint(f"  $ {' '.join(_inst_cmd)}")
+                        try:
+                            _inst = subprocess.run(
+                                _inst_cmd,
+                                capture_output=True,
+                                text=True,
+                                encoding="utf-8",
+                                errors="replace",
+                            )
+                            if _inst.returncode == 0:
+                                _eprint(f"    ✓ {_p} installed")
+                            else:
+                                _out = (_inst.stdout + _inst.stderr).strip()
+                                _eprint(f"    ✗ {_p} — exit {_inst.returncode}: {_out[:120]}")
+                                _fix_ok = False
+                        except FileNotFoundError:
+                            _eprint("    ✗ 'claude' binary not found on PATH")
+                            _fix_ok = False
+                            break
+
+                _eprint("")
+                if _fix_ok:
+                    _eprint("  ✓ Plugins registered successfully.")
+                    _eprint("")
+                    _eprint("  One manual step remains — run this inside Claude Code:")
+                    _eprint("")
+                    _eprint("    /reload-plugins")
+                    _eprint("")
+                    _eprint("  Then re-run:  agent-plus-meta init")
+                else:
+                    _eprint("  ✗ Auto-fix failed.  Run these commands manually:")
+                    _eprint("")
+                    _eprint("    claude plugin marketplace add osouthgate/agent-plus")
+                    for _p in _missing:
+                        _eprint(f"    claude plugin install {_p}@agent-plus")
+                    _eprint("")
+                    _eprint("  Then inside Claude Code run:  /reload-plugins")
+                    _eprint("  Then re-run:  agent-plus-meta init")
+                _eprint("")
+                sys.exit(1)
+
     # ── 1. legacy bootstrap (preserves existing test contract) ──────────
     workspace, source = h.resolve_workspace(args.dir)
     _safe_mkdir_or_raise(args.dir, workspace, h)
@@ -783,19 +1031,11 @@ def cmd_init(args: argparse.Namespace) -> dict:
                 cross_repo_accepted.append(str(p))
                 _eprint(f"  -> {p}")
                 res = _run_skill_plus_scan(p)
-                line = {
-                    "path": str(p),
-                    "candidates_found": res.get("candidates_found", 0),
-                    "status": res.get("status"),
-                    "reason": res.get("reason", ""),
-                }
-                cross_repo_results.append(line)
+                cross_repo_results.append(_cross_repo_result_row(str(p), res))
                 if res.get("status") == "ok":
-                    n = res.get("candidates_found", 0)
-                    if n:
-                        _eprint(f"     done  -- {n} skill candidate{'s' if n != 1 else ''} found")
-                    else:
-                        _eprint("     done  -- workspace ready (no new skill candidates)")
+                    msg = _skill_plus_done_stderr_line(res)
+                    if msg:
+                        _eprint(msg)
                 elif res.get("status") == "skipped":
                     _emit_error(
                         ERR_SKILL_PLUS_MISSING,
@@ -832,12 +1072,7 @@ def cmd_init(args: argparse.Namespace) -> dict:
         for p in cross_repo_offered_paths:
             cross_repo_accepted.append(str(p))
             res = _run_skill_plus_scan(p)
-            cross_repo_results.append({
-                "path": str(p),
-                "candidates_found": res.get("candidates_found", 0),
-                "status": res.get("status"),
-                "reason": res.get("reason", ""),
-            })
+            cross_repo_results.append(_cross_repo_result_row(str(p), res))
             if res.get("status") == "skipped":
                 _emit_error(
                     ERR_SKILL_PLUS_MISSING,
@@ -855,6 +1090,7 @@ def cmd_init(args: argparse.Namespace) -> dict:
 
     # ── 6. doctor finale ────────────────────────────────────────────────
     doctor_verdict = "broken"
+    doctor_blocking = False
     doctor_summary = {
         "primitives_installed": 0,
         "primitives_total": 0,
@@ -873,6 +1109,7 @@ def cmd_init(args: argparse.Namespace) -> dict:
         doc_payload = h.cmd_doctor(doctor_args)
         if isinstance(doc_payload, dict):
             doctor_verdict = doc_payload.get("verdict", "broken")
+            doctor_blocking = _doctor_has_blocking_issues(doc_payload)
             prims = doc_payload.get("primitives") or {}
             installed = sum(1 for v in prims.values() if v == "installed")
             ec = doc_payload.get("envcheck") or {}
@@ -892,6 +1129,15 @@ def cmd_init(args: argparse.Namespace) -> dict:
                     _eprint(h._render_doctor_pretty(doc_payload))
                 except Exception:  # noqa: BLE001 — render is best-effort
                     pass
+                if doctor_blocking:
+                    _eprint("")
+                    _eprint("Required setup steps remain above under [ACTION REQUIRED].")
+                    _eprint("Review those lines before continuing.")
+                    _eprint("Press Enter when ready...")
+                    try:
+                        _prompt_line("")
+                    except (KeyboardInterrupt, EOFError):
+                        pass
     except Exception as e:  # noqa: BLE001 — CRITICAL GAP rescue
         _emit_error(
             ERR_DOCTOR_UNREACHABLE,
@@ -904,6 +1150,12 @@ def cmd_init(args: argparse.Namespace) -> dict:
     if interactive:
         _eprint("")
         _eprint("------------------------------------------------------------")
+        if doctor_blocking:
+            _eprint("Finish setup (required)")
+            _eprint("-------------------------")
+            _eprint("Scroll up to [ACTION REQUIRED] and run each `claude plugin` command listed.")
+            _eprint("Then in Claude Code run: /reload-plugins")
+            _eprint("")
         _eprint("Setup complete. What you just got:")
         if cross_repo_accepted:
             _eprint(f"  + {len(cross_repo_accepted)} repo(s) pre-warmed -- Claude starts cold in new repos,")
@@ -915,18 +1167,21 @@ def cmd_init(args: argparse.Namespace) -> dict:
                 "--rating <1-5> --outcome success")
         _eprint("")
         _eprint("+----------------------------------------------------------+")
-        _eprint("|  You're set up. Here's how to feel the magic:           |")
+        if doctor_blocking:
+            _eprint("|  Finish plugin registration, then try these first:      |")
+        else:
+            _eprint("|  You're set up. Here's how to feel the magic:           |")
         _eprint("+----------------------------------------------------------+")
         _eprint("")
-        _eprint("  In any Claude Code session, try these first:")
+        _eprint("  In any Claude Code session, run these commands:")
         _eprint("")
-        _eprint("  \"what is this repo?\"")
-        _eprint("    -> repo-analyze scans the codebase and gives Claude full context")
+        _eprint("  repo-analyze --pretty")
+        _eprint("    -> scans the codebase and gives Claude full context in one call")
         _eprint("")
-        _eprint("  \"what changed on this branch?\"")
-        _eprint("    -> diff-summary explains your changes in plain English")
+        _eprint("  diff-summary --base main")
+        _eprint("    -> explains what changed on your branch in plain English")
         _eprint("")
-        _eprint("  \"init agent-plus\"")
+        _eprint("  agent-plus-meta init")
         _eprint("    -> set up more repos or refresh this one")
         _eprint("")
         _eprint("  Not working? Run: agent-plus-meta doctor --pretty")
@@ -958,6 +1213,7 @@ def cmd_init(args: argparse.Namespace) -> dict:
         "cross_repo_accepted": cross_repo_accepted,
         "cross_repo_results": cross_repo_results,
         "doctor_verdict": doctor_verdict,
+        "doctor_blocking": doctor_blocking,
         "doctor_summary": doctor_summary,
         "first_win_command": first_win_result.get("command"),
         "first_win_result": first_win_result.get("result", "skipped"),
