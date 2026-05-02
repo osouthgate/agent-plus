@@ -4,7 +4,10 @@
 
 **Website:** [youragentplus.xyz](https://youragentplus.xyz)
 
-**Install:** `curl -fsSL https://github.com/osouthgate/agent-plus/releases/latest/download/install.sh | sh`
+**Install:**
+```sh
+curl -fsSL https://github.com/osouthgate/agent-plus/releases/latest/download/install.sh | sh
+```
 
 **Cut tokens. Kill context bloat. Run 20x faster.**
 
