@@ -3315,13 +3315,11 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
     def _plugin_is_installed(plugin: str) -> bool:
         if plugin in _installed_plugin_names:
             return True
-        # Plugin's own binary wrapper on PATH counts too.
+        # Plugin's own binary wrapper on PATH (the .cmd or plain wrapper
+        # written by install.ps1 / install.sh) counts as installed.
+        # We intentionally do NOT check PLUGIN_BINARY_REQUIREMENT here:
+        # having `vercel` CLI on PATH doesn't mean you installed vercel-remote.
         if shutil.which(plugin) is not None:
-            return True
-        # Some plugins require an external CLI (e.g. railway-ops -> railway);
-        # the external CLI being on PATH is a partial-install signal too.
-        bin_req = PLUGIN_BINARY_REQUIREMENT.get(plugin)
-        if bin_req and shutil.which(bin_req) is not None:
             return True
         return False
 
@@ -3375,9 +3373,7 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
             none_configured = len(plugin_missing_req) == len(spec["required"])
             not_installed = not _plugin_is_installed(plugin)
             suppress = not_installed and none_configured
-            if suppress:
-                pass
-            elif plugin_missing_req:
+            if not suppress and plugin_missing_req:
                 issues.append({
                     "severity": "warn",
                     "category": "envcheck",
@@ -3561,15 +3557,54 @@ def _render_doctor_pretty(payload: dict) -> str:
     lines.append(f"  envcheck    : {ec.get('ready_count', 0)} ready, {ec.get('missing_count', 0)} not ready")
     mp = payload.get("marketplaces") or {}
     lines.append(f"  marketplaces: {len(mp.get('installed') or [])} installed")
+
     issues = payload.get("issues") or []
-    if issues:
+
+    # Separate issues into two buckets:
+    #   ACTION REQUIRED  -- claude-plugin (Claude is blind until fixed) + primitives
+    #   OPTIONAL SETUP   -- envcheck (credentials for services you may not use yet)
+    #   other categories -- treated as ACTION REQUIRED
+    blocking = [it for it in issues if it.get("category") not in ("envcheck",)]
+    optional = [it for it in issues if it.get("category") == "envcheck"]
+
+    if blocking:
         lines.append("")
-        lines.append("Issues:")
-        for it in issues:
-            lines.append(f"  - [{it.get('severity')}] {it.get('category')}: {it.get('message')}")
-    else:
+        lines.append("[ACTION REQUIRED]")
+        for it in blocking:
+            cat = it.get("category", "")
+            msg = it.get("message", "")
+            if cat == "claude-plugin":
+                # Parse out the fix commands from the message for cleaner display.
+                # Message format: "N primitive(s) not registered ... Fix: <cmd>"
+                fix_idx = msg.find("Fix: ")
+                if fix_idx != -1:
+                    summary = msg[:fix_idx].strip().rstrip(".")
+                    fix_part = msg[fix_idx + 5:].strip()
+                    lines.append(f"  ! claude-plugin: {summary}")
+                    lines.append("    Claude cannot call these plugins until registration is done.")
+                    # Each &&-separated command on its own indented line.
+                    for cmd_part in fix_part.split(" && "):
+                        lines.append(f"    Run: {cmd_part.strip()}")
+                else:
+                    lines.append(f"  ! {cat}: {msg}")
+            else:
+                lines.append(f"  ! {cat}: {msg}")
+    if optional:
         lines.append("")
-        lines.append("No issues detected.")
+        lines.append("[OPTIONAL SETUP -- services you use]")
+        lines.append("  These plugins need credentials when you're ready:")
+        for it in optional:
+            msg = it.get("message", "")
+            # Message format: "<plugin>: missing required env vars: VAR1,VAR2"
+            # Render as a compact two-column line.
+            lines.append(f"    {msg}")
+    if not blocking and not optional:
+        lines.append("")
+        lines.append("No issues detected. Everything is configured.")
+
+    lines.append("")
+    lines.append("  Report a problem: https://github.com/osouthgate/agent-plus/issues")
+
     return "\n".join(lines)
 
 
@@ -3585,6 +3620,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="print plugin version and exit")
     p.add_argument("--pretty", action="store_true",
                    help="pretty-print JSON output")
+    p.add_argument("--json", dest="force_json", action="store_true",
+                   help="always emit JSON on stdout even when stdout is a TTY")
     sub = p.add_subparsers(dest="cmd")
 
     pretty_parent = argparse.ArgumentParser(add_help=False)
@@ -3908,10 +3945,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     _inject_next_steps(out, args.cmd, payload)
     indent = 2 if args.pretty else None
     # Suppress raw JSON envelope when stdout is an interactive terminal — the
-    # human has already seen the pretty progress output. When called via
-    # subprocess pipe (Claude / install.ps1), stdout is not a TTY, so JSON
-    # prints normally for machine consumption.
-    if not sys.stdout.isatty():
+    # human has already seen the pretty progress output on stderr. Pass --json
+    # to force JSON output regardless (for scripts that pipe from a terminal).
+    force_json = getattr(args, "force_json", False)
+    if force_json or not sys.stdout.isatty():
         print(json.dumps(out, ensure_ascii=False, indent=indent))
 
     # init --pretty: append a human-readable "Suggested skills" section to

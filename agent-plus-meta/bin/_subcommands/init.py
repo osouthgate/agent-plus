@@ -360,6 +360,18 @@ def _prompt_yes_no(prompt: str, default_no: bool = True) -> bool:
     return answer in ("y", "yes")
 
 
+def _resolve_cmd(name: str) -> tuple:
+    """Return (exe_path_or_None, use_shell) for a command name.
+    On Windows, falls back to <name>.cmd and sets shell=True so cmd.exe
+    can execute .cmd wrappers (subprocess with shell=False cannot)."""
+    exe = shutil.which(name)
+    if exe is None and sys.platform == "win32":
+        exe = shutil.which(name + ".cmd")
+    use_shell = (sys.platform == "win32" and exe is not None
+                 and exe.lower().endswith(".cmd"))
+    return exe, use_shell
+
+
 # ─── branch selection ────────────────────────────────────────────────────────
 
 
@@ -399,17 +411,22 @@ def _run_first_win(branch: str, project_root: Path,
     cmd = cmds.get(branch)
     if cmd is None:
         return {"command": None, "result": "skipped", "reason": "no_first_win"}
-    exe = shutil.which(cmd[0])
-    if exe is None and sys.platform == "win32":
-        exe = shutil.which(cmd[0] + ".cmd")
+    exe, use_shell = _resolve_cmd(cmd[0])
     if exe is None:
         return {"command": " ".join(cmd), "result": "failed",
                 "reason": f"{cmd[0]} not on PATH"}
-    resolved_cmd = [exe] + cmd[1:]
-    use_shell = sys.platform == "win32" and exe.lower().endswith(".cmd")
+    remaining_args = cmd[1:]
     try:
-        proc = subprocess.run(resolved_cmd, capture_output=True, text=True,
-                              timeout=timeout, check=False, shell=use_shell)
+        if use_shell:
+            # Quote exe path so cmd.exe doesn't split on spaces.
+            # subprocess.list2cmdline handles the remaining args.
+            import subprocess as _sp
+            shell_cmd = '"' + exe + '" ' + _sp.list2cmdline(remaining_args)
+            proc = subprocess.run(shell_cmd, capture_output=True, text=True,
+                                  timeout=timeout, check=False, shell=True)
+        else:
+            proc = subprocess.run([exe] + remaining_args, capture_output=True, text=True,
+                                  timeout=timeout, check=False)
     except (OSError, subprocess.SubprocessError) as e:
         return {"command": " ".join(cmd), "result": "failed",
                 "reason": str(e)}
@@ -424,19 +441,24 @@ def _run_skill_plus_scan(project_path: Path,
     """Invoke `skill-plus scan --all-projects --project <path>`. Returns a
     dict with keys: status ("ok"|"skipped"|"failed"), candidates_found,
     reason."""
-    exe = shutil.which("skill-plus")
-    if exe is None and sys.platform == "win32":
-        exe = shutil.which("skill-plus.cmd")
+    exe, use_shell = _resolve_cmd("skill-plus")
     if exe is None:
         return {"status": "skipped", "candidates_found": 0,
                 "reason": "skill-plus not on PATH"}
     # --accept-consent: user already opted in by selecting this path in the
     # cross-repo wizard; consent is implied.
-    cmd = [exe, "scan", "--all-projects", "--accept-consent", "--project", str(project_path)]
-    use_shell = sys.platform == "win32" and exe.lower().endswith(".cmd")
+    remaining_args = ["scan", "--all-projects", "--accept-consent", "--project", str(project_path)]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout, check=False, shell=use_shell)
+        if use_shell:
+            # Quote exe path so cmd.exe doesn't split on spaces.
+            # subprocess.list2cmdline handles the remaining args.
+            import subprocess as _sp
+            shell_cmd = '"' + exe + '" ' + _sp.list2cmdline(remaining_args)
+            proc = subprocess.run(shell_cmd, capture_output=True, text=True,
+                                  timeout=timeout, check=False, shell=True)
+        else:
+            proc = subprocess.run([exe] + remaining_args, capture_output=True, text=True,
+                                  timeout=timeout, check=False)
     except (OSError, subprocess.SubprocessError) as e:
         return {"status": "failed", "candidates_found": 0,
                 "reason": str(e)}
@@ -796,6 +818,15 @@ def cmd_init(args: argparse.Namespace) -> dict:
                 recoverable=True, errors_list=errors, interactive=interactive,
             )
 
+        # Pause so the user can read scan results before doctor output floods in.
+        if chosen and interactive:
+            _eprint("")
+            _eprint("Repos scanned. Press Enter to continue to setup check...")
+            try:
+                _prompt_line("")
+            except (KeyboardInterrupt, EOFError):
+                pass
+
     elif auto and cross_repo_offered:
         # --auto: silently scan all auto-discovered repos. No manual paste.
         for p in cross_repo_offered_paths:
@@ -872,14 +903,35 @@ def cmd_init(args: argparse.Namespace) -> dict:
     # ── 7. feedback invitation + Claude-side CTA (interactive only) ─────
     if interactive:
         _eprint("")
+        _eprint("------------------------------------------------------------")
+        _eprint("Setup complete. What you just got:")
+        if cross_repo_accepted:
+            _eprint(f"  + {len(cross_repo_accepted)} repo(s) pre-warmed -- Claude starts cold in new repos,")
+            _eprint("    now it won't in these ones")
+        _eprint("  + doctor check run (see above)")
+        _eprint("")
         _eprint("Want to rate this onboarding? "
                 "skill-feedback log agent-plus-meta-init "
                 "--rating <1-5> --outcome success")
         _eprint("")
-        _eprint("Next in Claude Code:")
-        _eprint("  1. Run /reload-plugins in an open session (or open a new one)")
-        _eprint("  2. Ask Claude: 'what is this repo?' -- triggers repo-analyze")
-        _eprint("  3. Ask Claude: 'what changed on this branch?' -- triggers diff-summary")
+        _eprint("+----------------------------------------------------------+")
+        _eprint("|  You're set up. Here's how to feel the magic:           |")
+        _eprint("+----------------------------------------------------------+")
+        _eprint("")
+        _eprint("  In any Claude Code session, try these first:")
+        _eprint("")
+        _eprint("  \"what is this repo?\"")
+        _eprint("    -> repo-analyze scans the codebase and gives Claude full context")
+        _eprint("")
+        _eprint("  \"what changed on this branch?\"")
+        _eprint("    -> diff-summary explains your changes in plain English")
+        _eprint("")
+        _eprint("  \"init agent-plus\"")
+        _eprint("    -> set up more repos or refresh this one")
+        _eprint("")
+        _eprint("  Not working? Run: agent-plus-meta doctor --pretty")
+        _eprint("  Unexpected behavior? Ask Claude:")
+        _eprint("    \"create a GitHub issue in osouthgate/agent-plus for: <your description>\"")
 
     # ── 8. envelope ─────────────────────────────────────────────────────
     if errors and any(not e.get("recoverable", True) for e in errors):

@@ -20,12 +20,13 @@ jobs:
           set -e
           TAG="${GITHUB_REF#refs/tags/}"
 
-          # Create the release (no-op if it already exists from a manual push).
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --generate-notes \
-            --verify-tag \
-            2>/dev/null || true
+          # Create the release if it doesn't already exist.
+          # Using view-or-create avoids swallowing real errors (auth, rate limits).
+          gh release view "$TAG" > /dev/null 2>&1 || \
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              --verify-tag
 
           # Upload both installers as release assets.
           gh release upload "$TAG" install.sh install.ps1 --clobber

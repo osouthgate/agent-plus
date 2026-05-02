@@ -7,7 +7,7 @@
 # Environment overrides (set before running):
 #   $env:AGENT_PLUS_INSTALL_DIR = "C:\Users\you\bin"        # wrapper .cmd dir
 #   $env:AGENT_PLUS_PREFIX      = "C:\Users\you\.agent-plus" # plugin tree dir
-#   $env:AGENT_PLUS_VERSION     = "0.15.1"                  # pin a version
+#   $env:AGENT_PLUS_VERSION     = "0.19.1"                  # pin a version
 #   $env:AGENT_PLUS_DRY_RUN     = "1"                       # print, don't write
 #   $env:AGENT_PLUS_NO_INIT     = "1"                       # skip init chain
 #   $env:AGENT_PLUS_UNATTENDED  = "1"                       # no prompts, exit 0 on partial
@@ -43,6 +43,7 @@ function Resolve-Tag {
         $json = Invoke-RestMethod -Uri $api -UseBasicParsing -ErrorAction Stop
         return $json.tag_name
     } catch {
+        Write-Warning "install.ps1: could not fetch latest release tag ($($_.Exception.Message)) -- installing from main branch (may be unstable). Set `$env:AGENT_PLUS_VERSION to pin a release."
         return "main"
     }
 }
@@ -60,7 +61,9 @@ function Get-TarballUrl([string]$Tag) {
 function Find-Python {
     foreach ($cmd in @('python3', 'python', 'py')) {
         try {
-            $out = & $cmd --version 2>&1
+            # Avoid 2>&1 on native exes in PS5.1 (wraps stderr in ErrorRecord).
+            # Capture stdout only; py --version writes to stdout in Python 3.4+.
+            $out = & $cmd --version 2>$null
             if ($out -match 'Python 3') { return $cmd }
         } catch {}
     }
@@ -186,8 +189,9 @@ if (-not (Get-Command tar -ErrorAction SilentlyContinue)) {
     if ($Unattended) { exit 0 } else { exit 1 }
 }
 
-$null = New-Item -ItemType Directory -Force $InstallDir
-$null = New-Item -ItemType Directory -Force $Prefix
+$null   = New-Item -ItemType Directory -Force $InstallDir
+$null   = New-Item -ItemType Directory -Force $Prefix
+$Failed = @()
 
 # Download and extract tarball.
 $TmpDir = Join-Path $env:TEMP "agent-plus-install-$([System.IO.Path]::GetRandomFileName())"
@@ -211,7 +215,7 @@ try {
         Pop-Location
     }
 
-    # Find extracted top-level dir (e.g. "agent-plus-0.15.1").
+    # Find extracted top-level dir (e.g. "agent-plus-0.19.1").
     $SrcRoot = Get-ChildItem $TmpDir -Directory | Where-Object { $_.Name -like "agent-plus-*" } |
                Select-Object -First 1 -ExpandProperty FullName
     if (-not $SrcRoot) {
@@ -262,7 +266,8 @@ if (-not $ApmBin) {
 
 Write-Host ""
 # Pipe stdout to Out-Null so the machine-readable JSON envelope is silenced.
-# All human-readable output goes to stderr and still appears in the terminal.
+# Human-readable output goes to stderr and still appears in the terminal.
+# Capture $LASTEXITCODE separately because the pipeline resets it to 0.
 if ($Unattended) {
     Write-Host "Running agent-plus-meta init --non-interactive --auto..."
     & $ApmBin init --non-interactive --auto | Out-Null
@@ -270,6 +275,11 @@ if ($Unattended) {
     Write-Host "Running agent-plus-meta init..."
     & $ApmBin init | Out-Null
 }
+$_initExit = $LASTEXITCODE
+if ($_initExit -ne 0) {
+    Write-Warning "agent-plus-meta init exited with code $_initExit."
+    Write-Warning "Run 'agent-plus-meta doctor --pretty' to diagnose, or ask Claude: 'run agent-plus-meta doctor --pretty'"
+}
 
-if ($Failed.Count -eq 0) { Print-Footer }
+if ($Failed.Count -eq 0 -and $_initExit -eq 0) { Print-Footer }
 exit 0
