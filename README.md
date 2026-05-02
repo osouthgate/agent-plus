@@ -1,12 +1,19 @@
 # agent-plus
 
-[![Website](https://img.shields.io/badge/website-youragentplus.xyz-a6e22e?style=flat&labelColor=1e1e1e)](https://youragentplus.xyz) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Version](https://img.shields.io/badge/version-0.19.0-green.svg)](https://github.com/osouthgate/agent-plus/releases) [![CI](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml) [![Tests](https://img.shields.io/badge/tests-653%20passing-brightgreen.svg)](#) [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#) [![Stdlib only](https://img.shields.io/badge/stdlib-only-yellowgreen.svg)](#)
+[![Website](https://img.shields.io/badge/website-youragentplus.xyz-a6e22e?style=flat&labelColor=1e1e1e)](https://youragentplus.xyz) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Version](https://img.shields.io/github/v/release/osouthgate/agent-plus?label=version&color=green)](https://github.com/osouthgate/agent-plus/releases) [![CI](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml) [![Tests](https://img.shields.io/badge/tests-526%20passing-brightgreen.svg)](#) [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#) [![Stdlib only](https://img.shields.io/badge/stdlib-only-yellowgreen.svg)](#)
 
 **Website:** [youragentplus.xyz](https://youragentplus.xyz)
 
 **Install:**
+
+macOS / Linux:
 ```sh
 curl -fsSL https://github.com/osouthgate/agent-plus/releases/latest/download/install.sh | sh
+```
+
+Windows (PowerShell):
+```powershell
+powershell -c "irm https://github.com/osouthgate/agent-plus/releases/latest/download/install.ps1 | iex"
 ```
 
 **Cut tokens. Kill context bloat. Run 20x faster.**
@@ -90,6 +97,18 @@ That's it. The wizard takes it from here.
 
 ---
 
+## How it all fits together
+
+<p align="center">
+  <a href="https://youragentplus.xyz/#lifecycle">
+    <img src="./assets/lifecycle-simple.png" alt="agent-plus skill lifecycle — parallel discovery (repo-analyze + session mining) → propose → scaffold → use → improves each session" width="100%">
+  </a>
+  <br>
+  <sub><i>→ <a href="https://youragentplus.xyz/#lifecycle">Interactive version with commands at youragentplus.xyz/#lifecycle</a></i></sub>
+</p>
+
+---
+
 ## What it does
 
 Every cold start in an unfamiliar repo, the same dance: ~67 grep ops, ~60 ls / directory walks, a sweep through `package.json` / `pyproject.toml` / `Cargo.toml` / `go.mod`, a README scan. Mined across real Claude Code transcripts, every time.
@@ -123,7 +142,7 @@ That's one plugin. The framework ships **five universal primitives**:
 | [`repo-analyze`](./repo-analyze) | The ~67-grep + ~60-ls cold-start dance for unfamiliar repos | `repo-analyze [--output] [--shape-depth] [--pretty]` |
 | [`diff-summary`](./diff-summary) | The 5–20 Read calls to triage a PR ("test? source? config? did the public API change?") | `diff-summary [--staged \| --base BRANCH \| --range A..B] [--public-api-only] [--risk MIN]` |
 | [`skill-feedback`](./skill-feedback) | "Was that skill any good?" — agent self-rates, JSONL on disk, optional bundle into a GitHub issue | `log <skill> --rating --outcome [--friction]`, `report`, `submit` |
-| [`skill-plus`](./skill-plus) | "I keep typing this by hand" → mine the session log, scaffold a real skill, audit it, review before ship, promote it to your marketplace | `scan`, `propose`, `scaffold <name> --from-candidate <id>`, `inquire <tool> [--audit]`, `review <path>`, `list`, `feedback`, `promote <name>` |
+| [`skill-plus`](./skill-plus) | "I keep typing this by hand" → mine the session log, scaffold a real skill, audit it, promote it to your marketplace | `scan`, `propose`, `scaffold <name> --from-candidate <id>`, `inquire <tool> [--audit]`, `list`, `feedback`, `promote <name>` |
 
 Plus a **marketplace convention** — `<user>/agent-plus-skills` — for publishing your own service-specific wrappers (GitHub, Vercel, Supabase, Railway, Linear, OpenRouter, Coolify, Hetzner, Hermes, Langfuse, etc.). Reference marketplace lives at [`osouthgate/agent-plus-skills`](https://github.com/osouthgate/agent-plus-skills) — install it, fork it, or use it as a template.
 
