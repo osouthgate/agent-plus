@@ -16,6 +16,33 @@ Durable instructions for any coding agent (Claude Code, Codex, Cursor, Aider) wo
 
 Service wrappers (`github-remote`, `vercel-remote`, `supabase-remote`, `railway-ops`, `linear-remote`, `openrouter-remote`, `langfuse-remote`, `hermes-remote`, `coolify-remote`, `hcloud-remote`) moved to [`osouthgate/agent-plus-skills`](https://github.com/osouthgate/agent-plus-skills).
 
+## Installing agent-plus
+
+If asked to install agent-plus for the user, run:
+
+**macOS / Linux:**
+```bash
+curl -fsSL https://github.com/osouthgate/agent-plus/releases/latest/download/install.sh | sh
+```
+
+**Windows (PowerShell):**
+```powershell
+powershell -c "irm https://github.com/osouthgate/agent-plus/releases/latest/download/install.ps1 | iex"
+```
+
+Then register the plugins with Claude Code so they're callable as tools:
+
+```bash
+claude plugin marketplace add osouthgate/agent-plus
+for p in agent-plus-meta repo-analyze diff-summary skill-feedback skill-plus; do
+  claude plugin install $p@agent-plus
+done
+```
+
+Then reload: `/reload-plugins` in the current session, or open a new one.
+
+The install script chains into `agent-plus-meta init` automatically — the workspace wizard runs as part of install. If the user skipped that, they can run `agent-plus-meta init` manually.
+
 ## The seven design patterns
 
 Any change must reinforce one of these. Full rationale: [README.md](./README.md).
