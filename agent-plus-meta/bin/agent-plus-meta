@@ -3293,6 +3293,39 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
             })
 
     # 4. Env vars (reuse envcheck logic) ───────────────────────────────────
+    # Pre-compute which plugins are "installed" so we can suppress envcheck
+    # warnings for marketplace plugins the user has never installed. A plugin
+    # counts as installed if (a) its binary wrapper is on PATH, or (b) it is
+    # present in the Claude plugins cache (~/.claude/plugins/cache/<mp>/<plug>).
+    # This keeps `envcheck_section` (machine envelope) complete while
+    # filtering noise out of the human-facing `issues` list.
+    _claude_cache = _claude_plugins_cache_dir()
+    _installed_plugin_names: set[str] = set()
+    try:
+        if _claude_cache.is_dir():
+            for _mp_dir in _claude_cache.iterdir():
+                if not _mp_dir.is_dir():
+                    continue
+                for _pl_dir in _mp_dir.iterdir():
+                    if _pl_dir.is_dir():
+                        _installed_plugin_names.add(_pl_dir.name)
+    except OSError:
+        pass
+
+    def _plugin_is_installed(plugin: str) -> bool:
+        if plugin in _installed_plugin_names:
+            return True
+        # Plugin's own binary wrapper on PATH counts too.
+        if shutil.which(plugin) is not None:
+            return True
+        # Some plugins require an external CLI (e.g. railway-ops -> railway);
+        # the external CLI being on PATH is a partial-install signal too.
+        bin_req = PLUGIN_BINARY_REQUIREMENT.get(plugin)
+        if bin_req and shutil.which(bin_req) is not None:
+            return True
+        return False
+
+
     # v0.15.4: track `user_configured_count` separately from `ready_count`.
     # ready_count includes "trivially ready" plugins (those with `required: []`
     # and any CLI deps satisfied) which are always ready regardless of user
@@ -3334,7 +3367,17 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
                 user_configured_count += 1
         else:
             missing_count += 1
-            if plugin_missing_req:
+            # Suppress noise: if the plugin isn't installed AND the user has
+            # set zero of its required env vars, it's just a marketplace
+            # plugin they've never adopted — not an issue worth surfacing.
+            # envcheck_section still records the full plugin map for the
+            # JSON envelope; only the human `issues` list is filtered.
+            none_configured = len(plugin_missing_req) == len(spec["required"])
+            not_installed = not _plugin_is_installed(plugin)
+            suppress = not_installed and none_configured
+            if suppress:
+                pass
+            elif plugin_missing_req:
                 issues.append({
                     "severity": "warn",
                     "category": "envcheck",
@@ -3480,9 +3523,24 @@ def _render_doctor_pretty(payload: dict) -> str:
     """Human-readable summary appended to stderr when --pretty is set."""
     lines: list[str] = []
     verdict = payload.get("verdict", "unknown")
+    issues_for_heading = payload.get("issues") or []
+    # Display label: a "healthy" verdict with warn-only issues is shown as "OK
+    # (N warnings)" so the heading doesn't claim HEALTHY while the body lists
+    # warnings. The JSON envelope verdict is unchanged.
+    if verdict == "healthy":
+        warn_count = sum(1 for it in issues_for_heading
+                         if (it or {}).get("severity") == "warn")
+        if not issues_for_heading:
+            label = "HEALTHY"
+        elif warn_count:
+            label = f"OK ({warn_count} warning{'s' if warn_count != 1 else ''})"
+        else:
+            label = "OK"
+    else:
+        label = verdict.upper()
     lines.append("")
-    lines.append(f"agent-plus-meta doctor: {verdict.upper()}")
-    lines.append("=" * (24 + len(verdict)))
+    lines.append(f"agent-plus-meta doctor: {label}")
+    lines.append("=" * (24 + len(label)))
     self_s = payload.get("self") or {}
     lines.append(f"  self        : on_path={self_s.get('on_path')} version={self_s.get('version')}")
     ws = payload.get("workspace") or {}
@@ -3849,7 +3907,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     out = _with_tool_meta(payload)
     _inject_next_steps(out, args.cmd, payload)
     indent = 2 if args.pretty else None
-    print(json.dumps(out, ensure_ascii=False, indent=indent))
+    # Suppress raw JSON envelope when stdout is an interactive terminal — the
+    # human has already seen the pretty progress output. When called via
+    # subprocess pipe (Claude / install.ps1), stdout is not a TTY, so JSON
+    # prints normally for machine consumption.
+    if not sys.stdout.isatty():
+        print(json.dumps(out, ensure_ascii=False, indent=indent))
 
     # init --pretty: append a human-readable "Suggested skills" section to
     # stderr so it doesn't pollute the JSON on stdout. Silent if no matches.

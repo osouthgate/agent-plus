@@ -2582,9 +2582,10 @@ class TestDoctor(unittest.TestCase):
         self.assertEqual(rc, 0)
         # Pretty summary lands on stderr.
         self.assertIn("agent-plus-meta doctor:", err)
-        # One of the verdict words must appear.
+        # One of the verdict words must appear (HEALTHY = zero issues,
+        # OK = healthy with warnings, DEGRADED, BROKEN).
         self.assertTrue(
-            any(v in err for v in ("HEALTHY", "DEGRADED", "BROKEN")),
+            any(v in err for v in ("HEALTHY", "OK", "DEGRADED", "BROKEN")),
             msg=f"no verdict word in stderr: {err!r}",
         )
         # At least one bullet (either an issue or "No issues detected.").

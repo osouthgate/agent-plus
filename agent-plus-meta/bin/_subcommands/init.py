@@ -399,12 +399,17 @@ def _run_first_win(branch: str, project_root: Path,
     cmd = cmds.get(branch)
     if cmd is None:
         return {"command": None, "result": "skipped", "reason": "no_first_win"}
-    if shutil.which(cmd[0]) is None:
+    exe = shutil.which(cmd[0])
+    if exe is None and sys.platform == "win32":
+        exe = shutil.which(cmd[0] + ".cmd")
+    if exe is None:
         return {"command": " ".join(cmd), "result": "failed",
                 "reason": f"{cmd[0]} not on PATH"}
+    resolved_cmd = [exe] + cmd[1:]
+    use_shell = sys.platform == "win32" and exe.lower().endswith(".cmd")
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout, check=False)
+        proc = subprocess.run(resolved_cmd, capture_output=True, text=True,
+                              timeout=timeout, check=False, shell=use_shell)
     except (OSError, subprocess.SubprocessError) as e:
         return {"command": " ".join(cmd), "result": "failed",
                 "reason": str(e)}
@@ -419,13 +424,17 @@ def _run_skill_plus_scan(project_path: Path,
     """Invoke `skill-plus scan --all-projects --project <path>`. Returns a
     dict with keys: status ("ok"|"skipped"|"failed"), candidates_found,
     reason."""
-    if shutil.which("skill-plus") is None:
+    exe = shutil.which("skill-plus")
+    if exe is None and sys.platform == "win32":
+        exe = shutil.which("skill-plus.cmd")
+    if exe is None:
         return {"status": "skipped", "candidates_found": 0,
                 "reason": "skill-plus not on PATH"}
-    cmd = ["skill-plus", "scan", "--all-projects", "--project", str(project_path)]
+    cmd = [exe, "scan", "--all-projects", "--project", str(project_path)]
+    use_shell = sys.platform == "win32" and exe.lower().endswith(".cmd")
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=timeout, check=False)
+                              timeout=timeout, check=False, shell=use_shell)
     except (OSError, subprocess.SubprocessError) as e:
         return {"status": "failed", "candidates_found": 0,
                 "reason": str(e)}
