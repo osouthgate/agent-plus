@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import hashlib
 import json
 import os
 import shutil
@@ -767,6 +768,144 @@ def _safe_mkdir_or_raise(dir_flag: Optional[str], workspace: Path,
         ) from exc
 
 
+# ─── cold-repo hook ──────────────────────────────────────────────────────────
+
+# Canonical content for the UserPromptSubmit hook that suggests repo-analyze
+# when a repo hasn't been scanned yet. Embedded here so init can write it out
+# without a network call or an external template file.
+_SUGGEST_HOOK_CONTENT = """\
+#!/usr/bin/env python3
+\"\"\"UserPromptSubmit hook: suggest repo-analyze if not yet run in this repo.
+
+Injected into user projects by `agent-plus-meta init`. Prints a one-line hint
+to stdout (which Claude Code inserts into Claude's context) when the repo
+hasn't been scanned yet. Silent when the stamp exists or when the prompt
+starts with / (slash command).
+\"\"\"
+from __future__ import annotations
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def _git_toplevel(cwd: Path) -> Path | None:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd, capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return Path(out.stdout.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def main() -> int:
+    prompt = os.environ.get("CLAUDE_USER_PROMPT", "")
+    if prompt.startswith("/"):
+        return 0
+    cwd = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())).resolve()
+    git_root = _git_toplevel(cwd)
+    if git_root is None:
+        return 0
+    stamp = git_root / ".agent-plus" / "repo-analyze.stamp"
+    if stamp.exists():
+        return 0
+    print("[agent-plus] This repo hasn't been scanned yet. "
+          "Run /repo-analyze:repo-analyze for full context before starting.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+"""
+
+_SUGGEST_HOOK_COMMAND = (
+    "python3 $CLAUDE_PROJECT_DIR/.claude/hooks/suggest-repo-analyze.py"
+)
+
+
+def _install_suggest_hook(project_root: Path) -> dict[str, Any]:
+    """Write the suggest-repo-analyze hook into <project>/.claude/hooks/ and
+    register it in <project>/.claude/settings.json.
+
+    Idempotent: only writes if the file is absent or the content hash changed.
+    Returns {"status": "installed"|"updated"|"already_current"|"skipped",
+             "hook_path": str, "settings_updated": bool}.
+    """
+    hooks_dir = project_root / ".claude" / "hooks"
+    hook_file = hooks_dir / "suggest-repo-analyze.py"
+    expected_hash = hashlib.sha256(
+        _SUGGEST_HOOK_CONTENT.encode("utf-8")
+    ).hexdigest()
+
+    was_present = hook_file.is_file()
+    needs_write = True
+    if was_present:
+        try:
+            existing = hook_file.read_text(encoding="utf-8")
+            if hashlib.sha256(existing.encode("utf-8")).hexdigest() == expected_hash:
+                needs_write = False
+        except OSError:
+            pass
+
+    file_status = "already_current"
+    if needs_write:
+        try:
+            hooks_dir.mkdir(parents=True, exist_ok=True)
+            hook_file.write_text(_SUGGEST_HOOK_CONTENT, encoding="utf-8")
+            if sys.platform != "win32":
+                import stat as _stat
+                hook_file.chmod(
+                    hook_file.stat().st_mode
+                    | _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH
+                )
+            file_status = "updated" if was_present else "installed"
+        except OSError:
+            return {
+                "status": "skipped",
+                "hook_path": str(hook_file),
+                "settings_updated": False,
+            }
+
+    # Register in .claude/settings.json if not already there.
+    settings_file = project_root / ".claude" / "settings.json"
+    settings_updated = False
+    try:
+        cfg: dict[str, Any] = {}
+        if settings_file.is_file():
+            cfg = json.loads(settings_file.read_text(encoding="utf-8"))
+        if not isinstance(cfg, dict):
+            cfg = {}
+        hooks = cfg.setdefault("hooks", {})
+        ups = hooks.setdefault("UserPromptSubmit", [])
+        already = any(
+            isinstance(h, dict) and h.get("command") == _SUGGEST_HOOK_COMMAND
+            for entry in ups
+            if isinstance(entry, dict)
+            for h in (entry.get("hooks") or [])
+        )
+        if not already:
+            ups.append({
+                "hooks": [{"type": "command", "command": _SUGGEST_HOOK_COMMAND}]
+            })
+            settings_file.parent.mkdir(parents=True, exist_ok=True)
+            settings_file.write_text(
+                json.dumps(cfg, indent=2) + "\n", encoding="utf-8"
+            )
+            settings_updated = True
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    return {
+        "status": file_status,
+        "hook_path": str(hook_file),
+        "settings_updated": settings_updated,
+    }
+
+
 # ─── main entry point ────────────────────────────────────────────────────────
 
 
@@ -1173,13 +1312,15 @@ def cmd_init(args: argparse.Namespace) -> dict:
             _eprint("|  You're set up. Here's how to feel the magic:           |")
         _eprint("+----------------------------------------------------------+")
         _eprint("")
-        _eprint("  In any Claude Code session, run these commands:")
+        _eprint("  In any Claude Code session, run these slash commands:")
         _eprint("")
-        _eprint("  repo-analyze --pretty")
+        _eprint("  /repo-analyze:repo-analyze")
         _eprint("    -> scans the codebase and gives Claude full context in one call")
+        _eprint("    -> or from a terminal: repo-analyze --pretty")
         _eprint("")
-        _eprint("  diff-summary --base main")
+        _eprint("  /diff-summary:diff-summary --base main")
         _eprint("    -> explains what changed on your branch in plain English")
+        _eprint("    -> or from a terminal: diff-summary --base main")
         _eprint("")
         _eprint("  agent-plus-meta init")
         _eprint("    -> set up more repos or refresh this one")
@@ -1187,6 +1328,9 @@ def cmd_init(args: argparse.Namespace) -> dict:
         _eprint("  Not working? Run: agent-plus-meta doctor --pretty")
         _eprint("  Unexpected behavior? Ask Claude:")
         _eprint("    \"create a GitHub issue in osouthgate/agent-plus for: <your description>\"")
+
+    # ── 7b. install cold-repo hook ──────────────────────────────────────
+    hook_result = _install_suggest_hook(project_root)
 
     # ── 8. envelope ─────────────────────────────────────────────────────
     if errors and any(not e.get("recoverable", True) for e in errors):
@@ -1217,6 +1361,7 @@ def cmd_init(args: argparse.Namespace) -> dict:
         "doctor_summary": doctor_summary,
         "first_win_command": first_win_result.get("command"),
         "first_win_result": first_win_result.get("result", "skipped"),
+        "suggest_hook": hook_result,
         "ttl_total_ms": elapsed_ms,
         "errors": errors,
     }

@@ -5,10 +5,11 @@ Stdlib unittest only — no pytest fixtures, no network. Verifies:
   2. `--dry-run` exits 0 and mentions all five framework primitives.
   3. An unknown flag is rejected with a non-zero exit.
 
-Run with:
-    python3 -m pytest test/test_install_script.py
+Run with (from repo root):
+    python3 -m unittest discover -s test -p "test_install_script.py" -v
 or:
     python3 -m unittest test/test_install_script.py
+On Windows without POSIX sh on PATH, the suite skips every test (expected); run under WSL, Git Bash, or Linux CI for full coverage.
 """
 
 from __future__ import annotations

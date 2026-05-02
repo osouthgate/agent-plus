@@ -88,6 +88,7 @@ v0.13.0 ships the `agent-plus-installer` skill that packages the install + auto-
     {"path": "...", "candidates_found": int, "status": "ok" | "skipped" | "failed", "reason": "..."}
   ],
   "doctor_verdict": "healthy" | "degraded" | "broken",
+  "doctor_blocking": bool,
   "doctor_summary": {
     "primitives_installed": int,
     "primitives_total": int,
@@ -104,6 +105,8 @@ v0.13.0 ships the `agent-plus-installer` skill that packages the install + auto-
   ]
 }
 ```
+
+`doctor_blocking` is **true** when `doctor` lists any issue outside envcheck-only (the same split as `[ACTION REQUIRED]` in pretty doctor); **false** when only optional envcheck/setup items remain.
 
 Frozen for v0.12.0; additive changes may land in v0.13.x+ without breaking; renames or removals require a major bump.
 

@@ -23,7 +23,7 @@ import json
 import re
 import subprocess
 import sys
-from collections import deque
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -756,6 +756,73 @@ def _build_tree(root: Path, *, max_files: int, max_depth: int) -> dict[str, Any]
     }
 
 
+def _build_tree_compact(root: Path, *, max_depth: int) -> dict[str, Any]:
+    """Compact tree: one row per directory, listing file-type counts and LOC.
+
+    Output shape per folder entry:
+      {
+        "folder": "app/src/lib/",
+        "depth": 3,
+        "files": 12,
+        "types": {"ts": {"files": 10, "loc": 3200}, "json": {"files": 2}},
+        "totalLoc": 3200
+      }
+
+    Root-level loose files are surfaced under a synthetic "." folder entry so
+    the caller can still see what lives at the top without a full listing.
+    """
+    walked = _walk(root, max_depth=max_depth)
+
+    # Bucket files by their immediate parent directory (relative to root).
+    # Key: relative posix dir path (e.g. "app/src/lib" or "." for root).
+    buckets: dict[str, list[tuple[Path, int]]] = defaultdict(list)
+    dir_depths: dict[str, int] = {}
+
+    total_files = 0
+    for path, depth in walked:
+        if path.is_dir():
+            rel_dir = path.relative_to(root).as_posix()
+            dir_depths[rel_dir] = depth
+        else:
+            total_files += 1
+            parent_rel = path.parent.relative_to(root).as_posix()
+            buckets[parent_rel].append((path, depth))
+
+    folders: list[dict[str, Any]] = []
+    for dir_rel in sorted(buckets.keys()):
+        files_in_dir = buckets[dir_rel]
+        depth = dir_depths.get(dir_rel, files_in_dir[0][1] - 1 if files_in_dir else 0)
+        ext_counts: dict[str, dict[str, Any]] = {}
+        total_loc = 0
+        for fpath, _ in files_in_dir:
+            ext = fpath.suffix.lower().lstrip(".") or "other"
+            if ext not in ext_counts:
+                ext_counts[ext] = {"files": 0}
+            ext_counts[ext]["files"] += 1
+            if fpath.suffix.lower() in LANG_BY_EXT:
+                loc = _count_lines(fpath)
+                if loc is not None:
+                    ext_counts[ext]["loc"] = ext_counts[ext].get("loc", 0) + loc
+                    total_loc += loc
+        folder_path = (dir_rel + "/") if dir_rel != "." else "./"
+        entry: dict[str, Any] = {
+            "folder": folder_path,
+            "depth": depth,
+            "files": len(files_in_dir),
+            "types": ext_counts,
+        }
+        if total_loc:
+            entry["totalLoc"] = total_loc
+        folders.append(entry)
+
+    return {
+        "mode": "compact",
+        "totalFiles": total_files,
+        "maxDepth": max_depth,
+        "folders": folders,
+    }
+
+
 # ──────────────────────────── README ────────────────────────────
 
 
@@ -868,7 +935,7 @@ def _agent_plus_services(root: Path) -> Optional[dict[str, Any]]:
 
 
 def analyze(root: Path, *, max_tree_files: int, max_tree_depth: int,
-            include_readme: bool) -> dict[str, Any]:
+            include_readme: bool, tree_mode: str = "compact") -> dict[str, Any]:
     walked = _walk(root, max_depth=max_tree_depth)
     files = [p for p, _ in walked if not p.is_dir()]
 
@@ -887,7 +954,11 @@ def analyze(root: Path, *, max_tree_files: int, max_tree_depth: int,
         "buildTools": _detect_build_tools(root),
         "deps": deps,
         "entrypoints": _entrypoints(root, deps),
-        "tree": _build_tree(root, max_files=max_tree_files, max_depth=max_tree_depth),
+        "tree": (
+            _build_tree_compact(root, max_depth=max_tree_depth)
+            if tree_mode == "compact"
+            else _build_tree(root, max_files=max_tree_files, max_depth=max_tree_depth)
+        ),
     }
     if include_readme:
         out["readme"] = _readme_highlights(root)
@@ -955,6 +1026,38 @@ def emit(data: Any, *, pretty: bool, output: Optional[str], shape_depth: int) ->
         print(json.dumps(wrapped, default=str))
 
 
+# ──────────────────────────── stamp ────────────────────────────
+
+
+def _write_stamp(root: Path) -> None:
+    """Write .agent-plus/repo-analyze.stamp at git root (fallback: root).
+
+    Called after a successful emit() so the stamp is only written on the
+    happy path — die() exits before we get here, so error envelopes never
+    produce a stamp.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=root, capture_output=True, text=True, timeout=2,
+        )
+        git_root = (
+            Path(out.stdout.strip())
+            if out.returncode == 0 and out.stdout.strip()
+            else root
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        git_root = root
+    try:
+        stamp_dir = git_root / ".agent-plus"
+        stamp_dir.mkdir(parents=True, exist_ok=True)
+        (stamp_dir / "repo-analyze.stamp").write_text(
+            _now_iso() + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
 # ──────────────────────────── CLI ────────────────────────────
 
 
@@ -973,6 +1076,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-tree-depth", type=int, default=DEFAULT_MAX_TREE_DEPTH,
                    dest="max_tree_depth",
                    help=f"cap directory depth (default: {DEFAULT_MAX_TREE_DEPTH})")
+    p.add_argument("--tree-mode", choices=["compact", "full"], default="compact",
+                   dest="tree_mode",
+                   help=("compact (default): one row per folder with file-type counts and LOC; "
+                         "full: every file listed individually"))
 
     readme_group = p.add_mutually_exclusive_group()
     readme_group.add_argument("--include-readme", dest="include_readme", action="store_true",
@@ -1014,6 +1121,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         max_tree_files=args.max_tree_files,
         max_tree_depth=args.max_tree_depth,
         include_readme=args.include_readme,
+        tree_mode=args.tree_mode,
     )
     next_steps: list[str] = []
     entrypoints = data.get("entrypoints") or []
@@ -1025,6 +1133,7 @@ def main(argv: Optional[list[str]] = None) -> None:
     next_steps.append("diff-summary -- summarize staged/unstaged changes or a branch diff")
     data["nextSteps"] = next_steps
     emit(data, pretty=args.pretty, output=args.output, shape_depth=args.shape_depth)
+    _write_stamp(root)
 
 
 if __name__ == "__main__":

@@ -101,18 +101,12 @@ def _git_toplevel() -> Path | None:
 
 
 def _storage_root_with_source() -> tuple[Path, str]:
-    """Return (root, source) where source is one of: env, git, cwd, home.
-    Lets `path` surface which precedence rule fired so users aren't surprised
-    by feedback landing in an unrelated repo's .agent-plus/."""
+    """Return (root, source) where source is one of: env, home.
+    Ratings reflect skill quality, not a specific repo, so they always
+    land in the user-global store (~/.agent-plus/skill-feedback/)."""
     override = os.environ.get("SKILL_FEEDBACK_DIR")
     if override:
         return Path(override).expanduser().resolve(), "env"
-    top = _git_toplevel()
-    if top is not None:
-        return (top / ".agent-plus" / "skill-feedback").resolve(), "git"
-    cwd = Path.cwd()
-    if (cwd / ".agent-plus").is_dir():
-        return (cwd / ".agent-plus" / "skill-feedback").resolve(), "cwd"
     return (Path.home() / ".agent-plus" / "skill-feedback").resolve(), "home"
 
 

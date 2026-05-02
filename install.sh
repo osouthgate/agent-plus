@@ -178,12 +178,14 @@ resolve_tag() {
     api="https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest"
     json=$(curl -fsSL "$api" 2>/dev/null || true)
     if [ -z "$json" ]; then
+        echo "install.sh: could not fetch latest release tag from GitHub API -- installing from main branch (may be unstable). Set AGENT_PLUS_VERSION to pin a release." >&2
         echo "main"
         return 0
     fi
     tag=$(echo "$json" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
         | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
     if [ -z "$tag" ]; then
+        echo "install.sh: could not parse release tag from GitHub API response -- installing from main branch (may be unstable). Set AGENT_PLUS_VERSION to pin a release." >&2
         echo "main"
         return 0
     fi
@@ -215,8 +217,8 @@ for _p in $PRIMITIVES; do
 done
 
 print_header() {
-    echo "agent-plus framework installer"
-    echo "=============================="
+    echo "agent-plus installer"
+    echo "===================="
     if [ "$DRY_RUN" -eq 1 ]; then
         echo "(dry run — nothing will be downloaded or written)"
     fi
@@ -359,6 +361,13 @@ if ! command -v tar >/dev/null 2>&1; then
     fi
     exit 1
 fi
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "install.sh: Python 3 not found on PATH (need python3). Install Python 3 from https://python.org and re-run." >&2
+    if [ "$UNATTENDED" -eq 1 ]; then
+        exit 0
+    fi
+    exit 1
+fi
 
 mkdir -p "$INSTALL_DIR" "$PREFIX"
 
@@ -444,12 +453,18 @@ fi
 echo ""
 # Redirect stdout to /dev/null so the machine-readable JSON envelope is silenced.
 # All human-readable output goes to stderr and still appears in the terminal.
+init_rc=0
 if [ "$UNATTENDED" -eq 1 ]; then
     echo "Running agent-plus-meta init --non-interactive --auto..."
-    "$apm_bin" init --non-interactive --auto > /dev/null || true
+    "$apm_bin" init --non-interactive --auto > /dev/null || init_rc=$?
 else
     echo "Running agent-plus-meta init..."
-    "$apm_bin" init > /dev/null
+    "$apm_bin" init > /dev/null || init_rc=$?
+fi
+if [ "$init_rc" -ne 0 ]; then
+    echo "install.sh: agent-plus-meta init exited with code $init_rc." >&2
+    echo "If you see plugin registration instructions above, follow those first." >&2
+    echo "Otherwise run 'agent-plus-meta doctor --pretty' to diagnose." >&2
 fi
 
 if [ -z "$failed" ]; then

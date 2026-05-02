@@ -12,16 +12,17 @@ Session mining across real Claude Code transcripts showed **~67 grep + ~60 direc
 
 ```bash
 repo-analyze [--path PATH]
-             [--max-tree-files 200]    # tree cap
-             [--max-tree-depth 4]      # depth cap
-             [--no-readme]             # skip README highlights
-             [--output PATH]           # offload to disk for large responses
-             [--shape-depth 1|2|3]     # envelope detail (default 3)
+             [--tree-mode compact|full]  # compact (default): one row per folder; full: every file
+             [--max-tree-files 200]      # tree cap (full mode only)
+             [--max-tree-depth 4]        # depth cap
+             [--no-readme]               # skip README highlights
+             [--output PATH]             # offload to disk for large responses
+             [--shape-depth 1|2|3]       # envelope detail (default 3)
              [--pretty | --json]
              [--version]
 ```
 
-Default behaviour: analyze cwd, emit JSON to stdout.
+Default behaviour: analyze cwd, emit JSON to stdout. Tree defaults to **compact** mode.
 
 ## Worked example
 
@@ -59,7 +60,10 @@ $ repo-analyze --pretty | head -40
 - **Build tools.** pnpm, yarn, npm, bun, cargo, go-modules, poetry, uv, pipenv, bundler, composer, Docker, docker-compose, Make, CMake, Gradle, Maven, Bazel, Turborepo, Nx — each detected via lock-file or canonical config.
 - **Deps.** Top-level only, capped at 50 per list (with `truncated: true`). Sources: `package.json`, `requirements.txt`, `pyproject.toml` (`[project.dependencies]` + `[tool.poetry.dependencies]` + groups), `Cargo.toml`, `go.mod` (require blocks), `Gemfile`. Whitelist-only on `package.json` — unknown fields like `npm-publish-token` never make it into the output.
 - **Entrypoints.** `package.json`'s `main` / `bin`, `pyproject.toml`'s `[project.scripts]`, `Cargo.toml`'s `[[bin]]`, `cmd/*/main.go`, plus well-known files (`src/index.{ts,tsx,js,jsx}`, `src/main.{ts,tsx,py,rs,go}`, `app/page.tsx`, `pages/_app.tsx`, `manage.py`, `wsgi.py`, `asgi.py`, `app.py`).
-- **Tree.** Breadth-first, depth-capped (default 4), file-capped (default 200). Skips the boring suspects (`.git`, `node_modules`, `__pycache__`, `.venv`, `dist`, `build`, `target`, `.next`, `.turbo`, `out`, `.cache`, `vendor`, etc.). LOC included for source files, omitted for binary or > 1 MB.
+- **Tree.** Two modes, controlled by `--tree-mode`:
+  - **compact** (default) — one row per directory: folder path, file count, file-type breakdown with LOC per extension. Safe for large repos; output size is O(directories) not O(files).
+  - **full** — every file listed individually. Breadth-first, depth-capped (default 4), file-capped (default 200). Truncated output is flagged with `"truncated": true`. LOC included for source files, omitted for binary or > 1 MB.
+  Both modes skip `.git`, `node_modules`, `__pycache__`, `.venv`, `dist`, `build`, `target`, `.next`, `.turbo`, `out`, `.cache`, `vendor`, etc.
 - **README.** First H1 → `title`. Text under H1 until next blank line / heading → `firstParagraph` (capped at 800 chars). All H2 headings → `headings` (capped at 20). No code blocks, no full sections — agents that want them call Read.
 - **Agent-plus enrichment.** If `.agent-plus/services.json` exists in the analyzed path or any ancestor, `agentPlusServices` is populated with **service names + statuses only** (Pattern 5 — no IDs, no project lists). Otherwise `null`.
 

@@ -1,6 +1,6 @@
 ---
 name: repo-analyze
-description: One-call cold-start orientation for an unfamiliar repo. Returns a structured map — file tree (capped), language mix, framework + build-tool detection, top-level deps, entrypoints, README highlights — so you don't burn 60+ Read/Glob/Grep calls re-mining the same facts every fresh session. Stateless, no network, stdlib Python only.
+description: One-call cold-start orientation for an unfamiliar repo. Returns a structured map — file tree (compact per-folder summary by default, full per-file listing with --tree-mode full), language mix, framework + build-tool detection, top-level deps, entrypoints, README highlights — so you don't burn 60+ Read/Glob/Grep calls re-mining the same facts every fresh session. Stateless, no network, stdlib Python only.
 when_to_use: Trigger on phrases like "what is this project", "tell me about this repo", "give me an overview", "what's the tech stack", "where do I start in this repo", "scan the codebase", "what does this codebase use", "list the entrypoints". This is the first call in any new repo. Use ONCE per session, then drop to Read/Grep for the actual file contents.
 allowed-tools: Bash(repo-analyze:*) Bash(python3 *repo-analyze*:*)
 ---
@@ -8,6 +8,8 @@ allowed-tools: Bash(repo-analyze:*) Bash(python3 *repo-analyze*:*)
 # repo-analyze
 
 The map, not the contents. One call replaces the cold-start dance — file-tree exploration, finding entrypoints, reading every manifest, scanning README. Session mining showed ~67 grep + ~60 ls ops on a typical fresh-repo session, almost all of it answerable from one structured payload.
+
+Tree output defaults to **compact** mode: one row per directory, showing file counts and per-extension LOC. This stays small even in large repos. Use `--tree-mode full` when you need the individual file list (e.g. to scan for a specific file that isn't an entrypoint).
 
 Lives at `${CLAUDE_SKILL_DIR}/../../bin/repo-analyze`; the plugin auto-adds `bin/` to PATH, so just run `repo-analyze ...`.
 
@@ -22,16 +24,17 @@ Lives at `${CLAUDE_SKILL_DIR}/../../bin/repo-analyze`; the plugin auto-adds `bin
 
 ```bash
 repo-analyze [--path PATH]
-             [--max-tree-files INT]    # default 200
-             [--max-tree-depth INT]    # default 4
-             [--no-readme]             # skip README highlights
-             [--output PATH]           # offload to disk
-             [--shape-depth 1|2|3]     # envelope detail (default 3)
+             [--tree-mode compact|full]  # compact (default): folder summary; full: every file
+             [--max-tree-files INT]      # default 200 (full mode only)
+             [--max-tree-depth INT]      # default 4
+             [--no-readme]               # skip README highlights
+             [--output PATH]             # offload to disk
+             [--shape-depth 1|2|3]       # envelope detail (default 3)
              [--pretty | --json]
              [--version]
 ```
 
-Default behaviour: analyze cwd, return one JSON blob.
+Default behaviour: analyze cwd, return one JSON blob. Tree defaults to **compact** mode.
 
 ## Output shape (truncated)
 
@@ -45,7 +48,15 @@ Default behaviour: analyze cwd, return one JSON blob.
   "buildTools": [{"name": "pnpm", "evidence": "pnpm-lock.yaml"}],
   "deps": {"node": {...}, "python": {...}, "rust": null, "go": null, "ruby": null},
   "entrypoints": [{"path": "src/app/page.tsx", "kind": "next-page"}],
-  "tree": {"totalFiles": 1234, "shown": 200, "truncated": true, "entries": [...]},
+  "tree": {
+    "mode": "compact",
+    "totalFiles": 1234,
+    "maxDepth": 4,
+    "folders": [
+      {"folder": "./", "depth": 0, "files": 3, "types": {"md": {"files": 2, "loc": 120}, "json": {"files": 1}}},
+      {"folder": "src/", "depth": 1, "files": 12, "types": {"ts": {"files": 10, "loc": 3200}, "css": {"files": 2, "loc": 150}}, "totalLoc": 3350}
+    ]
+  },
   "readme": {"title": "...", "firstParagraph": "...", "headings": [...]},
   "agentPlusServices": {"services": {"github-remote": {"status": "ok"}, ...}}
 }

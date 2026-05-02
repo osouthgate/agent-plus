@@ -6,6 +6,19 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.19.4 - 2026-05-02
+
+Cold-repo hook, slash-command footer, global skill storage.
+
+### Added
+- **Cold-repo UserPromptSubmit hook.** `agent-plus-meta init` now writes `.claude/hooks/suggest-repo-analyze.py` into the project and registers it in `.claude/settings.json`. The hook fires before every user message and prints a one-line suggestion to Claude's context when the repo hasn't been scanned yet (`.agent-plus/repo-analyze.stamp` absent). Silent once the stamp exists, silent on slash-command prompts, silent outside git repos. Upgrade-aware: hook file is checked by SHA-256 hash so re-running `init` updates stale hook content automatically.
+- **`suggest_hook` key on `init` JSON envelope.** Reports `{"status": "installed"|"updated"|"already_current"|"skipped", "hook_path": "...", "settings_updated": bool}`.
+
+### Changed
+- **Init footer shows slash commands as primary.** Footer now reads `/repo-analyze:repo-analyze` and `/diff-summary:diff-summary --base main` with terminal equivalents as secondary (`-> or from a terminal: ...`). Previously showed bare terminal commands only.
+- **`skill-feedback` ratings moved to global store.** Ratings reflect skill quality, not a specific repo. Storage moved from `<repo>/.agent-plus/skill-feedback/` to `~/.agent-plus/skill-feedback/`. `SKILL_FEEDBACK_DIR` env override preserved.
+- **`skill-plus` candidates moved to global store.** Candidates are mined from all your session history, not one repo. Storage moved from `<repo>/.agent-plus/skill-plus/candidates.jsonl` to `~/.agent-plus/skill-plus/candidates.jsonl`. `SKILL_PLUS_DIR` env override preserved for test isolation.
+
 ## 0.19.3 - 2026-05-02
 
 Doctor output clarity + init footer fix.

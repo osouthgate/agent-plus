@@ -200,7 +200,7 @@ Run the wizard again any time (`agent-plus-meta init`) — it's idempotent.
 
 ### CI / automation
 
-For agent harnesses or CI:
+For agent harnesses or CI: prefix any `install.sh` invocation with `AGENT_PLUS_NO_BANNER=1` to skip the welcome banner in logs. On Windows, set `$env:AGENT_PLUS_NO_BANNER = "1"` before `irm ... | iex` for the same effect.
 
 ```bash
 curl -fsSL .../install.sh | sh -s -- --unattended      # accept defaults, exit 0 on partial install
@@ -238,7 +238,7 @@ curl -fsSL https://github.com/osouthgate/agent-plus/releases/latest/download/ins
 sh /tmp/install-agent-plus.sh  # then run
 ```
 
-**What the script does:** detects your shell + OS, downloads the framework tarball from the matching GitHub release, installs the five primitives as CLI tools under `~/.local/share/agent-plus/` (with wrapper shims in `~/.local/bin/`), then chains into `agent-plus-meta init` (idempotent, runs the wizard). To register them as Claude Code plugins so Claude can invoke them directly, also run the **Manual install** commands below — or skip `install.sh` and use Manual install only.
+**What the script does:** detects your shell + OS, downloads the framework tarball from the matching GitHub release, installs the five primitives as CLI tools under `~/.local/share/agent-plus/` (with wrapper shims in `~/.local/bin/`), then chains into `agent-plus-meta init` (idempotent, runs the wizard). **On a real install** (not `--dry-run`), you need `curl`, `tar`, and **`python3` on PATH** — the CLI wrappers invoke Python. **`--dry-run`** only prints the plan and does not require `curl`, `tar`, or `python3`. To register them as Claude Code plugins so Claude can invoke them directly, also run the **Manual install** commands below — or skip `install.sh` and use Manual install only.
 
 **What you're trusting** (in order): this repo and its release tags · GitHub release infrastructure · your local TLS chain. The branded URL adds one layer (Netlify edge proxy) for those who use it.
 

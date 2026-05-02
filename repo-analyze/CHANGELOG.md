@@ -4,7 +4,17 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## Unreleased
+
 ## 0.3.0 - 2026-05-02
+
+Compact tree mode + stamp write for cold-repo hook.
+
+### Added
+- **`--tree-mode compact|full`.** Compact mode (the new default) emits one row per directory — folder path, file count, and a per-extension breakdown with LOC. Output size is O(directories) not O(files), so it stays small even in a 10,000-file monorepo. Use `--tree-mode full` to get the previous file-by-file listing. The compact `tree` object uses `"mode": "compact"` and a `"folders"` array instead of `"entries"` so callers can tell them apart.
+- **Stamp write after successful run.** Writes `.agent-plus/repo-analyze.stamp` at the git root (fallback: analyzed path) after a successful `emit()`. Only written on the happy path — error envelopes from `die()` do not produce a stamp. Used by the cold-repo UserPromptSubmit hook (see agent-plus-meta 0.19.4) to silence the suggestion once the repo has been scanned.
+
+## 0.2.2 - 2026-05-02
 
 ### Added
 - **`nextSteps[]` in output envelope.** Every `repo-analyze` invocation now includes a `nextSteps` array. When entrypoints are detected, the first entry suggests reading the top entrypoint file. Remaining entries suggest `skill-plus scan` (mine session history for skill candidates) and `diff-summary` (summarise changes). Lets Claude follow the orientation workflow automatically without prompting.

@@ -178,7 +178,7 @@ class TestSkipDirs(unittest.TestCase):
             r.write("real.js", "const x = 1;\n")
             r.write("node_modules/big-pkg/index.js", "module.exports = {};\n")
             r.write("node_modules/big-pkg/util.ts", "export const x = 1;\n")
-            out = _run_cli("--path", td)
+            out = _run_cli("--path", td, "--tree-mode", "full")
             # only one js file should be found
             self.assertEqual(out["languages"]["javascript"]["files"], 1)
             for entry in out["tree"]["entries"]:
@@ -189,7 +189,7 @@ class TestSkipDirs(unittest.TestCase):
             r = _Repo(Path(td))
             r.write("a.py", "x = 1\n")
             r.write("__pycache__/a.cpython-311.pyc", "junk\n")
-            out = _run_cli("--path", td)
+            out = _run_cli("--path", td, "--tree-mode", "full")
             self.assertEqual(out["languages"]["python"]["files"], 1)
             for entry in out["tree"]["entries"]:
                 self.assertNotIn("__pycache__", entry["path"])
@@ -201,7 +201,7 @@ class TestSkipDirs(unittest.TestCase):
             r.write("dist/main.js", "compiled\n")
             r.write("build/x.py", "x = 1\n")
             r.write(".next/static.js", "compiled\n")
-            out = _run_cli("--path", td)
+            out = _run_cli("--path", td, "--tree-mode", "full")
             self.assertEqual(out["languages"].get("typescript", {}).get("files"), 1)
             self.assertNotIn("javascript", out["languages"])
             for entry in out["tree"]["entries"]:
@@ -360,7 +360,7 @@ class TestTree(unittest.TestCase):
             r = _Repo(Path(td))
             for i in range(50):
                 r.write(f"f{i}.py", "x = 1\n")
-            out = _run_cli("--path", td, "--max-tree-files", "10")
+            out = _run_cli("--path", td, "--tree-mode", "full", "--max-tree-files", "10")
             self.assertLessEqual(len(out["tree"]["entries"]), 10)
             self.assertTrue(out["tree"]["truncated"])
 
@@ -369,11 +369,40 @@ class TestTree(unittest.TestCase):
             r = _Repo(Path(td))
             r.write("zzz.py", "x = 1\n")
             r.write("aaa/inner.py", "x = 1\n")
-            out = _run_cli("--path", td)
+            out = _run_cli("--path", td, "--tree-mode", "full")
             entries = out["tree"]["entries"]
             # First entry at depth 1 should be a dir.
             top = [e for e in entries if e["depth"] == 1]
             self.assertEqual(top[0]["type"], "dir")
+
+    def test_compact_tree_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            r = _Repo(Path(td))
+            r.write("src/app.py", "x = 1\n")
+            r.write("src/util.py", "y = 2\n")
+            r.write("README.md", "# hi\n")
+            out = _run_cli("--path", td)  # compact is default
+            tree = out["tree"]
+            self.assertEqual(tree["mode"], "compact")
+            self.assertIn("totalFiles", tree)
+            self.assertIn("folders", tree)
+            folders_by_path = {f["folder"]: f for f in tree["folders"]}
+            self.assertIn("src/", folders_by_path)
+            src = folders_by_path["src/"]
+            self.assertEqual(src["files"], 2)
+            self.assertIn("py", src["types"])
+
+    def test_compact_tree_skips_excluded_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            r = _Repo(Path(td))
+            r.write("src/app.py", "x = 1\n")
+            r.write("node_modules/pkg/index.js", "x = 1\n")
+            r.write("dist/bundle.js", "compiled\n")
+            out = _run_cli("--path", td)  # compact is default
+            folder_paths = [f["folder"] for f in out["tree"]["folders"]]
+            for path in folder_paths:
+                self.assertFalse(path.startswith("node_modules/"), f"node_modules leaked: {path}")
+                self.assertFalse(path.startswith("dist/"), f"dist leaked: {path}")
 
 
 # ──────────────────────────── README ────────────────────────────
@@ -545,6 +574,49 @@ class TestShape(unittest.TestCase):
         shape = ra._payload_shape({"tool": {"name": "x"}, "data": [1, 2]}, depth=2)
         self.assertNotIn("tool", shape)
         self.assertIn("data", shape)
+
+
+# ──────────────────────────── stamp ────────────────────────────
+
+
+class TestStamp(unittest.TestCase):
+    def test_write_stamp_creates_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ra._write_stamp(root)
+            stamp = root / ".agent-plus" / "repo-analyze.stamp"
+            self.assertTrue(stamp.exists())
+            content = stamp.read_text(encoding="utf-8").strip()
+            # Should be an ISO-8601 timestamp.
+            self.assertRegex(content, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+    def test_write_stamp_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            ra._write_stamp(root)
+            ra._write_stamp(root)
+            stamp = root / ".agent-plus" / "repo-analyze.stamp"
+            self.assertTrue(stamp.exists())
+
+    def test_stamp_written_on_successful_analyze(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            r = _Repo(Path(td))
+            r.write("main.py", "x = 1\n")
+            _run_cli("--path", td)
+            # Stamp should exist under td/.agent-plus/ (no git repo in tmpdir,
+            # so git_root falls back to root itself).
+            stamp = Path(td) / ".agent-plus" / "repo-analyze.stamp"
+            self.assertTrue(stamp.exists(), "stamp not written after successful run")
+
+    def test_stamp_not_written_on_die(self) -> None:
+        """die() exits before emit(), so stamp must not be written on error."""
+        with tempfile.TemporaryDirectory() as td:
+            bad_path = Path(td) / "does_not_exist"
+            with self.assertRaises(SystemExit) as ctx:
+                ra.main(["--path", str(bad_path)])
+            self.assertNotEqual(ctx.exception.code, 0)
+            stamp = Path(td) / ".agent-plus" / "repo-analyze.stamp"
+            self.assertFalse(stamp.exists(), "stamp must not be written on error exit")
 
 
 if __name__ == "__main__":

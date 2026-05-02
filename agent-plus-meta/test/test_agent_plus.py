@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -442,7 +443,8 @@ class TestInitWizard(unittest.TestCase):
                   "suggested_skills", "verdict", "branch_chosen",
                   "tie_break_reason", "detection", "cross_repo_offered",
                   "cross_repo_accepted", "cross_repo_results",
-                  "doctor_verdict", "doctor_summary", "first_win_command",
+                  "doctor_verdict", "doctor_summary", "doctor_blocking",
+                  "first_win_command",
                   "first_win_result", "ttl_total_ms", "errors", "tool"):
             self.assertIn(k, payload, f"missing envelope key: {k}")
         # detection sub-schema:
@@ -459,6 +461,59 @@ class TestInitWizard(unittest.TestCase):
         self.assertIn(payload["verdict"], ("success", "warn", "error"))
         # branch_chosen is one of three
         self.assertIn(payload["branch_chosen"], ("new", "returning", "skill_author"))
+        self.assertIsInstance(payload["doctor_blocking"], bool)
+
+    def test_doctor_has_blocking_issues_empty_false(self) -> None:
+        self.assertFalse(_init_mod._doctor_has_blocking_issues({"issues": []}))
+
+    def test_doctor_has_blocking_issues_envcheck_only_false(self) -> None:
+        self.assertFalse(_init_mod._doctor_has_blocking_issues({
+            "issues": [{"category": "envcheck"}],
+        }))
+
+    def test_doctor_has_blocking_issues_claude_plugin_true(self) -> None:
+        self.assertTrue(_init_mod._doctor_has_blocking_issues({
+            "issues": [{"category": "claude-plugin"}],
+        }))
+
+    def test_doctor_has_blocking_issues_mixed_true(self) -> None:
+        self.assertTrue(_init_mod._doctor_has_blocking_issues({
+            "issues": [
+                {"category": "envcheck"},
+                {"category": "claude-plugin"},
+            ],
+        }))
+
+    def test_doctor_has_blocking_issues_non_list_issues_false(self) -> None:
+        self.assertFalse(_init_mod._doctor_has_blocking_issues({"issues": "bad"}))
+
+    def test_doctor_has_blocking_issues_none_issues_false(self) -> None:
+        self.assertFalse(_init_mod._doctor_has_blocking_issues({"issues": None}))
+
+    # ── _missing_claude_plugins ──────────────────────────────────────────
+
+    def test_missing_claude_plugins_all_registered(self) -> None:
+        payload = {"claude_plugin_registration": {"agent-plus-meta": True, "diff-summary": True}}
+        self.assertEqual(_init_mod._missing_claude_plugins(payload), [])
+
+    def test_missing_claude_plugins_some_missing(self) -> None:
+        payload = {
+            "claude_plugin_registration": {
+                "agent-plus-meta": False,
+                "diff-summary": True,
+                "repo-analyze": False,
+            }
+        }
+        missing = _init_mod._missing_claude_plugins(payload)
+        self.assertIn("agent-plus-meta", missing)
+        self.assertIn("repo-analyze", missing)
+        self.assertNotIn("diff-summary", missing)
+
+    def test_missing_claude_plugins_key_absent(self) -> None:
+        self.assertEqual(_init_mod._missing_claude_plugins({}), [])
+
+    def test_missing_claude_plugins_key_not_dict(self) -> None:
+        self.assertEqual(_init_mod._missing_claude_plugins({"claude_plugin_registration": None}), [])
 
     def test_auto_exits_zero_even_with_recoverable_errors(self) -> None:
         rc, _out, _err = _run("init", "--dir", str(self.dir),
@@ -1983,7 +2038,10 @@ class TestSuggestedSkills(unittest.TestCase):
         self.workspace_dir = self.root  # parent dir; .agent-plus is appended by --dir resolver
 
     def tearDown(self) -> None:
-        self.tmp.cleanup()
+        try:
+            self.tmp.cleanup()
+        except (RecursionError, OSError):
+            pass  # Python 3.11 / Windows tempfile.py rmtree recursion edge case
 
     def _run_clean(self, *args: str, env_extra: dict | None = None) -> tuple[int, str, str]:
         # Build a deterministic env: bypass _run's merge with os.environ.
@@ -2588,11 +2646,13 @@ class TestDoctor(unittest.TestCase):
             any(v in err for v in ("HEALTHY", "OK", "DEGRADED", "BROKEN")),
             msg=f"no verdict word in stderr: {err!r}",
         )
-        # At least one bullet (either an issue or "No issues detected.").
+        # At least one content line beyond the header — an issue block, an
+        # "OPTIONAL SETUP" section, or a "No issues detected." line.
         self.assertTrue(
             ("- [" in err) or ("No issues detected." in err)
-            or ("! " in err) or ("  - " in err),
-            msg=f"no summary bullet in stderr: {err!r}",
+            or ("! " in err) or ("  - " in err)
+            or ("[OPTIONAL SETUP" in err) or ("    " in err),
+            msg=f"no summary content in stderr: {err!r}",
         )
 
 
@@ -3305,6 +3365,169 @@ class TestWindowsUninstallCmdWrapper(unittest.TestCase):
         # Should be exactly one entry for agent-plus-meta, the .cmd one.
         self.assertEqual(len(meta_entries), 1)
         self.assertTrue(meta_entries[0]["path"].endswith(".cmd"))
+
+
+# ─── cold-repo hook install ──────────────────────────────────────────────────
+
+
+def _load_init_submodule():
+    here = Path(__file__).resolve()
+    init_path = here.parent.parent / "bin" / "_subcommands" / "init.py"
+    loader = SourceFileLoader("init_submodule", str(init_path))
+    spec = importlib.util.spec_from_loader("init_submodule", loader)
+    assert spec
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+class TestInitInstallsHook(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.project_root = Path(self.tmp.name)
+        self.init_mod = _load_init_submodule()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_init_installs_hook_file(self) -> None:
+        result = self.init_mod._install_suggest_hook(self.project_root)
+        hook_file = self.project_root / ".claude" / "hooks" / "suggest-repo-analyze.py"
+        self.assertTrue(hook_file.exists(), "hook file was not created")
+        self.assertIn(result["status"], ("installed", "already_current"))
+
+    def test_init_hook_file_content_matches_template(self) -> None:
+        self.init_mod._install_suggest_hook(self.project_root)
+        hook_file = self.project_root / ".claude" / "hooks" / "suggest-repo-analyze.py"
+        content = hook_file.read_text(encoding="utf-8")
+        self.assertEqual(content, self.init_mod._SUGGEST_HOOK_CONTENT)
+
+    def test_init_registers_hook_in_settings_json(self) -> None:
+        self.init_mod._install_suggest_hook(self.project_root)
+        settings_file = self.project_root / ".claude" / "settings.json"
+        self.assertTrue(settings_file.exists(), "settings.json not created")
+        cfg = json.loads(settings_file.read_text(encoding="utf-8"))
+        ups = cfg.get("hooks", {}).get("UserPromptSubmit", [])
+        commands = [
+            h.get("command")
+            for entry in ups if isinstance(entry, dict)
+            for h in (entry.get("hooks") or []) if isinstance(h, dict)
+        ]
+        self.assertIn(self.init_mod._SUGGEST_HOOK_COMMAND, commands)
+
+    def test_init_hook_idempotent_no_duplicate(self) -> None:
+        self.init_mod._install_suggest_hook(self.project_root)
+        self.init_mod._install_suggest_hook(self.project_root)
+        settings_file = self.project_root / ".claude" / "settings.json"
+        cfg = json.loads(settings_file.read_text(encoding="utf-8"))
+        ups = cfg.get("hooks", {}).get("UserPromptSubmit", [])
+        commands = [
+            h.get("command")
+            for entry in ups if isinstance(entry, dict)
+            for h in (entry.get("hooks") or []) if isinstance(h, dict)
+        ]
+        count = commands.count(self.init_mod._SUGGEST_HOOK_COMMAND)
+        self.assertEqual(count, 1, "hook command registered more than once")
+
+    def test_init_hook_idempotent_status(self) -> None:
+        self.init_mod._install_suggest_hook(self.project_root)
+        result2 = self.init_mod._install_suggest_hook(self.project_root)
+        self.assertEqual(result2["status"], "already_current")
+        self.assertFalse(result2["settings_updated"])
+
+    def test_init_hook_updated_when_content_stale(self) -> None:
+        hook_file = self.project_root / ".claude" / "hooks" / "suggest-repo-analyze.py"
+        hook_file.parent.mkdir(parents=True, exist_ok=True)
+        hook_file.write_text("# outdated content\n", encoding="utf-8")
+        result = self.init_mod._install_suggest_hook(self.project_root)
+        self.assertEqual(result["status"], "updated")
+        self.assertEqual(
+            hook_file.read_text(encoding="utf-8"),
+            self.init_mod._SUGGEST_HOOK_CONTENT,
+        )
+
+    def test_init_hook_preserves_existing_settings(self) -> None:
+        settings_file = self.project_root / ".claude" / "settings.json"
+        settings_file.parent.mkdir(parents=True, exist_ok=True)
+        existing = {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo done"}]}]}}
+        settings_file.write_text(json.dumps(existing), encoding="utf-8")
+        self.init_mod._install_suggest_hook(self.project_root)
+        cfg = json.loads(settings_file.read_text(encoding="utf-8"))
+        self.assertIn("Stop", cfg["hooks"])
+        self.assertIn("UserPromptSubmit", cfg["hooks"])
+
+    def test_init_cli_includes_suggest_hook_in_envelope(self) -> None:
+        rc, out, err = _run("init", "--non-interactive", "--auto",
+                            "--dir", str(self.project_root / ".agent-plus"))
+        self.assertEqual(rc, 0, msg=f"init failed: {err!r}")
+        result = json.loads(out)
+        self.assertIn("suggest_hook", result)
+        self.assertIn("status", result["suggest_hook"])
+
+
+# ─── suggest-repo-analyze hook behaviour ─────────────────────────────────────
+
+
+def _load_hook_script() -> types.ModuleType:
+    here = Path(__file__).resolve()
+    hook_path = (
+        here.parent.parent.parent / ".claude" / "hooks" / "suggest-repo-analyze.py"
+    )
+    if not hook_path.exists():
+        raise unittest.SkipTest("suggest-repo-analyze.py not installed in staging repo")
+    loader = SourceFileLoader("suggest_hook", str(hook_path))
+    spec = importlib.util.spec_from_loader("suggest_hook", loader)
+    assert spec
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+class TestSuggestHookBehaviour(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self.tmp.name)
+        try:
+            self.hook = _load_hook_script()
+        except unittest.SkipTest:
+            self.skipTest("hook script not present")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _call_main(self, prompt: str, git_root: "Path | None") -> str:
+        """Call hook main() with mocked git and env; return captured stdout."""
+        buf = io.StringIO()
+        env_patch = {
+            "CLAUDE_USER_PROMPT": prompt,
+            "CLAUDE_PROJECT_DIR": str(self.tmp_path),
+        }
+        with patch.dict(os.environ, env_patch):
+            with patch.object(self.hook, "_git_toplevel", return_value=git_root):
+                import contextlib
+                with contextlib.redirect_stdout(buf):
+                    self.hook.main()
+        return buf.getvalue()
+
+    def test_silent_when_stamp_present(self) -> None:
+        stamp_dir = self.tmp_path / ".agent-plus"
+        stamp_dir.mkdir(parents=True)
+        (stamp_dir / "repo-analyze.stamp").write_text("2026-01-01T00:00:00Z\n")
+        out = self._call_main("help me", self.tmp_path)
+        self.assertEqual(out.strip(), "")
+
+    def test_fires_when_stamp_absent(self) -> None:
+        out = self._call_main("help me", self.tmp_path)
+        self.assertIn("[agent-plus]", out)
+        self.assertIn("repo-analyze", out)
+
+    def test_silent_on_slash_command(self) -> None:
+        out = self._call_main("/repo-analyze:repo-analyze", self.tmp_path)
+        self.assertEqual(out.strip(), "")
+
+    def test_silent_outside_git(self) -> None:
+        out = self._call_main("help me", None)
+        self.assertEqual(out.strip(), "")
 
 
 if __name__ == "__main__":

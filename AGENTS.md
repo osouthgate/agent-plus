@@ -55,6 +55,17 @@ Any change must reinforce one of these. Full rationale: [README.md](./README.md)
 6. Self-diagnosing output — every payload carries `tool: {name, version}`.
 7. Stay in your lane — each plugin's SKILL.md says when to drop to raw CLI.
 
+## Keeping plans current (READ THIS)
+
+When working on any item in `plans/todo/` or `plans/OPEN-ACTIONS.md`:
+
+1. **Update the plan file as you go.** When a decision is made, resolved questions get struck or replaced — not left as open questions. When a step completes, mark it done or remove it. Plans should reflect current reality, not the state when they were written.
+2. **Update `plans/OPEN-ACTIONS.md`** to match — remove completed items, add new ones that surface during implementation.
+3. **When a plan file is fully complete**, move it to `plans/archive/`. Do not leave done plans in `plans/todo/`.
+4. **PLANS.md is the active strategic backlog** — update it when decisions from planning files change the scope or approach of an item there.
+
+If you finish a task and the corresponding plan file still has open items or unresolved questions, either address them or explicitly note why they're being deferred before stopping.
+
 ## Keeping the docs honest (READ THIS)
 
 **When you modify `<plugin>/bin/*` or `<plugin>/skills/*/SKILL.md`, you MUST before stopping:**
@@ -111,6 +122,12 @@ Every plugin README should:
 3. **Name the gotcha you're collapsing.** E.g. coolify-remote's "env vars visible in UI but not in container (needed a redeploy)". These are the hard-won bits that justify the plugin's existence.
 4. **Headline commands before config.** The reader needs to see the shape of the tool before they care about `.env` precedence.
 5. **No emoji decorations. No feature-table fluff.** Terse voice, one idea per line.
+
+## Code comments
+
+Default to no comments. Add one only when the WHY is non-obvious: a hidden constraint, a platform workaround, a subtle invariant, or behaviour that would surprise a future reader. Never describe WHAT the code does — clear names already do that.
+
+`_subcommands/init.py` is the one exception where `# ── N. topic ──` section markers add navigation value; preserve that pattern there.
 
 ## Philosophy
 

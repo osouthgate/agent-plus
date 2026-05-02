@@ -119,8 +119,8 @@ function Locate-AgentPlusMeta {
 }
 
 function Print-Header {
-    Write-Host "agent-plus framework installer (Windows)"
-    Write-Host "========================================="
+    Write-Host "agent-plus installer (Windows)"
+    Write-Host "=============================="
     if ($DryRun)     { Write-Host "(dry run -- nothing will be downloaded or written)" }
     if ($Unattended) { Write-Host "(unattended mode -- no prompts, exit 0 on partial install)" }
 }
@@ -168,6 +168,9 @@ if ($DryRun) {
     if ($NoInit) {
         Write-Host ""
         Write-Host "(dry run) would skip agent-plus-meta init (--no-init)"
+    } elseif ($Unattended) {
+        Write-Host ""
+        Write-Host "(dry run) would chain: agent-plus-meta init --non-interactive --auto"
     } else {
         Write-Host ""
         Write-Host "(dry run) would chain: agent-plus-meta init"

@@ -19,6 +19,16 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/.claude/hooks/suggest-repo-analyze.py"
+          }
+        ]
+      }
     ]
   }
 }
