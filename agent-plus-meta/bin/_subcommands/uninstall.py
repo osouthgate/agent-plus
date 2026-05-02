@@ -228,10 +228,14 @@ def build_manifest(*, scope: str, install_dir: Path,
     paths: list[dict] = []
 
     # ── default tier: 5 primitive wrappers + 5 primitive trees ──────────────
-    # Wrappers live at $INSTALL_DIR/<plugin>; the real plugin tree lives at
-    # $PREFIX/<plugin>/. Both are owned by install.sh and removed together.
+    # Wrappers live at $INSTALL_DIR/<plugin> (Unix) or <plugin>.cmd (Windows).
+    # Both are owned by the installer and removed together with the tree.
     for name in PRIMITIVES:
         target = install_dir / name
+        # On Windows, install.ps1 writes <name>.cmd; prefer it when present.
+        cmd_target = install_dir / (name + ".cmd")
+        if sys.platform == "win32" and cmd_target.is_file():
+            target = cmd_target
         exists = target.is_file() or target.is_symlink()
         paths.append({
             "path": str(target),

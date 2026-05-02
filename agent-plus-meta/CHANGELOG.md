@@ -17,6 +17,7 @@ Windows install polish and init UX improvements.
 ### Changed
 - **`init` branch greeting.** `branch: returning` replaced with a human-readable description: `welcome back -- refreshing your workspace` / `first-time setup -- building your workspace` etc.
 - **`init` cross-repo section messaging.** The folder-selection prompt now opens with a 2-line explanation of what selecting repos does and why (pre-warming context so Claude has no cold start in other repos). Prompt text reworded. Scanning progress shows `-> <path>` then `done -- N skill candidates found`.
+- **`uninstall` removes `.cmd` wrappers on Windows.** `build_manifest()` now checks for `<name>.cmd` alongside the plain `<name>` shim; on Windows it prefers the `.cmd` file so the uninstall command fully cleans up without requiring manual `Remove-Item` calls.
 
 ## 0.19.0 - 2026-05-02
 
