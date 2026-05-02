@@ -366,7 +366,7 @@ def _stub(name: str):
 
 SUBCOMMANDS = (
     "scan", "propose", "install-cron", "scaffold", "list", "feedback", "promote",
-    "globalize", "localize", "where", "team-sync", "collisions", "inquire",
+    "globalize", "localize", "where", "team-sync", "collisions", "inquire", "review",
 )
 
 
@@ -558,6 +558,30 @@ def build_parser() -> argparse.ArgumentParser:
                     help="force re-probe and overwrite the cache entry")
     sp.add_argument("--clear-cache", dest="clear_cache", action="store_true",
                     help="wipe the entire inquire cache directory and exit")
+    _add_envelope_args(sp)
+
+    # review (v0.18.0) -- multi-persona pre-ship reviewer
+    sp = sub.add_parser(
+        "review",
+        help="multi-persona pre-ship review: emit dispatch envelope (Option B) "
+             "or synthesize findings with --synth-from",
+    )
+    sp.add_argument(
+        "path", nargs="?", default=".",
+        help="path to the skill or plugin directory to review (default: .)",
+    )
+    sp.add_argument(
+        "--personas", default=None,
+        metavar="NAMES",
+        help="comma-separated persona names to run (default: all 4 shipped defaults "
+             "plus any user personas in ~/.agent-plus/review-personas/)",
+    )
+    sp.add_argument(
+        "--synth-from", dest="synth_from", default=None,
+        metavar="DIR",
+        help="synthesis mode: read per-persona JSON files from DIR and emit the "
+             "merged review envelope",
+    )
     _add_envelope_args(sp)
 
     return p

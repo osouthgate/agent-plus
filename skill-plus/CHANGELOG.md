@@ -4,6 +4,15 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.6.0 - 2026-05-02
+
+### Added
+- **`review <path>`** — multi-persona pre-ship reviewer (Option B dispatch model). Reads four shipped persona briefs (security, agent-ux, docs-clarity, edge-cases) and emits a dispatch envelope telling the calling orchestrator to spawn N sub-agents, one per persona. Each persona sub-agent writes a findings JSON file.
+- **`review <path> --synth-from <dir>`** — synthesis mode. Reads N persona findings files, merges them, computes a verdict (`approve` / `approve-with-nits` / `request-changes`), and emits a final envelope with a paste-ready `pr_body_draft`.
+- **Persona lookup precedence:** plugin-local `<target>/personas/<name>.md` > user-global `~/.agent-plus/review-personas/<name>.md` > shipped default. User can extend or override any persona brief without touching the plugin.
+- **`--personas` flag** to restrict review to a subset (e.g. `--personas security,edge-cases`).
+- **41 new tests** in `test_review.py` covering dispatch shape, synth merge + verdict logic, persona resolution precedence, envelope v1.1 contract, and CLI integration. Total: 304 passing, 1 skipped.
+
 ## 0.5.0 - 2026-05-01
 
 ### Added
