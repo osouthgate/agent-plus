@@ -442,12 +442,14 @@ if [ -z "$apm_bin" ]; then
 fi
 
 echo ""
+# Redirect stdout to /dev/null so the machine-readable JSON envelope is silenced.
+# All human-readable output goes to stderr and still appears in the terminal.
 if [ "$UNATTENDED" -eq 1 ]; then
     echo "Running agent-plus-meta init --non-interactive --auto..."
-    "$apm_bin" init --non-interactive --auto || true
+    "$apm_bin" init --non-interactive --auto > /dev/null || true
 else
     echo "Running agent-plus-meta init..."
-    "$apm_bin" init
+    "$apm_bin" init > /dev/null
 fi
 
 if [ -z "$failed" ]; then

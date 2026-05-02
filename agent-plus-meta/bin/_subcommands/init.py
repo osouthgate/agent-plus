@@ -430,7 +430,9 @@ def _run_skill_plus_scan(project_path: Path,
     if exe is None:
         return {"status": "skipped", "candidates_found": 0,
                 "reason": "skill-plus not on PATH"}
-    cmd = [exe, "scan", "--all-projects", "--project", str(project_path)]
+    # --accept-consent: user already opted in by selecting this path in the
+    # cross-repo wizard; consent is implied.
+    cmd = [exe, "scan", "--all-projects", "--accept-consent", "--project", str(project_path)]
     use_shell = sys.platform == "win32" and exe.lower().endswith(".cmd")
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True,
@@ -651,8 +653,14 @@ def cmd_init(args: argparse.Namespace) -> dict:
         )
 
     if interactive:
+        _branch_desc = {
+            "new":       "first-time setup  -- building your workspace",
+            "returning": "welcome back  -- refreshing your workspace",
+            "power":     "power-user setup  -- full configuration",
+            "homeless":  "quick setup  -- no repo context detected",
+        }.get(branch, branch)
         _eprint("")
-        _eprint(f"agent-plus-meta init  •  branch: {branch}")
+        _eprint(f"agent-plus-meta init  -- {_branch_desc}")
         if tie_reason:
             _eprint(f"  (tie-break: {tie_reason})")
         _eprint("")
@@ -681,12 +689,19 @@ def cmd_init(args: argparse.Namespace) -> dict:
     cross_repo_results: list[dict[str, Any]] = []
 
     if interactive and cross_repo_offered:
-        _eprint("Recently active Claude Code repos (last 30 days):")
+        _eprint("Cross-repo setup  (optional, but powerful)")
+        _eprint("-------------------------------------------")
+        _eprint("agent-plus works across all your repos. Selecting repos here")
+        _eprint("pre-warms each one so Claude already knows the stack and your")
+        _eprint("patterns the next time you open them -- no cold-start scan needed.")
+        _eprint("")
+        _eprint("Repos from your Claude Code history (last 30 days):")
         for idx, p in enumerate(cross_repo_offered_paths, start=1):
             _eprint(f"  [{idx}] {p}")
         _eprint("  [a] all  [n] none  [m] add a path manually")
+        _eprint("")
         try:
-            sel = _prompt_line("Pick repos to scan (e.g. 1,3 or a/n/m): ").strip().lower()
+            sel = _prompt_line("Which repos should agent-plus set up now? (e.g. 1,3 or a/n): ").strip().lower()
         except KeyboardInterrupt:
             sel = "n"
             _emit_error(
@@ -738,10 +753,13 @@ def cmd_init(args: argparse.Namespace) -> dict:
                 chosen.append(p)
 
         # Run scans, streaming progress.
+        if chosen:
+            _eprint("")
+            _eprint(f"Setting up {len(chosen)} repo(s) -- mining patterns and stack info...")
         try:
             for p in chosen:
                 cross_repo_accepted.append(str(p))
-                _eprint(f"  ... scanning {p}")
+                _eprint(f"  -> {p}")
                 res = _run_skill_plus_scan(p)
                 line = {
                     "path": str(p),
@@ -751,7 +769,11 @@ def cmd_init(args: argparse.Namespace) -> dict:
                 }
                 cross_repo_results.append(line)
                 if res.get("status") == "ok":
-                    _eprint(f"      ok  {res.get('candidates_found', 0)} candidates")
+                    n = res.get("candidates_found", 0)
+                    if n:
+                        _eprint(f"     done  -- {n} skill candidate{'s' if n != 1 else ''} found")
+                    else:
+                        _eprint("     done  -- workspace ready (no new skill candidates)")
                 elif res.get("status") == "skipped":
                     _emit_error(
                         ERR_SKILL_PLUS_MISSING,

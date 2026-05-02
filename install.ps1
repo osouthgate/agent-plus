@@ -261,12 +261,14 @@ if (-not $ApmBin) {
 }
 
 Write-Host ""
+# Pipe stdout to Out-Null so the machine-readable JSON envelope is silenced.
+# All human-readable output goes to stderr and still appears in the terminal.
 if ($Unattended) {
     Write-Host "Running agent-plus-meta init --non-interactive --auto..."
-    & $ApmBin init --non-interactive --auto
+    & $ApmBin init --non-interactive --auto | Out-Null
 } else {
     Write-Host "Running agent-plus-meta init..."
-    & $ApmBin init
+    & $ApmBin init | Out-Null
 }
 
 if ($Failed.Count -eq 0) { Print-Footer }
