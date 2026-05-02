@@ -44,6 +44,38 @@ Open questions:
 
 ---
 
+## Audit: global vs project-local file storage (medium)
+
+**Effort:** medium — audit + likely migrations in multiple plugins  
+**Status:** open — needs hands-on verification
+
+The framework writes files into two locations:
+- **Global:** `~/.agent-plus/` — user-level, shared across all repos
+- **Project:** `<repo-root>/.agent-plus/` — repo-specific, committed or gitignored per project
+
+The split is probably wrong in at least one place. Known cases to verify:
+
+**`skill-plus/candidates.jsonl` — likely wrong**  
+Currently landing at `<project>/.agent-plus/skill-plus/candidates.jsonl`.  
+Candidates are mined from global session logs (`~/.claude/projects/`) across all your repos — they reflect YOUR patterns, not this repo's patterns. They should almost certainly be global: `~/.agent-plus/skill-plus/candidates.jsonl`. Storing them per-project means candidates disappear when you switch repos and accumulate stale copies everywhere.
+
+**`repo-analyze` cache — likely correct**  
+The analysis output is about a specific codebase. `<project>/.agent-plus/repo-analyze-cache.json` (or equivalent) is the right place — it should be project-local so running `repo-analyze` in `Tinker-Tailor` doesn't pollute the cache for `rainshift`.  
+Confirm: does `repo-analyze` actually write a cache file on run? If so, does the cold-repo hook (see above) read it correctly?
+
+**`skill-feedback` ratings — likely global**  
+Ratings are about skill quality, not about a specific repo. `~/.agent-plus/skill-feedback/` or a similar global path makes more sense than per-project.
+
+**`env-status.json`, `services.json`, `manifest.json`**  
+These are workspace-bootstrapped by `agent-plus-meta init` and intentionally project-local — they record which services are configured for this checkout. Probably correct.
+
+**`.agent-plus/marketplaces/`**  
+Marketplace installs feel global (you don't reinstall the marketplace per repo). Verify where these land and whether the install path respects `--dir`.
+
+Action: walk each plugin's write paths, list them against the global/project rule, move anything that's in the wrong bucket, update `_resolve_for_read` / `_resolve_workspace` logic and tests.
+
+---
+
 ## Plugin namespace: `/agent-plus:*` umbrella architecture (big)
 
 **Effort:** large — plugin architecture change, affects install UX  
