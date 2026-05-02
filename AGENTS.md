@@ -1,35 +1,32 @@
 # AGENTS.md
 
-Durable instructions for any coding agent (Claude Code, Codex, Cursor, Aider) working in this repo. If you're Claude Code, you read this at every session start — treat it as memory.
+Durable instructions for any coding agent (Claude Code, Codex, Cursor, Aider) working in this repo. If you're Claude Code, treat this as memory.
 
-## What this repo is
+**For context on what this repo is and why it exists, see [README.md](./README.md).** This file is operational rules only.
 
-`agent-plus` is a **framework** for Claude Code plugins. As of the 2026-04-28 framework extraction, it ships only the four universal primitives:
+## Plugins in this repo
 
-- `agent-plus` — the meta plugin (workspace bootstrap, env-var readiness, identity cache, marketplace lifecycle)
-- `repo-analyze` — cold-start orientation in any unfamiliar repo
-- `diff-summary` — per-file role + risk classification of a git diff
-- `skill-feedback` — local-first agent self-assessment for any Claude Code skill
+| Plugin | Killer command |
+| :--- | :--- |
+| `agent-plus-meta` | `init`, `envcheck`, `refresh`, `marketplace install\|list\|update\|remove\|search\|prefer` |
+| `repo-analyze` | `repo-analyze [--output] [--shape-depth] [--pretty]` |
+| `diff-summary` | `diff-summary [--staged \| --base BRANCH \| --range A..B] [--public-api-only] [--risk MIN]` |
+| `skill-feedback` | `log <skill> --rating --outcome [--friction]`, `report`, `submit` |
+| `skill-plus` | `scan`, `propose`, `scaffold <name> --from-candidate <id>`, `inquire <tool> [--audit]`, `list`, `feedback`, `promote <name>` |
 
-- `skill-plus` -- session-mining-driven skill discovery + scaffolding + feedback aggregation + tool inquiry (v0.5.0: transcript-sourced capability + usage auditor)
-
-Service wrappers (`github-remote`, `vercel-remote`, `supabase-remote`, `railway-ops`, `linear-remote`, `openrouter-remote`, `langfuse-remote`, `hermes-remote`, `coolify-remote`, `hcloud-remote`) previously shipped here. They moved to a separate marketplace at `osouthgate/agent-plus-skills` and now iterate independently.
-
-Every plugin in either repo exists because doing the same thing via `curl` + `jq` + raw CLI burned either tokens, tool calls, or human time that the framework measured and got tired of.
+Service wrappers (`github-remote`, `vercel-remote`, `supabase-remote`, `railway-ops`, `linear-remote`, `openrouter-remote`, `langfuse-remote`, `hermes-remote`, `coolify-remote`, `hcloud-remote`) moved to [`osouthgate/agent-plus-skills`](https://github.com/osouthgate/agent-plus-skills).
 
 ## The seven design patterns
 
-Any change you make — new plugin, new command, README rewrite — should reinforce one of these. If it doesn't, justify it. The full list is canonical in the [root README](./README.md#the-seven-patterns) — paraphrased here:
+Any change must reinforce one of these. Full rationale: [README.md](./README.md).
 
-1. **Aggregate server-side, return one blob.** N endpoints in parallel under the hood, one structured payload back to the agent.
-2. **Resolve by name, not ID.** UUIDs never touch the agent's context.
-3. **`--wait` on every async mutation.** No hand-rolled `until` loops in the agent's session.
-4. **`--json` on every list / show.** Structured output into `jq` is the default.
-5. **Strip values the agent shouldn't see.** Env-var values, secrets, large blobs — names and IDs only.
-6. **Self-diagnosing output.** Every JSON payload carries a top-level `tool: {name, version}` field read from the plugin manifest at runtime.
-7. **Stay in your lane.** Each plugin's SKILL.md explicitly lists when the agent should drop to the raw CLI / API instead of looping on a rejection.
-
-The root README sells these patterns; each plugin README should show at least one in action with a concrete win.
+1. Aggregate server-side, return one blob.
+2. Resolve by name, not ID.
+3. `--wait` on every async mutation.
+4. `--json` on every list / show.
+5. Strip values the agent shouldn't see (names only, no values).
+6. Self-diagnosing output — every payload carries `tool: {name, version}`.
+7. Stay in your lane — each plugin's SKILL.md says when to drop to raw CLI.
 
 ## Keeping the docs honest (READ THIS)
 
@@ -66,7 +63,7 @@ Every plugin directory has the same shape — preserve it:
 ```
 <plugin>/
 ├── .claude-plugin/plugin.json
-├── bin/<plugin>                  # stdlib Python 3, single file (meta plugin is ~3k LoC; service wrappers usually 500–1500)
+├── bin/<plugin>                  # stdlib Python 3, single file
 ├── skills/<plugin>/SKILL.md      # how Claude uses it
 ├── README.md                     # how a human understands it
 ├── CHANGELOG.md                  # pain points and wins, most-recent-first
@@ -75,7 +72,7 @@ Every plugin directory has the same shape — preserve it:
 
 - **Stdlib only.** No pip installs. No venvs. If you reach for `requests`, stop and use `urllib.request`.
 - **Layered `.env` autoload**, highest precedence first: `--env-file` → project `.env.local` / `.env` (walked up from cwd) → `~/.agent-plus/.env` → shell env. Project `.env` wins over shell — this is deliberate, don't flip it.
-- **Scoped env prefixes** (where applicable). The framework primitives don't take service-specific env vars, but if you add one that does, only pick up its own prefix to avoid cross-pollution.
+- **Scoped env prefixes** (where applicable). Only pick up the plugin's own prefix to avoid cross-pollution.
 - **Missing-config errors point to both `.env` and `~/.claude/settings.json`** so the user knows where to put the value.
 
 ## Writing style for READMEs
@@ -88,8 +85,6 @@ Every plugin README should:
 4. **Headline commands before config.** The reader needs to see the shape of the tool before they care about `.env` precedence.
 5. **No emoji decorations. No feature-table fluff.** Terse voice, one idea per line.
 
-## Philosophy (don't delete)
+## Philosophy
 
-Plugins here follow the rule from [Garry Tan's skillify post](https://x.com/garrytan): **deterministic work belongs in scripts, not prompts.** The LLM orchestrates; the code does. Every plugin has a `SKILL.md` that teaches Claude *when* to reach for the script, not how to reinvent it in a prompt.
-
-If you catch yourself adding LLM-call-driven logic to a plugin's `bin/` script, stop. That's a smell. The CLI is deterministic; the prompting belongs in the calling agent or a Hermes cron.
+Deterministic work belongs in scripts, not prompts. The LLM orchestrates; the code does. If you catch yourself adding LLM-call-driven logic to a plugin's `bin/` script, stop — that's a smell. The CLI is deterministic; the prompting belongs in the calling agent or a Hermes cron.
