@@ -3554,7 +3554,13 @@ def _render_doctor_pretty(payload: dict) -> str:
     else:
         lines.append("  claude-plugins: check skipped (claude CLI not found)")
     ec = payload.get("envcheck") or {}
-    lines.append(f"  envcheck    : {ec.get('ready_count', 0)} ready, {ec.get('missing_count', 0)} not ready")
+    _ec_ready = ec.get('ready_count', 0)
+    _ec_missing = ec.get('missing_count', 0)
+    _ec_plugins = ec.get('plugins') or {}
+    _ready_names = [p for p, v in _ec_plugins.items() if v.get('user_configured')]
+    _ready_str = (", ".join(_ready_names[:4]) + (" ..." if len(_ready_names) > 4 else "")) if _ready_names else ""
+    _ec_ready_label = f"{_ec_ready} ready ({_ready_str})" if _ready_str else f"{_ec_ready} ready"
+    lines.append(f"  envcheck    : {_ec_ready_label}, {_ec_missing} missing credentials")
     mp = payload.get("marketplaces") or {}
     lines.append(f"  marketplaces: {len(mp.get('installed') or [])} installed")
 
@@ -3591,8 +3597,8 @@ def _render_doctor_pretty(payload: dict) -> str:
                 lines.append(f"  ! {cat}: {msg}")
     if optional:
         lines.append("")
-        lines.append("[OPTIONAL SETUP -- services you use]")
-        lines.append("  These plugins need credentials when you're ready:")
+        lines.append(f"[OPTIONAL SETUP -- {len(optional)} installed plugin(s) missing credentials]")
+        lines.append("  These are in your Claude plugin list but env vars aren't set.")
         for it in optional:
             msg = it.get("message", "")
             # Message format: "<plugin>: missing required env vars: VAR1,VAR2"
