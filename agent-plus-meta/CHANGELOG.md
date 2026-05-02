@@ -4,6 +4,20 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.19.1 - 2026-05-02
+
+Windows install polish and init UX improvements.
+
+### Fixed
+- **Windows subprocess fix for cross-repo scan and first-win.** `_run_skill_plus_scan()` and `_run_first_win()` now resolve the full executable path via `shutil.which` (falling back to `<name>.cmd` on Windows) and add `shell=True` when the resolved path ends in `.cmd`. Fixes `[WinError 2] The system cannot find the file specified` that appeared when `skill-plus` was installed as a `.cmd` wrapper and called from a subprocess without `shell=True`.
+- **Cross-repo scan exit 2 / consent_required.** `skill-plus scan` is now called with `--accept-consent`; the user already opted in by selecting the repo in the wizard, so consent is implicit. Previously every cross-repo scan silently failed with exit 2.
+- **Doctor `_render_doctor_pretty` heading.** A `healthy` verdict with warn-only issues now displays as `OK (N warnings)` instead of `HEALTHY`, so the heading no longer contradicts the issues list beneath it. JSON envelope `verdict` value is unchanged.
+- **Doctor envcheck noise.** Marketplace plugin env-var issues are suppressed from the human-facing `issues` list when the plugin is neither installed (not in the Claude plugins cache and not on PATH) nor partially configured. A fresh framework install no longer floods the doctor with 8 unrelated env-var warnings. The machine-readable `envcheck_section` still records every plugin.
+
+### Changed
+- **`init` branch greeting.** `branch: returning` replaced with a human-readable description: `welcome back -- refreshing your workspace` / `first-time setup -- building your workspace` etc.
+- **`init` cross-repo section messaging.** The folder-selection prompt now opens with a 2-line explanation of what selecting repos does and why (pre-warming context so Claude has no cold start in other repos). Prompt text reworded. Scanning progress shows `-> <path>` then `done -- N skill candidates found`.
+
 ## 0.19.0 - 2026-05-02
 
 Framework umbrella bump tracking the v0.19.0 DX polish release.

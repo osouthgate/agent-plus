@@ -39,7 +39,11 @@ State detection inspects: presence of `~/.claude/projects/` history, presence of
 
 #### Cross-repo discovery
 
-After the first-win, the wizard walks `~/.claude/projects/`, decodes each subdir back to a repo path (handles both Windows `C--dev-foo` and POSIX `-Users-bob-foo` encodings), filters dead paths and entries older than 30 days, and offers the top 4 by recency. Selection prompt accepts comma-separated indices (`1,3`), `[a]ll`, `[n]one`, or `[m]anual` for paste-in. Manual paste validates each path exists; warns when no `.git/` and no project markers are present but accepts anyway. Each accepted repo is scanned via `skill-plus scan --all-projects --project <path>` with progress streamed per-repo.
+After the first-win, the wizard walks `~/.claude/projects/`, decodes each subdir back to a repo path (handles both Windows `C--dev-foo` and POSIX `-Users-bob-foo` encodings), filters dead paths and entries older than 30 days, and offers the top 4 by recency.
+
+The selection prompt opens with a brief explanation of what selecting repos does (pre-warming context so Claude has no cold start in other repos). Selection accepts comma-separated indices (`1,3`), `[a]ll`, `[n]one`, or `[m]anual` for paste-in. Manual paste validates each path exists; warns when no `.git/` and no project markers are present but accepts anyway.
+
+Each accepted repo is scanned via `skill-plus scan --all-projects --accept-consent --project <path>` with progress streamed per-repo (`-> <path>` then `done -- N skill candidates found`). `--accept-consent` is passed automatically because the user opted in by selecting the path — no separate consent prompt is needed. On Windows, the `skill-plus.cmd` wrapper is resolved via `shutil.which` and invoked with `shell=True` to avoid `[WinError 2]`.
 
 > **Homeless context.** When cwd has no git toplevel and no project markers and is at or above your home dir, the NEW branch skips the local first-win (no `repo-analyze` against `~`) and the wizard pivots to cross-repo discovery first. If `~/.claude/projects/` is also empty, the wizard ends gracefully at the doctor step.
 
