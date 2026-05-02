@@ -9,38 +9,43 @@ allowed-tools: Bash(repo-analyze:*) Bash(python3 *repo-analyze*:*)
 
 The map, not the contents. One call replaces the cold-start dance — file-tree exploration, finding entrypoints, reading every manifest, scanning README. Session mining showed ~67 grep + ~60 ls ops on a typical fresh-repo session, almost all of it answerable from one structured payload.
 
-Tree output defaults to **compact** mode: one row per directory, showing file counts and per-extension LOC. This stays small even in large repos. Use `--tree-mode full` when you need the individual file list (e.g. to scan for a specific file that isn't an entrypoint).
+Tree output is **compact** by default: one row per directory, showing file counts and per-extension LOC. This stays small even in large repos. Use `--tree-mode full` when you need the individual file list (e.g. to scan for a specific file that isn't an entrypoint).
 
 Lives at `${CLAUDE_SKILL_DIR}/../../bin/repo-analyze`; the plugin auto-adds `bin/` to PATH, so just run `repo-analyze ...`.
 
 ## When to reach for this
 
-- User asks **"what is this project / what's the tech stack / give me an overview"** → run `repo-analyze --pretty`. One call → languages, frameworks, deps, entrypoints, README highlights.
-- User asks **"where do I start"** → run `repo-analyze --pretty` and read the `entrypoints` + `readme` sections.
-- User asks **"is this a Next.js / FastAPI / Rust project"** → run `repo-analyze` and inspect `frameworks[]`. Each entry has a `confidence` field (`high` = manifest-confirmed, `medium` = config file present but not in manifest).
+- User asks **"what is this project / what's the tech stack / give me an overview"** → run `repo-analyze --pretty --tree-mode compact`. One call → languages, frameworks, deps, entrypoints, README highlights.
+- User asks **"where do I start"** → run `repo-analyze --pretty --tree-mode compact` and read the `entrypoints` + `readme` sections.
+- User asks **"is this a Next.js / FastAPI / Rust project"** → run `repo-analyze --tree-mode compact` and inspect `frameworks[]`. Each entry has a `confidence` field (`high` = manifest-confirmed, `medium` = config file present but not in manifest).
 - Cold-starting in any unfamiliar checkout → run this BEFORE the first Read/Glob/Grep.
+
+## After running
+
+Read `nextSteps[]` from the envelope and offer them to the user. Each entry is a short string naming the next recommended action (e.g. "Read src/index.ts — top entrypoint", "skill-plus scan — mine session history for skill candidates", "diff-summary -- summarize staged/unstaged changes or a branch diff"). Surface these as suggested actions at the end of your summary.
 
 ## Headline command
 
 ```bash
-repo-analyze [--path PATH]
-             [--tree-mode compact|full]  # compact (default): folder summary; full: every file
-             [--max-tree-files INT]      # default 200 (full mode only)
-             [--max-tree-depth INT]      # default 4
-             [--no-readme]               # skip README highlights
-             [--output PATH]             # offload to disk
-             [--shape-depth 1|2|3]       # envelope detail (default 3)
+repo-analyze --tree-mode compact  # always pass explicitly; compact = one row/folder (default, but be explicit)
+             [--path PATH]
+             [--tree-mode full]   # override: every file listed individually
+             [--max-tree-files INT]  # default 200 (full mode only)
+             [--max-tree-depth INT]  # default 4
+             [--no-readme]           # skip README highlights
+             [--output PATH]         # offload to disk
+             [--shape-depth 1|2|3]   # envelope detail (default 3)
              [--pretty | --json]
              [--version]
 ```
 
-Default behaviour: analyze cwd, return one JSON blob. Tree defaults to **compact** mode.
+Always pass `--tree-mode compact` explicitly. Do not omit it — it makes the intent unambiguous and protects against future default changes.
 
 ## Output shape (truncated)
 
 ```json
 {
-  "tool": {"name": "repo-analyze", "version": "0.2.1"},
+  "tool": {"name": "repo-analyze", "version": "0.3.0"},
   "path": "/abs/path",
   "git": {"isRepo": true, "branch": "main", "remote": "...", "headCommit": "abc1234"},
   "languages": {"python": {"files": 42, "loc": 12345, "percent": 38.2}, ...},
@@ -58,6 +63,11 @@ Default behaviour: analyze cwd, return one JSON blob. Tree defaults to **compact
     ]
   },
   "readme": {"title": "...", "firstParagraph": "...", "headings": [...]},
+  "nextSteps": [
+    "Read src/app/page.tsx -- top entrypoint",
+    "skill-plus scan -- mine session history for skill candidates",
+    "diff-summary -- summarize staged/unstaged changes or a branch diff"
+  ],
   "agentPlusServices": {"services": {"github-remote": {"status": "ok"}, ...}}
 }
 ```
@@ -69,10 +79,10 @@ When `.agent-plus/services.json` exists in the analyzed path or an ancestor, `ag
 For monorepos or anything over ~50KB of output, use `--output PATH`:
 
 ```bash
-repo-analyze --output /tmp/analyze.json --shape-depth 3
+repo-analyze --tree-mode compact --output /tmp/analyze.json --shape-depth 3
 ```
 
-The full payload lands on disk. Stdout returns a compact envelope: `payloadPath`, `bytes`, `payloadKeys`, `payloadShape`. `payloadShape` is recursive (depth 3 by default) so you can see `tree.entries.length` and `languages.python.loc` without opening the file.
+The full payload lands on disk. Stdout returns a compact envelope: `payloadPath`, `bytes`, `payloadKeys`, `payloadShape`. `payloadShape` is recursive (depth 3 by default) so you can see `tree.folders.length` and `languages.python.loc` without opening the file.
 
 ## Stay in your lane
 
