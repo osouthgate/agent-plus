@@ -838,12 +838,17 @@ def cmd_init(args: argparse.Namespace) -> dict:
             recoverable=True, errors_list=errors, interactive=interactive,
         )
 
-    # ── 7. feedback invitation (interactive only) ──────────────────────
+    # ── 7. feedback invitation + Claude-side CTA (interactive only) ─────
     if interactive:
         _eprint("")
         _eprint("Want to rate this onboarding? "
                 "skill-feedback log agent-plus-meta-init "
                 "--rating <1-5> --outcome success")
+        _eprint("")
+        _eprint("Next in Claude Code:")
+        _eprint("  1. Run /reload-plugins in an open session (or open a new one)")
+        _eprint("  2. Ask Claude: 'what is this repo?' -- triggers repo-analyze")
+        _eprint("  3. Ask Claude: 'what changed on this branch?' -- triggers diff-summary")
 
     # ── 8. envelope ─────────────────────────────────────────────────────
     if errors and any(not e.get("recoverable", True) for e in errors):

@@ -1,6 +1,6 @@
 # agent-plus
 
-[![Website](https://img.shields.io/badge/website-youragentplus.xyz-a6e22e?style=flat&labelColor=1e1e1e)](https://youragentplus.xyz) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Version](https://img.shields.io/badge/version-0.18.0-green.svg)](https://github.com/osouthgate/agent-plus/releases) [![CI](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml) [![Tests](https://img.shields.io/badge/tests-731%20passing-brightgreen.svg)](#) [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#) [![Stdlib only](https://img.shields.io/badge/stdlib-only-yellowgreen.svg)](#)
+[![Website](https://img.shields.io/badge/website-youragentplus.xyz-a6e22e?style=flat&labelColor=1e1e1e)](https://youragentplus.xyz) [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Version](https://img.shields.io/badge/version-0.19.0-green.svg)](https://github.com/osouthgate/agent-plus/releases) [![CI](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml/badge.svg)](https://github.com/osouthgate/agent-plus/actions/workflows/ci.yml) [![Tests](https://img.shields.io/badge/tests-653%20passing-brightgreen.svg)](#) [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](#) [![Stdlib only](https://img.shields.io/badge/stdlib-only-yellowgreen.svg)](#)
 
 **Website:** [youragentplus.xyz](https://youragentplus.xyz)
 
@@ -214,7 +214,7 @@ curl -fsSL https://github.com/osouthgate/agent-plus/releases/latest/download/ins
 sh /tmp/install-agent-plus.sh  # then run
 ```
 
-**What the script does:** detects your shell + OS, downloads the framework tarball from the matching GitHub release, drops the five primitives into `~/.claude/plugins/`, then chains into `agent-plus-meta init` (idempotent, runs the wizard).
+**What the script does:** detects your shell + OS, downloads the framework tarball from the matching GitHub release, installs the five primitives as CLI tools under `~/.local/share/agent-plus/` (with wrapper shims in `~/.local/bin/`), then chains into `agent-plus-meta init` (idempotent, runs the wizard). To register them as Claude Code plugins so Claude can invoke them directly, also run the **Manual install** commands below — or skip `install.sh` and use Manual install only.
 
 **What you're trusting** (in order): this repo and its release tags · GitHub release infrastructure · your local TLS chain. The branded URL adds one layer (Netlify edge proxy) for those who use it.
 
@@ -257,6 +257,38 @@ agent-plus-meta marketplace search [query]
 ```
 
 Standalone (no Claude Code): every `bin/<plugin>` is one stdlib Python 3 file. Copy to `$PATH`, run.
+
+### First 5 minutes
+
+The complete path from zero to Claude knowing what to do:
+
+1. **Install the CLI tools** — `curl -fsSL youragentplus.xyz/install.sh | sh`
+2. **Register with Claude Code** — so Claude can call the plugins directly:
+   ```bash
+   claude plugin marketplace add osouthgate/agent-plus
+   for p in agent-plus-meta repo-analyze diff-summary skill-feedback skill-plus; do
+     claude plugin install $p@agent-plus
+   done
+   ```
+3. **Reload in Claude** — run `/reload-plugins` in any open Claude session, or open a new one
+4. **Orient Claude on the repo** — ask: _"what is this repo?"_ → triggers `repo-analyze`
+5. **Follow the chain** — each plugin output now includes `nextSteps[]`; Claude picks up the next action automatically
+
+Steps 1 and 2 are separate by design: `install.sh` gives you the CLI tools; the `claude plugin install` commands give Claude Code the same tools as callable plugins. You can do either independently, or both.
+
+### Windows
+
+`curl | sh` works under **Git Bash** or **WSL**. It does not work in PowerShell or CMD. If you're on Windows without Git Bash:
+
+```powershell
+# PowerShell — manual install via claude plugin
+claude plugin marketplace add osouthgate/agent-plus
+"agent-plus-meta","repo-analyze","diff-summary","skill-feedback","skill-plus" | ForEach-Object {
+  claude plugin install "$_@agent-plus"
+}
+```
+
+This skips the wizard — run `agent-plus-meta init` in Git Bash or WSL afterwards to bootstrap the workspace.
 
 ## Before / after
 

@@ -1,7 +1,7 @@
 ---
 name: skill-plus
 description: Mine the Claude Code session log to find commands the user keeps typing by hand, then scaffold them into proper Claude skills under `.claude/skills/<name>/`. Read-only audit of existing skills against the framework contract via `list`. Cross-source feedback aggregator joining `skill-feedback` ratings with implicit session-mining failure signals via `feedback`. Promote project-local skills to a `<user>/agent-plus-skills` marketplace via `promote`. Stdlib Python, local-only, no network.
-when_to_use: Trigger when the user says "I keep doing this", "make this a skill", "what skills should I have", "audit my skills", "scaffold a skill for X", "promote this skill to my marketplace", "show me what I do repeatedly", "feedback on the framework", "is this skill any good", "session mining", "what's in my session log". Also trigger AFTER a stretch of repetitive Bash work where the user expresses friction — surface `skill-plus propose` to show the candidates that have already been mined.
+when_to_use: Trigger when the user says "I keep doing this", "I've done this three times", "I keep running the same command", "make this repeatable", "I do this every PR", "make this a skill", "what skills should I have", "audit my skills", "scaffold a skill for X", "promote this skill to my marketplace", "show me what I do repeatedly", "feedback on the framework", "is this skill any good", "session mining", "what's in my session log". Also trigger AFTER a stretch of repetitive Bash work where the user expresses friction — surface `skill-plus propose` to show the candidates that have already been mined.
 allowed-tools: Bash(skill-plus:*) Bash(python3 *skill-plus*:*)
 ---
 

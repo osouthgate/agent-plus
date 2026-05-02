@@ -3393,6 +3393,49 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
             "message": f"services.json has stale entries for plugins not installed: {','.join(stale_entries)}; run `agent-plus-meta refresh`",
         })
 
+    # 6b. Claude Code plugin registration ────────────────────────────────────
+    # Check whether each primitive is visible to Claude Code as a plugin.
+    # A user who ran only install.sh (CLI path) gets PATH-installed shims but
+    # the plugins are not registered in ~/.claude/plugins/ — Claude sessions
+    # are plugin-blind. Treat missing registration as a warn (not error) so
+    # a fresh CLI-only install stays healthy; it becomes degraded only when
+    # combined with other issues.
+    checks_run += 1
+    claude_plugin_registration: dict[str, bool] = {}
+    try:
+        result = subprocess.run(
+            ["claude", "plugin", "list"],
+            capture_output=True, timeout=5,
+        )
+        plugin_list_output = (
+            (result.stdout or b"").decode("utf-8", errors="replace")
+            + (result.stderr or b"").decode("utf-8", errors="replace")
+        )
+        for prim in FRAMEWORK_PRIMITIVES:
+            registered = prim in plugin_list_output
+            claude_plugin_registration[prim] = registered
+        missing_registration = [p for p, reg in claude_plugin_registration.items() if not reg]
+        if missing_registration:
+            fix_cmds = (
+                "claude plugin marketplace add osouthgate/agent-plus && "
+                + " && ".join(
+                    f"claude plugin install {p}@agent-plus"
+                    for p in missing_registration
+                )
+            )
+            issues.append({
+                "severity": "warn",
+                "category": "claude-plugin",
+                "message": (
+                    f"{len(missing_registration)} primitive(s) not registered as Claude Code plugins "
+                    f"({', '.join(missing_registration)}); Claude sessions are plugin-blind. "
+                    f"Fix: {fix_cmds}"
+                ),
+            })
+    except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
+        # claude CLI not on PATH — skip check rather than error out.
+        claude_plugin_registration = {}
+
     # 7. Verdict ───────────────────────────────────────────────────────────
     # v0.15.4: nuanced envcheck signal using the new user_configured_count.
     # Previous logic collapsed every `missing_count > 0` into degraded, but
@@ -3424,6 +3467,7 @@ def cmd_doctor(args: argparse.Namespace) -> dict:
         "workspace": workspace_section,
         "primitives": primitives_section,
         "primitives_source": primitives_source,
+        "claude_plugin_registration": claude_plugin_registration,
         "envcheck": envcheck_section,
         "marketplaces": marketplaces_section,
         "stale_services_entries": stale_entries,
@@ -3447,6 +3491,14 @@ def _render_doctor_pretty(payload: dict) -> str:
     missing_prims = [k for k, v in prims.items() if v == "missing"]
     lines.append(f"  primitives  : {len(prims) - len(missing_prims)}/{len(prims)} installed"
                  + (f" (missing: {', '.join(missing_prims)})" if missing_prims else ""))
+    cpr = payload.get("claude_plugin_registration") or {}
+    if cpr:
+        registered = sum(1 for v in cpr.values() if v)
+        not_registered = [k for k, v in cpr.items() if not v]
+        lines.append(f"  claude-plugins: {registered}/{len(cpr)} registered"
+                     + (f" (unregistered: {', '.join(not_registered)})" if not_registered else ""))
+    else:
+        lines.append("  claude-plugins: check skipped (claude CLI not found)")
     ec = payload.get("envcheck") or {}
     lines.append(f"  envcheck    : {ec.get('ready_count', 0)} ready, {ec.get('missing_count', 0)} not ready")
     mp = payload.get("marketplaces") or {}
@@ -3712,6 +3764,33 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _inject_next_steps(out: dict, cmd: str, payload: dict) -> None:
+    steps: list[str] = []
+    if cmd == "init":
+        steps = [
+            "Ask Claude 'what is this repo?' to trigger repo-analyze",
+            "Ask Claude 'what changed on this branch?' to trigger diff-summary",
+        ]
+    elif cmd == "doctor":
+        issues = payload.get("issues") or []
+        if issues:
+            steps = ["Fix the reported issues, then re-run: agent-plus-meta doctor --pretty"]
+        else:
+            steps = ["repo-analyze -- orient Claude on this codebase"]
+    elif cmd == "envcheck":
+        missing = payload.get("missing") or []
+        if missing:
+            steps = ["Set the missing env vars, then re-run: agent-plus-meta envcheck"]
+        else:
+            steps = ["agent-plus-meta doctor --pretty -- full health check"]
+    elif cmd == "refresh":
+        steps = ["agent-plus-meta doctor --pretty -- verify services resolved correctly"]
+    elif cmd in ("marketplace", "extensions"):
+        steps = ["agent-plus-meta list -- see all installed plugins and versions"]
+    if steps:
+        out["nextSteps"] = steps
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     # Windows: default stdout is cp1252 which chokes on em-dashes/arrows from
     # plugin READMEs. Force UTF-8 so list output round-trips cleanly.
@@ -3768,6 +3847,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
 
     out = _with_tool_meta(payload)
+    _inject_next_steps(out, args.cmd, payload)
     indent = 2 if args.pretty else None
     print(json.dumps(out, ensure_ascii=False, indent=indent))
 

@@ -234,6 +234,17 @@ print_footer() {
     # shellcheck disable=SC2016
     echo "  echo 'export PATH=\$HOME/.local/bin:\$PATH' >> ~/.bashrc"
     echo ""
+    echo "Register with Claude Code (so Claude can call the plugins directly):"
+    echo "  claude plugin marketplace add osouthgate/agent-plus"
+    echo "  for p in agent-plus-meta repo-analyze diff-summary skill-feedback skill-plus; do"
+    echo "    claude plugin install \$p@agent-plus"
+    echo "  done"
+    echo ""
+    echo "Then in any open Claude session run:"
+    echo "  /reload-plugins"
+    echo "Or open a new Claude session. First thing to try:"
+    echo "  Ask Claude: 'what is this repo?' -- triggers repo-analyze"
+    echo ""
     echo "Verify:"
     echo "  agent-plus-meta doctor --pretty"
 }

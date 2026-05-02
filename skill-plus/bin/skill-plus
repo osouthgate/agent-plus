@@ -587,6 +587,29 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _next_steps_for(command: str, payload: dict) -> list[str]:
+    candidates = payload.get("candidates") or []
+    n = len(candidates) if isinstance(candidates, list) else 0
+    if command == "scan":
+        if n:
+            return [f"skill-plus propose -- review {n} candidate(s) and draft SKILL.md files"]
+        return ["Run more Claude Code sessions in this repo, then re-scan"]
+    if command == "propose":
+        skills = payload.get("skills") or payload.get("proposed") or []
+        if skills:
+            return ["skill-plus scaffold <name> -- create a .claude/skills/<name>/ skeleton for the top candidate"]
+        return ["skill-plus scan -- gather more session data before proposing"]
+    if command == "scaffold":
+        name = payload.get("name") or ""
+        return [
+            f"Use the new skill, then run: skill-feedback log {name} --rating <1-5> --note '...'",
+            "skill-plus promote <name> -- publish the skill to your marketplace when it's ready",
+        ]
+    if command == "promote":
+        return ["skill-feedback report -- check quality trends after others use it"]
+    return []
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -600,6 +623,11 @@ def main(argv: list[str] | None = None) -> int:
     shape_depth = int(getattr(args, "shape_depth", 3))
 
     def emit_fn(payload: Any) -> None:
+        if isinstance(payload, dict) and payload.get("ok") is not False:
+            payload = dict(payload)
+            steps = _next_steps_for(args.command, payload)
+            if steps:
+                payload["nextSteps"] = steps
         emit(payload, pretty=pretty, output=output, shape_depth=shape_depth)
 
     handler = _load_subcommand(args.command) or _stub(args.command)

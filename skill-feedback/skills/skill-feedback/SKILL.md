@@ -1,7 +1,7 @@
 ---
 name: skill-feedback
 description: Local-first self-assessment for Claude Code skills. After you use any skill (your own or someone else's), call `skill-feedback log <skill> --rating N --outcome ... [--friction "..."]` to append one entry to `.agent-plus/skill-feedback/<skill>.jsonl`. The skill author can then run `skill-feedback report` for an aggregate, or `skill-feedback submit <skill>` to bundle entries into a GitHub issue body for the skill's source repo. No telemetry leaves the machine unless the user explicitly runs `submit`.
-when_to_use: Trigger immediately AFTER using any other agent-plus skill (or any third-party skill the user installed) — log a one-line self-assessment so the skill's author has signal. Also trigger on phrases like "show feedback for X", "rate this skill", "report skill usage", "what's the feedback on the hermes skill", "submit the feedback to the upstream repo", "where are the skill logs stored".
+when_to_use: Trigger immediately AFTER using any other agent-plus skill (or any third-party skill the user installed) — log a one-line self-assessment so the skill's author has signal. Also trigger on phrases like "that worked well", "that skill was useful", "this skill is broken", "rate that last skill", "log feedback for X", "show feedback for X", "rate this skill", "report skill usage", "what's the feedback on the hermes skill", "submit the feedback to the upstream repo", "where are the skill logs stored".
 allowed-tools: Bash(skill-feedback:*) Bash(python3 *skill-feedback*:*)
 ---
 
@@ -130,6 +130,62 @@ This is documentation, not enforcement — there is no flag to require the revie
 - **You want to delete entries.** Not exposed by the CLI. Edit the `.jsonl` directly, or `rm` the file. (No PII should be in there in the first place — see scrub rules above.)
 - **You want richer analytics.** Pipe `report --pretty` (or raw `.jsonl`) into `jq` / DuckDB / a notebook. The CLI deliberately ships only the aggregations agents need at the terminal.
 - **You want to file a bug, not a feedback report.** Open an issue manually. `submit` is for batched feedback, not single-issue triage.
+
+## Auto-logging via a Stop hook
+
+If you want Claude to prompt for skill feedback automatically at the end of every session — without relying on memory — drop this into your project's `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'agent-plus: if you used any skills this session, run skill-feedback log <skill> --rating <1-5> --outcome <success|partial|failure> before finishing.'"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The `Stop` hook runs after Claude's final response. Its stdout is injected as additional context, so Claude sees the reminder and can act on it — or tell you there was nothing to log.
+
+For a repo with many skills, a slightly smarter variant reads the installed skill list and names them:
+
+```bash
+#!/bin/sh
+# .claude/hooks/skill-feedback-reminder.sh
+skills=$(ls .claude/skills/ 2>/dev/null | tr '\n' ' ')
+if [ -n "$skills" ]; then
+  echo "agent-plus: skills in this repo: $skills"
+  echo "If you used any, run: skill-feedback log <skill> --rating <1-5> --outcome <success|partial|failure>"
+fi
+```
+
+Then reference it in `settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PROJECT_DIR/.claude/hooks/skill-feedback-reminder.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+The hook is intentionally read-only and fast — it never writes anything; only `skill-feedback log` writes. Silence it for specific sessions with `SKILL_FEEDBACK_QUIET=1` in your shell env.
 
 ## What it doesn't do
 

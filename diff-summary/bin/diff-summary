@@ -875,6 +875,14 @@ def main(argv: Optional[list[str]] = None) -> None:
         public_api_only=args.public_api_only,
         risk_min=args.risk,
     )
+    next_steps: list[str] = []
+    high_risk = (data.get("summary") or {}).get("highRiskFiles") or []
+    if high_risk:
+        listed = ", ".join(high_risk[:5])
+        more = f" (+{len(high_risk) - 5} more)" if len(high_risk) > 5 else ""
+        next_steps.append(f"Read high-risk files: {listed}{more}")
+    next_steps.append("skill-feedback log diff-summary --rating <1-5> --note '...' to record usefulness")
+    data["nextSteps"] = next_steps
     emit(data, pretty=args.pretty, output=args.output, shape_depth=args.shape_depth)
 
 

@@ -1015,6 +1015,15 @@ def main(argv: Optional[list[str]] = None) -> None:
         max_tree_depth=args.max_tree_depth,
         include_readme=args.include_readme,
     )
+    next_steps: list[str] = []
+    entrypoints = data.get("entrypoints") or []
+    if entrypoints:
+        top = entrypoints[0] if isinstance(entrypoints[0], str) else (entrypoints[0].get("path") if isinstance(entrypoints[0], dict) else None)
+        if top:
+            next_steps.append(f"Read {top} to start exploring the main code path")
+    next_steps.append("skill-plus scan -- mine Claude session history for reusable skill candidates")
+    next_steps.append("diff-summary -- summarize staged/unstaged changes or a branch diff")
+    data["nextSteps"] = next_steps
     emit(data, pretty=args.pretty, output=args.output, shape_depth=args.shape_depth)
 
 

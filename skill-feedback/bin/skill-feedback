@@ -982,6 +982,22 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+_NEXT_STEPS: dict[str, list[str]] = {
+    "log": ["skill-feedback report to see quality trends across logged skills"],
+    "report": ["skill-feedback submit to share anonymised aggregates (optional)"],
+    "show": ["skill-feedback log <skill> --rating <1-5> to add a new entry"],
+    "submit": [],
+    "feedback": ["skill-feedback report to review aggregated trends"],
+    "path": [],
+}
+
+
+def _inject_next_steps(out: dict, cmd: str) -> None:
+    steps = _NEXT_STEPS.get(cmd, [])
+    if steps:
+        out["nextSteps"] = steps
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1012,6 +1028,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     out = _with_tool_meta(payload)
+    _inject_next_steps(out, args.cmd)
     indent = 2 if args.pretty else None
     print(json.dumps(out, ensure_ascii=False, indent=indent))
     return 0
