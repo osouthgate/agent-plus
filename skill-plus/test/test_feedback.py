@@ -18,10 +18,27 @@ BIN = Path(__file__).resolve().parent.parent / "bin" / "skill-plus"
 
 
 def _encoded(path: Path) -> str:
-    s = str(path.resolve())
-    s = re.sub(r"[\\/:]", "-", s)
-    s = re.sub(r"-+", "-", s).strip("-")
-    return f"C--{s}" if not s.startswith("C--") else s
+    """Independent oracle for Claude Code's project-dir encoding (every
+    non-alphanumeric character of the resolved path dashed, one-for-one).
+    Deliberately NOT delegated to bin/skill-plus's _encode_project_path --
+    see test_scan.py's copy of this helper for why. This file had the same
+    stale (pre-v0.19.7-hotfix) encoding duplicated, which is why
+    feedback's session-mining fixtures (stream2, discoverability) never
+    caught the bug either."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path.resolve()))
+
+
+def _load_bin_module():
+    """Load bin/skill-plus as a module so tests can call helpers like
+    session_files_for_project() directly instead of only via subprocess."""
+    from importlib.machinery import SourceFileLoader
+    import importlib.util
+    loader = SourceFileLoader("skill_plus_bin_feedback", str(BIN))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
 
 
 def _setup_env(tmp_path: Path) -> dict[str, str]:
@@ -230,3 +247,24 @@ def test_malformed_jsonl_line_tolerated(tmp_path: Path):
     payload = json.loads(res.stdout)
     skills = {s["skill"]: s for s in payload["skills"]}
     assert skills["foo"]["stream1"]["count"] == 2
+
+
+def test_session_files_for_project_resolves_fixture(tmp_path: Path, monkeypatch):
+    """Regression test for the v0.19.7 encoded_cwd_for hotfix, feedback side.
+
+    feedback.py's stream2 (session-mining) depends on
+    session_files_for_project(), which depends on encoded_cwd_for(). Before
+    the fix, encoded_cwd_for() produced a directory name that never matched
+    what Claude Code (or this fixture, seeded via the independent _encoded()
+    oracle above) actually creates on disk, so session_files_for_project()
+    returned [] even though the session file was sitting right there --
+    silent data loss with no error surfaced anywhere.
+    """
+    proj, sess_dir = _seed_project(tmp_path)
+    session_file = _write_session(sess_dir, "s1", [_bash_line("echo hi")])
+    fake_home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    mod = _load_bin_module()
+    files = mod.session_files_for_project(proj)
+    assert files == [session_file]

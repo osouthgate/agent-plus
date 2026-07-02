@@ -243,14 +243,20 @@ def emit(data: Any, *, pretty: bool, output: Optional[str], shape_depth: int) ->
 # ─── session-log discovery (used by scan + feedback) ──────────────────────────
 
 
+def _encode_project_path(s: str) -> str:
+    """Claude Code's project-dir encoding: every non-alphanumeric character
+    of the resolved cwd is replaced with its own dash -- one dash per
+    character, no collapsing of runs, no stripping, no re-prepending
+    anything. E.g. C:\\dev\\patchboard -> C--dev-patchboard ;
+    /Users/bob/foo -> -Users-bob-foo. Pure string function (no filesystem
+    or platform path semantics involved) so it's cheap to unit-test."""
+    return re.sub(r"[^A-Za-z0-9]", "-", s)
+
+
 def encoded_cwd_for(path: Path) -> str:
-    """Claude Code encodes the cwd as project dir name by replacing
-    each non-alphanumeric run with a single dash and stripping the leading
-    drive separator. Mirrors what's observed under ~/.claude/projects/."""
-    s = str(path.resolve())
-    s = re.sub(r"[\\/:]", "-", s)
-    s = re.sub(r"-+", "-", s).strip("-")
-    return f"C--{s}" if not s.startswith("C--") else s
+    """The ~/.claude/projects/<slug> directory name Claude Code uses for
+    the given project path. Mirrors what's observed on disk."""
+    return _encode_project_path(str(path.resolve()))
 
 
 def claude_projects_root() -> Path:

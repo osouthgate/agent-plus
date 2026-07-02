@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -110,9 +111,34 @@ def test_scrub_text_redacts_known_secrets():
         assert "[REDACTED]" in mod.scrub_text(c), f"failed to scrub: {c}"
 
 
-def test_encoded_cwd_for_matches_observed_format(tmp_path: Path):
+def test_encode_project_path_pins_real_world_examples():
+    # Regression for the v0.19.7 hotfix: Claude Code names project dirs by
+    # replacing EACH non-alphanumeric character of the resolved cwd with its
+    # own dash -- no collapsing of runs, no stripping, no re-prepending "C--".
+    # The old implementation dashed only [\\/:], collapsed dash runs, stripped,
+    # then re-prepended "C--", which produced C--C-dev-patchboard (a directory
+    # that does not exist) instead of C--dev-patchboard, so skill-plus scan
+    # silently found 0 sessions on Windows. _encode_project_path is a pure
+    # string function (no filesystem/platform path semantics involved), so
+    # these literals are safe to assert on any OS.
     mod = _load_bin_module()
-    # On Windows we expect the C:/dev/plans-agent-plus shape => C--dev-plans-agent-plus
-    enc = mod.encoded_cwd_for(Path("C:/dev/plans-agent-plus"))
-    assert enc.startswith("C--")
-    assert "/" not in enc and ":" not in enc
+    assert mod._encode_project_path("C:\\dev\\plans-agent-plus") == "C--dev-plans-agent-plus"
+    # Field-report repro from the bug report.
+    assert mod._encode_project_path("C:\\dev\\patchboard") == "C--dev-patchboard"
+    assert mod._encode_project_path("/Users/bob/foo") == "-Users-bob-foo"
+    # Dotted worktree name: guards against a narrower fix that only widens
+    # the character class to [\\/:.] instead of "everything non-alphanumeric".
+    assert mod._encode_project_path("C:\\dev\\foo.bar") == "C--dev-foo-bar"
+
+
+def test_encoded_cwd_for_matches_observed_format(tmp_path: Path):
+    # Integration test: encoded_cwd_for() resolves the given path and feeds
+    # it through _encode_project_path(). The expected value is derived here
+    # independently (not by calling mod._encode_project_path itself) so this
+    # isn't tautological -- it pins the same one-line spec regex Claude Code
+    # is observed to use.
+    mod = _load_bin_module()
+    expected = re.sub(r"[^A-Za-z0-9]", "-", str(tmp_path.resolve()))
+    assert mod.encoded_cwd_for(tmp_path) == expected
+    enc = mod.encoded_cwd_for(tmp_path)
+    assert "/" not in enc and ":" not in enc and "\\" not in enc

@@ -18,10 +18,25 @@ BIN = Path(__file__).resolve().parent.parent / "bin" / "skill-plus"
 
 
 def _encoded(path: Path) -> str:
-    s = str(path.resolve())
-    s = re.sub(r"[\\/:]", "-", s)
-    s = re.sub(r"-+", "-", s).strip("-")
-    return f"C--{s}" if not s.startswith("C--") else s
+    """Independent oracle for Claude Code's project-dir encoding (every
+    non-alphanumeric character of the resolved path dashed, one-for-one).
+    Deliberately NOT delegated to bin/skill-plus's _encode_project_path: if
+    this helper called into the module under test, a regression in the
+    implementation would move both in lockstep and these fixtures would
+    silently keep matching a broken encoder -- which is exactly how the
+    original bug (collapsed/stripped/re-prepended dashes) escaped detection."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path.resolve()))
+
+
+def test_encoded_helper_pins_real_world_examples():
+    # Same literals as test_foundation.py's _encode_project_path pin, checked
+    # here against the raw spec regex (no .resolve() involved, so safe on any
+    # OS) to guard this file's fixture helper specifically -- this is the
+    # helper whose drift let the original bug ship undetected.
+    pattern = r"[^A-Za-z0-9]"
+    assert re.sub(pattern, "-", "C:\\dev\\patchboard") == "C--dev-patchboard"
+    assert re.sub(pattern, "-", "/Users/bob/foo") == "-Users-bob-foo"
+    assert re.sub(pattern, "-", "C:\\dev\\foo.bar") == "C--dev-foo-bar"
 
 
 def _bash_line(cmd: str, session_id: str = "sess1") -> str:
@@ -201,3 +216,30 @@ def test_max_sessions_cap(tmp_path: Path):
     assert payload["sessionsScanned"] == 1
     cand = payload["candidates"][0]
     assert cand["sessions"] == ["newest"]
+
+
+def test_scan_finds_sessions_under_correctly_encoded_project_dir(tmp_path: Path):
+    """Regression test for the v0.19.7 encoded_cwd_for hotfix.
+
+    Claude Code names ~/.claude/projects/<slug> by dashing every
+    non-alphanumeric character of the resolved cwd, one dash per character,
+    with no collapsing/stripping/re-prepending. The pre-fix implementation
+    produced a different (nonexistent) directory name, so scan silently
+    reported sessionsScanned == 0 on every real Windows project. This test
+    seeds the correctly-encoded directory (via _encoded(), an oracle kept
+    independent of bin/skill-plus so it can't drift in lockstep with a
+    regression) and asserts scan actually discovers the sessions there.
+    MUST fail if encoded_cwd_for regresses to the old collapse/strip/
+    re-prepend behavior.
+    """
+    proj, sess_dir = _seed_project(tmp_path, "hotfixproj")
+    cmd = "railway logs --service api"
+    _write_session(sess_dir, "s1", [_bash_line(cmd, "s1") for _ in range(2)])
+    _write_session(sess_dir, "s2", [_bash_line(cmd, "s2") for _ in range(2)])
+    env = _setup_env(tmp_path, proj)
+    res = _run_scan(env, "--project", str(proj), "--accept-consent")
+    assert res.returncode == 0, res.stdout + res.stderr
+    payload = json.loads(res.stdout)
+    assert payload["sessionsScanned"] >= 1
+    assert payload["sessionsScanned"] == 2
+    assert payload["candidatesNew"] >= 1
