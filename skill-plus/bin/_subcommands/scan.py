@@ -283,7 +283,9 @@ def run(args, emit_fn) -> int:
     # Canary hint: 0 sessions for this slug, but ~/.claude/projects/ has
     # other project dirs with history -- likely means project_path resolved
     # to the wrong slug (e.g. cwd/git-toplevel mismatch) rather than "no
-    # Claude Code history exists yet". ASCII only.
+    # Claude Code history exists yet". "With history" is checked directly
+    # (at least one *.jsonl present) -- a sibling dir that exists but is
+    # empty isn't evidence of a slug mismatch. ASCII only.
     hint: str | None = None
     if not filtered:
         other_projects = 0
@@ -292,6 +294,7 @@ def run(args, emit_fn) -> int:
             other_projects = sum(
                 1 for d in proj_root.iterdir()
                 if d.is_dir() and d.name != own_slug
+                and next(d.glob("*.jsonl"), None) is not None
             )
         if other_projects > 0:
             hint = (
