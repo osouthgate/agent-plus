@@ -1052,6 +1052,18 @@ class TestRunRefreshHandler(unittest.TestCase):
     """`_run_refresh_handler` runs the declared command, parses JSON, extracts
     `identity_keys`, and respects `failure_mode`."""
 
+    def setUp(self) -> None:
+        # v0.19.8: `_run_refresh_handler` resolves argv[0] via shutil.which()
+        # before spawning (PATHEXT fix, see TestRunRefreshHandlerPathResolution
+        # below). These tests exercise post-spawn behavior with
+        # `subprocess.run` mocked directly and command names ("echo",
+        # "github-remote") that are not expected to be real, resolvable
+        # executables in the test environment, so make resolution a
+        # no-op pass-through here.
+        which_patcher = patch.object(ap.shutil, "which", side_effect=lambda cmd: cmd)
+        which_patcher.start()
+        self.addCleanup(which_patcher.stop)
+
     def _block(self, **overrides) -> dict:
         block = {
             "command": "echo {}",
@@ -1095,10 +1107,20 @@ class TestRunRefreshHandler(unittest.TestCase):
                 ap._run_refresh_handler("p", self._block(failure_mode="hard"), {})
 
     def test_command_not_found_soft(self) -> None:
+        # shutil.which() is patched to succeed (see setUp), so this
+        # specifically exercises the FileNotFoundError backstop branch
+        # (e.g. a TOCTOU race where resolution succeeds but exec still
+        # fails) -- NOT the PATH pre-check. Do not "fix" this by making
+        # shutil.which fail here; that scenario is covered by
+        # TestRunRefreshHandlerPathResolution.test_missing_command_soft.
         with patch.object(ap.subprocess, "run", side_effect=FileNotFoundError("nope")):
             out = ap._run_refresh_handler("p", self._block(), {})
         self.assertEqual(out["status"], "unconfigured")
         self.assertIn("not found", out["reason"])
+        # v0.19.8: reason must be clean -- no raw exception/WinError text.
+        self.assertEqual(out["reason"], "command not found: echo")
+        self.assertNotIn("WinError", out["reason"])
+        self.assertNotIn("nope", out["reason"])
 
     def test_nonzero_exit_soft(self) -> None:
         fake = type("P", (), {"returncode": 1, "stdout": "", "stderr": "boom"})()
@@ -1113,6 +1135,102 @@ class TestRunRefreshHandler(unittest.TestCase):
             out = ap._run_refresh_handler("p", self._block(), {})
         self.assertEqual(out["status"], "error")
         self.assertIn("not valid JSON", out["reason"])
+
+
+class TestRunRefreshHandlerPathResolution(unittest.TestCase):
+    """v0.19.8 hotfix: `_run_refresh_handler` must resolve `argv[0]` via
+    `shutil.which()` before spawning. On Windows, CreateProcess (which
+    `subprocess.run(..., shell=False)` calls into) does not apply PATHEXT,
+    so a bare command name like "railway" (installed as railway.cmd)
+    raised a raw FileNotFoundError/WinError even though the command was
+    "on PATH" for a human shell. Unlike TestRunRefreshHandler above, these
+    tests do NOT mock subprocess.run or shutil.which -- they exercise real
+    PATH/PATHEXT resolution against on-disk fake handlers, so they
+    actually regress against unpatched code on Windows."""
+
+    def _block(self, **overrides) -> dict:
+        block = {
+            "command": "fake-refresh",
+            "timeout_seconds": 10,
+            "identity_keys": [],
+            "failure_mode": "soft",
+        }
+        block.update(overrides)
+        return block
+
+    def _write_fake_handler(self, directory: Path) -> Path:
+        """Write a native fake refresh handler that prints a valid JSON
+        object to stdout and exits 0 -- a .cmd shim on Windows (mirrors
+        real-world npm-shim CLIs like railway.cmd / vercel.cmd), a chmod
+        +x shell script on POSIX."""
+        if os.name == "nt":
+            script = directory / "fake-refresh.cmd"
+            script.write_text(
+                '@echo {"status": "ok", "login": "olive"}\r\n',
+                encoding="utf-8",
+            )
+        else:
+            script = directory / "fake-refresh"
+            script.write_text(
+                "#!/bin/sh\necho '{\"status\": \"ok\", \"login\": \"olive\"}'\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+        return script
+
+    def test_bare_command_resolved_via_path(self) -> None:
+        """(a) Regression proof: a bare command name on PATH resolves and
+        runs instead of raising FileNotFoundError. On Windows this fails
+        against pre-v0.19.8 code with WinError 2 and passes with the fix."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_fake_handler(Path(tmp))
+            new_path = tmp + os.pathsep + os.environ.get("PATH", "")
+            with patch.dict(os.environ, {"PATH": new_path}):
+                out = ap._run_refresh_handler(
+                    "fake", self._block(identity_keys=["login"]), {},
+                )
+        self.assertEqual(out["status"], "ok")
+        self.assertEqual(out["identity"], {"login": "olive"})
+
+    def test_missing_command_soft(self) -> None:
+        """(b) A command that resolves nowhere on PATH -> clean
+        "unconfigured", no raw WinError/OSError text in `reason`, no
+        exception escapes, soft failure_mode returns normally."""
+        out = ap._run_refresh_handler(
+            "p",
+            self._block(command="definitely-not-a-real-cmd-xyz", failure_mode="soft"),
+            {},
+        )
+        self.assertEqual(out["status"], "unconfigured")
+        self.assertTrue(
+            out["reason"].startswith("command not found on PATH: "),
+            msg=out["reason"],
+        )
+        self.assertIn("definitely-not-a-real-cmd-xyz", out["reason"])
+        self.assertNotIn("WinError", out["reason"])
+
+    def test_missing_command_hard_raises(self) -> None:
+        """(c) hard failure_mode + missing command still raises
+        RuntimeError (existing semantics preserved)."""
+        with self.assertRaises(RuntimeError):
+            ap._run_refresh_handler(
+                "p",
+                self._block(command="definitely-not-a-real-cmd-xyz", failure_mode="hard"),
+                {},
+            )
+
+    def test_absolute_path_command_still_works(self) -> None:
+        """(d) A command already declared as an absolute path (not a bare
+        name needing PATH search) keeps working unchanged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            script = self._write_fake_handler(Path(tmp))
+            out = ap._run_refresh_handler(
+                "fake",
+                self._block(command=str(script), identity_keys=["login"]),
+                {},
+            )
+        self.assertEqual(out["status"], "ok")
+        self.assertEqual(out["identity"], {"login": "olive"})
 
 
 class TestRefreshSubcommandWithDiscovery(unittest.TestCase):

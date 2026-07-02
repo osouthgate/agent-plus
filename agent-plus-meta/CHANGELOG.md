@@ -6,6 +6,13 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.19.8 - 2026-07-02
+
+Windows P0 hotfix, field-reported: refresh handlers couldn't find commands that were genuinely on PATH.
+
+### Fixed
+- **Refresh handlers spawned subprocesses without `shutil.which()` resolution, so `CreateProcess` missed `PATHEXT`** and every plugin reported `unconfigured: command not found [WinError 2]`; `services.json` resolved no identities even with valid creds. Now `argv[0]` is `which()`-resolved (PATHEXT-aware), missing commands report a clean `command not found on PATH: <name>` reason, hard/soft failure modes preserved, cross-platform regression tests added.
+
 ## 0.19.4 - 2026-05-02
 
 Cold-repo hook, slash-command footer, global skill storage.

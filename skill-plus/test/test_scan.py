@@ -418,3 +418,26 @@ def test_hint_absent_when_no_other_projects_exist(tmp_path: Path):
     payload = json.loads(res.stdout)
     assert payload["sessionsScanned"] == 0
     assert "hint" not in payload
+
+
+def test_hint_absent_when_other_project_dirs_are_empty(tmp_path: Path):
+    """Sibling project dirs exist under ~/.claude/projects/ but hold no
+    .jsonl files -- an empty dir isn't "history", so no hint should fire
+    even though other dirs are present. zeroReason is still set, since the
+    scan itself still found 0 sessions for this project's own slug."""
+    proj = (tmp_path / "myproj").resolve()
+    proj.mkdir(parents=True, exist_ok=True)
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(parents=True, exist_ok=True)
+    # Two unrelated project dirs that exist but contain no session files.
+    for i in range(2):
+        other_dir = fake_home / ".claude" / "projects" / f"some-other-encoded-slug-{i}"
+        other_dir.mkdir(parents=True, exist_ok=True)
+
+    env = _setup_env(tmp_path, proj)
+    res = _run_scan(env, "--project", str(proj), "--accept-consent")
+    assert res.returncode == 0, res.stdout + res.stderr
+    payload = json.loads(res.stdout)
+    assert payload["sessionsScanned"] == 0
+    assert payload["zeroReason"] == "project_dir_missing"
+    assert "hint" not in payload

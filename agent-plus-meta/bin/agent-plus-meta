@@ -852,6 +852,23 @@ def _run_refresh_handler(
             raise RuntimeError(out["reason"])
         return out
 
+    # v0.19.8: resolve argv[0] against PATH ourselves before spawning. On
+    # Windows, CreateProcess (which subprocess.run(..., shell=False) calls
+    # into) does NOT apply PATHEXT, so a bare command name like "railway"
+    # (installed as railway.cmd) or "gh" (installed as gh.exe alongside
+    # other shims) can raise a raw FileNotFoundError/WinError even though
+    # the command is genuinely "on PATH" for a human shell. shutil.which()
+    # applies PATHEXT on Windows and the executable-bit check on POSIX, so
+    # it resolves the same set of commands a user's shell would find.
+    resolved = shutil.which(argv[0])
+    if resolved is None:
+        out["status"] = "unconfigured"
+        out["reason"] = f"command not found on PATH: {argv[0]}"
+        if failure_mode == "hard":
+            raise RuntimeError(f"{name}: {out['reason']}")
+        return out
+    argv[0] = resolved
+
     try:
         proc = subprocess.run(
             argv,
@@ -869,8 +886,14 @@ def _run_refresh_handler(
             raise RuntimeError(f"{name}: refresh handler timed out after {timeout}s")
         return out
     except FileNotFoundError as e:
+        # Backstop only -- argv[0] was already resolved via shutil.which()
+        # above, so this is an edge case (e.g. a TOCTOU race where the
+        # resolved file was removed before exec). Keep the reason clean;
+        # the raw OSError text (which is WinError-flavored on Windows) goes
+        # in `detail`, not `reason`.
         out["status"] = "unconfigured"
-        out["reason"] = f"command not found: {e}"
+        out["reason"] = f"command not found: {argv[0]}"
+        out["detail"] = str(e)
         if failure_mode == "hard":
             raise RuntimeError(f"{name}: {out['reason']}")
         return out
