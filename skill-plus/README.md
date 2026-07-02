@@ -50,6 +50,25 @@ Walks `~/.claude/projects/<encoded-cwd>/*.jsonl`, extracts `Bash` tool calls, cl
 }
 ```
 
+**Zero-session diagnosis (v0.6.1).** A `0` in `sessionsScanned` used to be a silent no-op. Now the envelope explains why:
+
+```json
+{
+  "sessionsScanned": 0,
+  "zeroReason": "project_dir_missing",
+  "diagnostics": {
+    "slug": "C--dev-patchboard",
+    "projectDir": "/home/me/.claude/projects/C--dev-patchboard",
+    "projectDirExists": false, "rawSessionFiles": 0, "filteredByCutoff": 0
+  },
+  "hint": "0 sessions for slug C--dev-patchboard but 2 other projects have history - possible slug mismatch; use --since-days N for backfill"
+}
+```
+
+- **`zeroReason`** — `"project_dir_missing"` (no `~/.claude/projects/<slug>` for this project at all), `"all_before_cutoff"` (sessions exist but every one predates `--since-days`), or `"filtered_by_caps"` (in-window sessions were all cut by `--max-sessions`); checked in that precedence order. `null` on any scan where `sessionsScanned > 0`.
+- **`diagnostics`** — always present, regardless of `zeroReason` or `--all-projects`. Reports the resolved slug, its on-disk path, whether that directory exists, and raw vs. cutoff-filtered session counts for this project's own slug specifically, so "0 sessions" is diagnosable instead of a dead end.
+- **`hint`** — present whenever `sessionsScanned` is `0` for this project's slug, *whichever* `zeroReason` applies, as long as `~/.claude/projects/` has *other* project directories with history — a likely slug-mismatch signal (not gated to `project_dir_missing` specifically; `all_before_cutoff` or `filtered_by_caps` alongside other active projects trips it too). Points at widening `--since-days N` (default 30) to backfill once the underlying cause is fixed: `scan`'s watermark only advances on a run that actually finds sessions, so a run that found 0 never burns the window — the old sessions are still there to mine once the mismatch is resolved.
+
 ### propose — pick the best one
 
 Reads the candidate log, scores by `count + 0.5 × distinct_sessions + recency_boost`, returns the top N. Each row carries a `proposedSkillName` (e.g. `railway logs --service` → `railway-logs`) and `kind: "new" | "enhance"` — flips to `enhance` when a skill of that name already exists.
@@ -188,7 +207,7 @@ Every output envelope includes a `nextSteps` array. Per-command hints: `scan` �
 - **No transcript ever leaves the machine.** All processing local; no network calls.
 - **Consent gate.** First scan in a project requires `--accept-consent` (or interactive grant); cron consent captured at install time. Recorded in `~/.agent-plus/skill-plus/consent.json`.
 - **Secret redaction before write.** Every scrubbed command runs through patterns covering GitHub PATs (`ghp_…`, `github_pat_…`, `gho_/ghu_/ghs_/ghr_…`), AWS access keys (`AKIA…`), Anthropic (`sk-ant-…`), Langfuse (`pk-lf-…` / `sk-lf-…`), Stripe (`sk_live_/sk_test_/rk_/pk_…`), generic OpenAI-style `sk-…`, OpenRouter (`sk-or-…`), Supabase (`sbp_…`), Sentry (`sntrys_…`), Google API keys (`AIza…`), Slack (`xoxb-/xoxa-/xoxp-/xoxr-/xoxs-…`), Slack/Discord webhook URLs, Discord bot tokens, JWTs (`eyJ…`), `Bearer …`, `Authorization: …`, connection strings (`postgres://user:pw@host/…`), and `--token=…` / `--password=…` / `--secret=…` argv pairs **before** they're written to `candidates.jsonl`.
-- **Scope defaults narrow.** Current project, last 30 days, last 50 sessions. `--all-projects` is opt-in with a stronger prompt.
+- **Scope defaults narrow.** Current project, last 30 days (`--since-days N` to widen — e.g. to backfill after fixing a slug mismatch, per the `hint` field above), last 50 sessions (`--max-sessions`). `--all-projects` is opt-in with a stronger prompt.
 - **Read-only by default.** `propose`, `list`, `feedback` never write. `scan` writes `candidates.jsonl` and `last-scan.txt`. `scaffold` writes inside `.claude/skills/<name>/` only — explicit and pre-announced.
 
 ## State layout

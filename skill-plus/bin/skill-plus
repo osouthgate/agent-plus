@@ -143,32 +143,54 @@ def _ensure_dir(path: Path) -> None:
 
 
 # ─── secret redaction (shared with scaffold's emitted skills) ─────────────────
+#
+# Each entry is (compiled_pattern, replacement). Most patterns replace the
+# whole match with a flat "[REDACTED]"; the header-name pattern instead
+# substitutes "\g<1>: [REDACTED]" so the header NAME stays readable while its
+# value is dropped. List order matters: value-consuming patterns run before
+# token patterns, so the header-name pattern goes first -- it swallows the
+# whole "Name: <value>" span (stopping at a quote/EOL) before the narrower
+# token-shaped patterns below get a chance to see a partial value. Keep this
+# in sync with scaffold.py's _GENERATED_PY_TEMPLATE copy until centralized.
 
-_SECRET_PATTERNS = [
-    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
-    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"gh[ousr]_[A-Za-z0-9]{20,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),
-    re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"sk-lf-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"pk-lf-[A-Za-z0-9_-]{20,}"),
+_SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (
+        re.compile(
+            r"\b(Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-Api-Key|"
+            r"X-Auth-Token|Private-Token|CF-Access-Client-Secret|"
+            r"CF-Access-Client-Id|X-Amz-Security-Token)\s*:\s*[^\r\n'\"]+",
+            re.IGNORECASE,
+        ),
+        r"\g<1>: [REDACTED]",
+    ),
+    (re.compile(r"ghp_[A-Za-z0-9]{20,}"), "[REDACTED]"),
+    (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "[REDACTED]"),
+    (re.compile(r"gh[ousr]_[A-Za-z0-9]{20,}"), "[REDACTED]"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED]"),
+    (re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
+    (re.compile(r"sk-lf-[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
+    (re.compile(r"pk-lf-[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
     # webhook URLs (Slack/Discord) — token in URL path
-    re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+"),
-    re.compile(r"https://discord(?:app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9._-]+"),
-    re.compile(r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{20,}"),
-    re.compile(r"sk-or-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"sbp_[A-Za-z0-9]{20,}"),
-    re.compile(r"sntrys_[A-Za-z0-9._-]{20,}"),
-    re.compile(r"AIza[0-9A-Za-z_-]{35}"),
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
-    re.compile(r"Bearer\s+[A-Za-z0-9._\-]{20,}", re.IGNORECASE),
-    re.compile(r"Authorization:\s*\S+", re.IGNORECASE),
+    (re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+"), "[REDACTED]"),
+    (re.compile(r"https://discord(?:app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9._-]+"), "[REDACTED]"),
+    (re.compile(r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{20,}"), "[REDACTED]"),
+    (re.compile(r"sk-or-[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
+    (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
+    (re.compile(r"sbp_[A-Za-z0-9]{20,}"), "[REDACTED]"),
+    (re.compile(r"sntrys_[A-Za-z0-9._-]{20,}"), "[REDACTED]"),
+    (re.compile(r"AIza[0-9A-Za-z_-]{35}"), "[REDACTED]"),
+    (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "[REDACTED]"),
+    (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"), "[REDACTED]"),
+    # Laravel Sanctum / other opaque "<id>|<hash>" bearer tokens (e.g. "4|<40-char-hash>").
+    (re.compile(r"\b\d+\|[A-Za-z0-9]{20,}\b"), "[REDACTED]"),
+    # Widened: any non-space/quote token of 8+ chars, not just the old
+    # [A-Za-z0-9._-]{20,} charset -- that excluded "|" (Sanctum tokens) and
+    # missed short-but-real tokens under 20 chars.
+    (re.compile(r"Bearer\s+[^\s\"']{8,}", re.IGNORECASE), "[REDACTED]"),
     # connection strings
-    re.compile(r"(postgres|mysql|redis|mongodb(?:\+srv)?)://[^\s'\"]+@", re.IGNORECASE),
+    (re.compile(r"(postgres|mysql|redis|mongodb(?:\+srv)?)://[^\s'\"]+@", re.IGNORECASE), "[REDACTED]"),
     # argv-style secret pairs
-    re.compile(r"--(?:password|token|secret|api[-_]?key)[= ]\S+", re.IGNORECASE),
+    (re.compile(r"--(?:password|token|secret|api[-_]?key)[= ]\S+", re.IGNORECASE), "[REDACTED]"),
 ]
 
 
@@ -176,8 +198,8 @@ def scrub_text(s: str | None) -> str | None:
     if s is None:
         return None
     out = s
-    for pat in _SECRET_PATTERNS:
-        out = pat.sub("[REDACTED]", out)
+    for pat, repl in _SECRET_PATTERNS:
+        out = pat.sub(repl, out)
     return out
 
 
@@ -243,14 +265,20 @@ def emit(data: Any, *, pretty: bool, output: Optional[str], shape_depth: int) ->
 # ─── session-log discovery (used by scan + feedback) ──────────────────────────
 
 
+def _encode_project_path(s: str) -> str:
+    """Claude Code's project-dir encoding: every non-alphanumeric character
+    of the resolved cwd is replaced with its own dash -- one dash per
+    character, no collapsing of runs, no stripping, no re-prepending
+    anything. E.g. C:\\dev\\patchboard -> C--dev-patchboard ;
+    /Users/bob/foo -> -Users-bob-foo. Pure string function (no filesystem
+    or platform path semantics involved) so it's cheap to unit-test."""
+    return re.sub(r"[^A-Za-z0-9]", "-", s)
+
+
 def encoded_cwd_for(path: Path) -> str:
-    """Claude Code encodes the cwd as project dir name by replacing
-    each non-alphanumeric run with a single dash and stripping the leading
-    drive separator. Mirrors what's observed under ~/.claude/projects/."""
-    s = str(path.resolve())
-    s = re.sub(r"[\\/:]", "-", s)
-    s = re.sub(r"-+", "-", s).strip("-")
-    return f"C--{s}" if not s.startswith("C--") else s
+    """The ~/.claude/projects/<slug> directory name Claude Code uses for
+    the given project path. Mirrors what's observed on disk."""
+    return _encode_project_path(str(path.resolve()))
 
 
 def claude_projects_root() -> Path:
