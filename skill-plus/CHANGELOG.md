@@ -4,6 +4,11 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.6.2 - 2026-07-02
+
+### Fixed
+- **Zero-scan slug-mismatch hint no longer fires on empty sibling project dirs.** `scan`'s `hint` field was triggered by the mere existence of other directories under `~/.claude/projects/`, even when those directories held no session `.jsonl` files. The check now only counts sibling project dirs that actually contain session `.jsonl` files, so an empty dir no longer trips a false "likely slug mismatch" hint.
+
 ## 0.6.1 - 2026-07-02
 
 v0.19.7 framework hotfix. Two field-reported bugs: session-mining silently found nothing on Windows, and a redaction gap let a live bearer token reach disk.
