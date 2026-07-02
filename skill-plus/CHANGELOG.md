@@ -4,6 +4,20 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.6.1 - 2026-07-02
+
+v0.19.7 framework hotfix. Two field-reported bugs: session-mining silently found nothing on Windows, and a redaction gap let a live bearer token reach disk.
+
+### Security
+- **Redactor was leaking bearer token values -- including Laravel Sanctum `<id>|<hash>` tokens -- into `candidates.jsonl`.** The `Bearer` pattern's charset excluded `|`, so Sanctum-shaped tokens never matched it at all; separately, the `Authorization:` pattern consumed only the scheme word, leaving whatever followed (the actual token) untouched in the scrubbed output. Both `bin/skill-plus` and `bin/_subcommands/scaffold.py` (the scrubber baked into every scaffolded skill's generated `.py`) carried the same gap and are fixed in sync. Hardened: a new sensitive-header-name pattern (`Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, `X-Auth-Token`, `Private-Token`, `CF-Access-Client-Secret`, `CF-Access-Client-Id`, `X-Amz-Security-Token`) now consumes the whole `Name: value` span while keeping the header name itself readable; a dedicated Sanctum-shaped `\d+\|[A-Za-z0-9]{20,}` pattern catches the token standalone (e.g. in a URL query string); the `Bearer` pattern widened from a narrow 20+ char charset to any 8+ char non-space/quote token. **Every record already on disk in `candidates.jsonl` is rescrubbed on every `scan` rewrite** -- not just the current run's new/updated examples -- so a token that leaked before this fix doesn't survive indefinitely just because a later scan never touched that record again.
+
+### Fixed
+- **Windows/POSIX project-slug encoding in `encoded_cwd_for`.** The previous implementation dashed only `[\\/:]`, collapsed runs of dashes, stripped leading/trailing dashes, then re-prepended `C--` -- for `C:\dev\patchboard` that produced `C--C-dev-patchboard`, a directory that doesn't exist, instead of the real `C--dev-patchboard`. `scan` and `feedback`'s session-mining stream silently reported 0 sessions on every real Windows project, with no error surfaced anywhere. Field-reported. Fixed: every non-alphanumeric character of the resolved cwd is now dashed one-for-one (no collapsing, no stripping, no re-prepending), matching the on-disk format Claude Code actually uses.
+- **`scan`'s watermark no longer advances on a 0-session run.** Previously `last-scan.txt` advanced to "now" even when `sessionsScanned == 0` (e.g. because of the slug bug above, or every session predating the cutoff) -- so once the underlying cause was fixed, the *next* scan's cutoff still started from the broken run's timestamp and silently skipped everything before it forever. The watermark now only advances when at least one session was actually parsed this run.
+
+### Added
+- **`zeroReason`, `diagnostics`, and (conditional) `hint` fields in the `scan` envelope.** Turns a 0-session run from a silent no-op into something diagnosable: `zeroReason` explains *why* (`project_dir_missing` / `all_before_cutoff` / `filtered_by_caps`, in that precedence order), `diagnostics` always reports the resolved slug + project dir + raw/filtered session counts regardless of `--all-projects`, and `hint` (present only when 0 sessions were found for this project's own slug but other project dirs with history exist under `~/.claude/projects/`) flags a likely slug mismatch and points at `--since-days N` for backfill once the cause is fixed. See README for the full field reference.
+
 ## 0.5.0 - 2026-05-02
 
 ### Added
