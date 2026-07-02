@@ -166,20 +166,39 @@ TOOL_VERSION = "0.1.0"
 
 
 # ─── secret redaction ─────────────────────────────────────────────────────────
+#
+# Duplicated from bin/skill-plus's _SECRET_PATTERNS -- this hotfix does not
+# attempt cross-module imports into scaffolded skills. Keep the two lists in
+# sync until redaction is centralized. Same ordering rule applies: the
+# header-name pattern (value-consuming) runs first, before the narrower
+# token-shaped patterns.
 
 _SECRET_PATTERNS = [
-    re.compile(r"ghp_[A-Za-z0-9]{{20,}}"),
-    re.compile(r"github_pat_[A-Za-z0-9_]{{20,}}"),
-    re.compile(r"AKIA[0-9A-Z]{{16}}"),
-    re.compile(r"sk-ant-[A-Za-z0-9_-]{{20,}}"),
-    re.compile(r"sk-or-[A-Za-z0-9_-]{{20,}}"),
-    re.compile(r"sk-[A-Za-z0-9_-]{{20,}}"),
-    re.compile(r"AIza[0-9A-Za-z_-]{{35}}"),
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{{10,}}"),
-    re.compile(r"eyJ[A-Za-z0-9_-]{{10,}}\.eyJ[A-Za-z0-9_-]{{10,}}\.[A-Za-z0-9_-]{{10,}}"),
-    re.compile(r"Bearer\s+[A-Za-z0-9._\-]{{20,}}", re.IGNORECASE),
-    re.compile(r"(postgres|mysql|redis|mongodb(?:\+srv)?)://[^\s'\"]+@", re.IGNORECASE),
-    re.compile(r"--(?:password|token|secret|api[-_]?key)[= ]\S+", re.IGNORECASE),
+    (
+        re.compile(
+            r"\b(Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-Api-Key|"
+            r"X-Auth-Token|Private-Token|CF-Access-Client-Secret|"
+            r"CF-Access-Client-Id|X-Amz-Security-Token)\s*:\s*[^\r\n'\"]+",
+            re.IGNORECASE,
+        ),
+        r"\g<1>: [REDACTED]",
+    ),
+    (re.compile(r"ghp_[A-Za-z0-9]{{20,}}"), "[REDACTED]"),
+    (re.compile(r"github_pat_[A-Za-z0-9_]{{20,}}"), "[REDACTED]"),
+    (re.compile(r"AKIA[0-9A-Z]{{16}}"), "[REDACTED]"),
+    (re.compile(r"sk-ant-[A-Za-z0-9_-]{{20,}}"), "[REDACTED]"),
+    (re.compile(r"sk-or-[A-Za-z0-9_-]{{20,}}"), "[REDACTED]"),
+    (re.compile(r"sk-[A-Za-z0-9_-]{{20,}}"), "[REDACTED]"),
+    (re.compile(r"AIza[0-9A-Za-z_-]{{35}}"), "[REDACTED]"),
+    (re.compile(r"xox[baprs]-[A-Za-z0-9-]{{10,}}"), "[REDACTED]"),
+    (re.compile(r"eyJ[A-Za-z0-9_-]{{10,}}\.eyJ[A-Za-z0-9_-]{{10,}}\.[A-Za-z0-9_-]{{10,}}"), "[REDACTED]"),
+    # Laravel Sanctum / other opaque "<id>|<hash>" bearer tokens.
+    (re.compile(r"\b\d+\|[A-Za-z0-9]{{20,}}\b"), "[REDACTED]"),
+    # Widened: any non-space/quote token of 8+ chars (was {{20,}} of a
+    # narrower charset that excluded "|").
+    (re.compile(r"Bearer\s+[^\s\"']{{8,}}", re.IGNORECASE), "[REDACTED]"),
+    (re.compile(r"(postgres|mysql|redis|mongodb(?:\+srv)?)://[^\s'\"]+@", re.IGNORECASE), "[REDACTED]"),
+    (re.compile(r"--(?:password|token|secret|api[-_]?key)[= ]\S+", re.IGNORECASE), "[REDACTED]"),
 ]
 
 
@@ -187,8 +206,8 @@ def scrub_text(s: Optional[str]) -> Optional[str]:
     if s is None:
         return None
     out = s
-    for pat in _SECRET_PATTERNS:
-        out = pat.sub("[REDACTED]", out)
+    for pat, repl in _SECRET_PATTERNS:
+        out = pat.sub(repl, out)
     return out
 
 

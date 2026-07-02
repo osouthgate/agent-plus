@@ -140,6 +140,26 @@ def _write_atomic(log_path: Path, records: list[dict]) -> None:
     os.replace(tmp, log_path)
 
 
+def _scrub_value(v):
+    """Recursively scrub every string found in v (dict/list/str/other)."""
+    if isinstance(v, str):
+        return scrub_text(v)
+    if isinstance(v, list):
+        return [_scrub_value(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _scrub_value(x) for k, x in v.items()}
+    return v
+
+
+def _scrub_record(rec: dict) -> dict:
+    """Rescrub every text field of a persisted candidate record. Applied to
+    EVERY record on EVERY rewrite (not just newly-added examples) so a
+    secret that leaked into candidates.jsonl before a redaction-pattern gap
+    was fixed doesn't survive forever just because that record wasn't
+    touched by the current scan."""
+    return {k: _scrub_value(v) for k, v in rec.items()}
+
+
 # ─── last-scan watermark ─────────────────────────────────────────────────────
 
 
@@ -209,18 +229,76 @@ def run(args, emit_fn) -> int:
     def _mtime(p: Path) -> _dt.datetime:
         return _dt.datetime.fromtimestamp(p.stat().st_mtime, _dt.timezone.utc)
 
+    def _mtime_or_none(p: Path) -> _dt.datetime | None:
+        try:
+            return _mtime(p)
+        except OSError:
+            return None
+
     filtered: list[Path] = []
     for s in sessions:
-        try:
-            mt = _mtime(s)
-        except OSError:
-            continue
-        if mt >= cutoff:
+        mt = _mtime_or_none(s)
+        if mt is not None and mt >= cutoff:
             filtered.append(s)
     # newest first, cap
     filtered.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    after_cutoff_count = len(filtered)
     max_sessions = int(getattr(args, "max_sessions", 50))
     filtered = filtered[:max_sessions]
+
+    # Self-diagnosis, always computed (v0.19.7 hotfix): scoped to
+    # project_path regardless of --all-projects, so "0 sessions" always
+    # answers "does my resolved project even have a session directory" --
+    # independent of whatever --all-projects widened `sessions` to.
+    own_slug = encoded_cwd_for(project_path)
+    own_dir = claude_projects_root() / own_slug
+    own_raw_sessions = session_files_for_project(project_path)
+    own_after_cutoff = 0
+    for s in own_raw_sessions:
+        mt = _mtime_or_none(s)
+        if mt is not None and mt >= cutoff:
+            own_after_cutoff += 1
+    diagnostics = {
+        "slug": own_slug,
+        "projectDir": str(own_dir),
+        "projectDirExists": own_dir.is_dir(),
+        "rawSessionFiles": len(own_raw_sessions),
+        "filteredByCutoff": len(own_raw_sessions) - own_after_cutoff,
+    }
+
+    # zeroReason explains *why* sessionsScanned (== len(filtered)) came out
+    # to 0, for the actual scan that ran (mode-aware: respects
+    # --all-projects, unlike `diagnostics` above). Order matters: no raw
+    # files at all outranks "all older than cutoff", which outranks "cutoff
+    # passed but the --max-sessions cap zeroed it out".
+    zero_reason: str | None = None
+    if not filtered:
+        if not sessions:
+            zero_reason = "project_dir_missing"
+        elif after_cutoff_count == 0:
+            zero_reason = "all_before_cutoff"
+        else:
+            zero_reason = "filtered_by_caps"
+
+    # Canary hint: 0 sessions for this slug, but ~/.claude/projects/ has
+    # other project dirs with history -- likely means project_path resolved
+    # to the wrong slug (e.g. cwd/git-toplevel mismatch) rather than "no
+    # Claude Code history exists yet". ASCII only.
+    hint: str | None = None
+    if not filtered:
+        other_projects = 0
+        proj_root = claude_projects_root()
+        if proj_root.is_dir():
+            other_projects = sum(
+                1 for d in proj_root.iterdir()
+                if d.is_dir() and d.name != own_slug
+            )
+        if other_projects > 0:
+            hint = (
+                f"0 sessions for slug {own_slug} but {other_projects} other "
+                f"projects have history - possible slug mismatch; use "
+                f"--since-days N for backfill"
+            )
 
     # 4. Parse + extract
     parse_errors = 0
@@ -313,12 +391,28 @@ def run(args, emit_fn) -> int:
             }
             new_count += 1
 
+    # Rescrub every persisted record's text fields on every rewrite -- not
+    # just this scan's new/updated examples. An old record this scan never
+    # touched (didn't match this run's clusters) still gets rewritten
+    # verbatim below, so if it was written before a redaction-pattern gap
+    # was fixed, a leaked secret would otherwise survive forever. Mutates
+    # `existing` in place so `top` (built from `existing` right after) also
+    # reflects the scrubbed values, not just what lands on disk.
+    for rid in list(existing.keys()):
+        existing[rid] = _scrub_record(existing[rid])
+
     # rewrite file atomically — sorted by count desc for stable readability
     all_records = sorted(existing.values(), key=lambda r: -int(r.get("count", 0)))
     _write_atomic(log_path, all_records)
 
-    # 9. Watermark
-    _write_last_scan(now)
+    # 9. Watermark -- only advance when sessions were actually parsed this
+    # run. Advancing on a 0-session run (e.g. slug mismatch, or every
+    # session older than the cutoff) would silently burn the scan window:
+    # the next scan's cutoff becomes "now", so anything before it is never
+    # revisited even after the underlying problem (e.g. the slug) is fixed.
+    # See zeroReason for why sessionsScanned came out to 0.
+    if filtered:
+        _write_last_scan(now)
 
     # 10. Emit envelope (top 10 candidates by count from this scan's surviving)
     top = sorted(
@@ -335,6 +429,10 @@ def run(args, emit_fn) -> int:
         "candidatesUpdated": updated_count,
         "candidatesTotal": len(existing),
         "candidates": top,
+        "zeroReason": zero_reason,
+        "diagnostics": diagnostics,
     }
+    if hint:
+        payload["hint"] = hint
     emit_fn(payload)
     return 0
