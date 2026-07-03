@@ -11,6 +11,17 @@
 #   $env:AGENT_PLUS_DRY_RUN     = "1"                       # print, don't write
 #   $env:AGENT_PLUS_NO_INIT     = "1"                       # skip init chain
 #   $env:AGENT_PLUS_UNATTENDED  = "1"                       # no prompts, exit 0 on partial
+#   $env:AGENT_PLUS_NO_VERIFY   = "1"                       # skip sha256 tarball verification
+#
+# NOTE: a checksum MISMATCH is a hard integrity failure, not a "partial
+# install" -- it always exits 1, even under $env:AGENT_PLUS_UNATTENDED, and
+# the downloaded tarball is discarded.
+#
+# Tagged releases install from a self-built release-asset tarball and verify
+# it (sha256, via Get-FileHash) against a SHA256SUMS file published alongside
+# it. Releases before v0.21.0 predate published checksums and fall back to
+# the unverified GitHub auto-archive URL, with a warning. main/master
+# installs are always unverified (moving target).
 #
 # Download and run with flags (alternative to iex):
 #   $f = "$env:TEMP\ap-install.ps1"
@@ -33,6 +44,12 @@ $Prefix      = if ($env:AGENT_PLUS_PREFIX) { $env:AGENT_PLUS_PREFIX } `
 $DryRun      = $env:AGENT_PLUS_DRY_RUN     -eq "1"
 $NoInit      = $env:AGENT_PLUS_NO_INIT     -eq "1"
 $Unattended  = $env:AGENT_PLUS_UNATTENDED  -eq "1"
+$NoVerify    = $env:AGENT_PLUS_NO_VERIFY   -eq "1"
+# Test-only: overrides the release-asset base URL, mirroring install.sh's
+# AGENT_PLUS_ASSET_BASE_URL test hook (precedent there: --source-dir). Lets
+# manual/local testing point at a file:// fixture dir instead of a real
+# GitHub release.
+$AssetBaseUrlOverride = $env:AGENT_PLUS_ASSET_BASE_URL
 
 # ---- helpers -----------------------------------------------------------------
 
@@ -56,6 +73,68 @@ function Get-TarballUrl([string]$Tag) {
     } else {
         return "https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/tags/v$Tag.tar.gz"
     }
+}
+
+function Get-IsReleaseTag([string]$Tag) {
+    # A release tag is anything that isn't one of the two branch names we
+    # treat as moving targets. Kept in sync with Get-TarballUrl above.
+    return -not ($Tag -eq "main" -or $Tag -eq "master")
+}
+
+function Get-NormalizedTag([string]$Tag) {
+    # Ensure a "v" prefix: "0.21.0" -> "v0.21.0", "v0.21.0" -> "v0.21.0".
+    if ($Tag.StartsWith("v")) { return $Tag } else { return "v$Tag" }
+}
+
+function Get-BareVersion([string]$Tag) {
+    # Strip the "v" prefix: "v0.21.0" -> "0.21.0".
+    return (Get-NormalizedTag $Tag).Substring(1)
+}
+
+function Get-AssetBaseUrl([string]$Tag) {
+    # Base URL for release-asset downloads (the tarball + SHA256SUMS live
+    # next to the install.sh/install.ps1 assets on the same release).
+    if ($AssetBaseUrlOverride) { return $AssetBaseUrlOverride }
+    $norm = Get-NormalizedTag $Tag
+    return "https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/$norm"
+}
+
+function Get-AssetTarballUrl([string]$Tag) {
+    # The self-built, byte-stable tarball uploaded by .github/workflows/release.yml
+    # -- preferred over Get-TarballUrl's GitHub auto-archive for tagged
+    # releases, since auto-archives are not guaranteed byte-stable long-term.
+    $ver = Get-BareVersion $Tag
+    return (Get-AssetBaseUrl $Tag) + "/agent-plus-$ver.tar.gz"
+}
+
+function Get-AssetSumsUrl([string]$Tag) {
+    return (Get-AssetBaseUrl $Tag) + "/SHA256SUMS"
+}
+
+function Get-RemoteFile([string]$Uri, [string]$OutFile) {
+    # Invoke-WebRequest throws "The 'file' scheme is not supported" for
+    # file:// URIs. curl (used by install.sh) handles file:// natively;
+    # this shim gives install.ps1 the same capability so the
+    # AGENT_PLUS_ASSET_BASE_URL test-only override also works against a
+    # local file:// fixture dir, not just a real https:// release.
+    if ($Uri -like "file://*") {
+        $localPath = ([uri]$Uri).LocalPath
+        Copy-Item -Path $localPath -Destination $OutFile -Force -ErrorAction Stop
+    } else {
+        Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -ErrorAction Stop
+    }
+}
+
+function Get-Sha256Hex([string]$Path) {
+    return (Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLowerInvariant()
+}
+
+function Find-ExpectedHash([string]$SumsPath, [string]$TarballName) {
+    # Returns $null if SHA256SUMS has no matching entry.
+    $escaped = [regex]::Escape($TarballName)
+    $line = Get-Content $SumsPath | Where-Object { $_ -match $escaped } | Select-Object -First 1
+    if (-not $line) { return $null }
+    return (($line -split '\s+')[0]).ToLowerInvariant()
 }
 
 function Find-Python {
@@ -149,13 +228,31 @@ function Print-Footer {
 
 Print-Header
 
-$Tag     = Resolve-Tag
-$Tarball = Get-TarballUrl $Tag
+$Tag                = Resolve-Tag
+$IsReleaseTag       = Get-IsReleaseTag $Tag
+$AutoArchiveTarball = Get-TarballUrl $Tag
+if ($IsReleaseTag) {
+    $AssetTarball = Get-AssetTarballUrl $Tag
+    $Tarball      = $AssetTarball
+} else {
+    $AssetTarball = $null
+    $Tarball      = $AutoArchiveTarball
+}
 
 if ($DryRun) {
     Write-Host ""
     Write-Host "tag:          $Tag"
     Write-Host "tarball:      $Tarball"
+    if ($IsReleaseTag) {
+        Write-Host "fallback:     $AutoArchiveTarball (used if this release predates published checksums)"
+        if ($NoVerify) {
+            Write-Host "verification: skipped (AGENT_PLUS_NO_VERIFY=1)"
+        } else {
+            Write-Host "verification: sha256, checked against SHA256SUMS from the release; a mismatch aborts the install (set `$env:AGENT_PLUS_NO_VERIFY=1 to skip)"
+        }
+    } else {
+        Write-Host "verification: skipped ($Tag installs are unverified by design -- pin a release via `$env:AGENT_PLUS_VERSION for a verified install)"
+    }
     Write-Host "prefix:       $Prefix"
     Write-Host "install dir:  $InstallDir"
     Write-Host ""
@@ -202,13 +299,65 @@ $null   = New-Item -ItemType Directory -Force $TmpDir
 
 try {
     Write-Host ""
-    Write-Host "Downloading $Tarball ..."
-    $TarPath = Join-Path $TmpDir "agent-plus.tar.gz"
-    try {
-        Invoke-WebRequest -Uri $Tarball -OutFile $TarPath -UseBasicParsing -ErrorAction Stop
-    } catch {
-        Write-Host "[install_ps1_curl_failed] tarball: $Tarball" -ForegroundColor Red
-        if ($Unattended) { exit 0 } else { exit 1 }
+    $TarPath   = Join-Path $TmpDir "agent-plus.tar.gz"
+    $UsedAsset = $false
+
+    if ($IsReleaseTag) {
+        Write-Host "Downloading $AssetTarball ..."
+        try {
+            Get-RemoteFile -Uri $AssetTarball -OutFile $TarPath
+            $UsedAsset = $true
+        } catch {
+            Write-Host "install.ps1: release asset not found -- this release predates published checksums; verification skipped. Falling back to source archive." -ForegroundColor Yellow
+            Write-Host "Downloading $AutoArchiveTarball ..."
+            try {
+                Get-RemoteFile -Uri $AutoArchiveTarball -OutFile $TarPath
+            } catch {
+                Write-Host "[install_ps1_curl_failed] tarball: $AutoArchiveTarball" -ForegroundColor Red
+                if ($Unattended) { exit 0 } else { exit 1 }
+            }
+        }
+    } else {
+        Write-Warning "install.ps1: installing from $Tag -- unverified (moving target)."
+        Write-Host "Downloading $AutoArchiveTarball ..."
+        try {
+            Get-RemoteFile -Uri $AutoArchiveTarball -OutFile $TarPath
+        } catch {
+            Write-Host "[install_ps1_curl_failed] tarball: $AutoArchiveTarball" -ForegroundColor Red
+            if ($Unattended) { exit 0 } else { exit 1 }
+        }
+    }
+
+    if ($UsedAsset) {
+        if ($NoVerify) {
+            Write-Host "install.ps1: AGENT_PLUS_NO_VERIFY=1 -- skipping checksum verification." -ForegroundColor Yellow
+        } else {
+            $SumsPath = Join-Path $TmpDir "SHA256SUMS"
+            $SumsUrl  = Get-AssetSumsUrl $Tag
+            try {
+                Get-RemoteFile -Uri $SumsUrl -OutFile $SumsPath
+                $Ver         = Get-BareVersion $Tag
+                $TarballName = "agent-plus-$Ver.tar.gz"
+                $Expected    = Find-ExpectedHash $SumsPath $TarballName
+                if (-not $Expected) {
+                    Write-Host "install.ps1: SHA256SUMS has no entry for $TarballName -- continuing WITHOUT verification." -ForegroundColor Yellow
+                } else {
+                    $Actual = Get-Sha256Hex $TarPath
+                    if ($Expected -ne $Actual) {
+                        Write-Host "install.ps1: CHECKSUM MISMATCH for $TarballName" -ForegroundColor Red
+                        Write-Host "install.ps1:   expected $Expected" -ForegroundColor Red
+                        Write-Host "install.ps1:   actual   $Actual" -ForegroundColor Red
+                        Write-Host "[install_ps1_checksum_failed] $TarballName expected=$Expected actual=$Actual" -ForegroundColor Red
+                        Write-Host "install.ps1: downloaded tarball discarded; refusing to install an unverified payload." -ForegroundColor Red
+                        Remove-Item $TarPath -Force -ErrorAction SilentlyContinue
+                        exit 1
+                    }
+                    Write-Host "Checksum verified (sha256): $TarballName"
+                }
+            } catch {
+                Write-Host "install.ps1: could not download SHA256SUMS ($SumsUrl) -- continuing WITHOUT verification." -ForegroundColor Yellow
+            }
+        }
     }
 
     Push-Location $TmpDir
