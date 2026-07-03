@@ -358,9 +358,16 @@ class TestUninstallSelfDeleteWindows(_TempHome):
         HOST.__file__ = str(self_bin)
         try:
             real_unlink = Path.unlink
+            # Compare via realpath, not raw strings: the manifest path is
+            # resolve()d by the product code, and on GitHub runners the raw
+            # and resolved forms differ (8.3 short names like RUNNER~1 on
+            # windows-latest; /var -> /private/var on macOS), so a raw
+            # string match silently never intercepts and the stub really
+            # gets deleted ('removed' instead of 'error').
+            self_real = os.path.realpath(str(self_bin))
 
             def fake_unlink(self, *a, **kw):
-                if str(self) == str(self_bin):
+                if os.path.realpath(str(self)) == self_real:
                     raise PermissionError(13, "Access is denied")
                 return real_unlink(self, *a, **kw)
 
