@@ -470,7 +470,41 @@ The `kind` enum reserves slots for future additive use (`settings_hook`, `daemon
 
 #### `--purge` is the one-way door
 
-Every other mode is recoverable via re-install. `--purge` removes user data we own (`.agent-plus/` workspace, feedback logs, marketplace state). It always prompts for the literal word `PURGE` — even under `--non-interactive`. Typing anything else aborts. The friction is intentional. PATH cleanup is NOT performed; if you added `~/.local/bin` to your shell rc, removing it is up to you.
+Every other mode is recoverable via re-install. `--purge` removes user data we own (`.agent-plus/` workspace, feedback logs, marketplace state). It always requires the literal word `PURGE` typed at a real interactive terminal; typing anything else aborts. `--non-interactive`/`--auto`/`--json` (or a piped stdin) do not bypass it — since v0.21.0 a `--purge` run that cannot prompt is refused up front with a structured error instead of blocking on input. The friction is intentional. PATH cleanup is NOT performed; if you added `~/.local/bin` to your shell rc, removing it is up to you.
+
+## The marketplace convention
+
+`<user>/agent-plus-skills` is the convention. Anyone can publish their own collection at their GitHub handle. agent-plus's tooling discovers, installs, and updates them by that naming pattern — borrowed from Homebrew taps and the GitHub Actions marketplace. **No central registry to run.**
+
+```text
+                  ┌─────────────────────────────────────┐
+                  │   osouthgate/agent-plus  (framework)│
+                  │   The 5 universal primitives        │
+                  └────────────────┬────────────────────┘
+                                   │
+                  agent-plus-meta marketplace install
+                                   │
+                                   ▼
+        ┌────────────────────────────────────────────────────┐
+        │  <user>/agent-plus-skills  (anyone can publish)    │
+        │  github-remote, vercel-remote, supabase-remote,    │
+        │  railway-ops, linear-remote, openrouter-remote,    │
+        │  langfuse-remote, hermes-remote, coolify-remote,   │
+        │  hcloud-remote  (the reference marketplace)        │
+        │  + your own at <your-handle>/agent-plus-skills     │
+        └────────────────────────────────────────────────────┘
+```
+
+```bash
+agent-plus-meta marketplace search          # gh search repos topic:agent-plus-skills
+agent-plus-meta marketplace install <user>/agent-plus-skills    # commit-pinned + first-run review
+agent-plus-meta marketplace list
+agent-plus-meta marketplace update [<user>/<repo>]
+agent-plus-meta marketplace prefer <user>/<repo> --skill <name>  # collision resolution
+agent-plus-meta marketplace remove <user>/<repo>
+```
+
+**Trust model — five gates enforced.** Install pins the commit SHA. Nothing in the cloned repo runs at install time. A first-run review is shown once per install (and re-armed on every accepted update). Updates are opt-in only — `--cron` is parsed only so it can be refused. When a marketplace declares `checksums`, install verifies them. Plugins from un-accepted marketplaces are skipped.
 
 ## nextSteps[] chaining
 

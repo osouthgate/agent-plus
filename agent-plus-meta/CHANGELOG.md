@@ -6,6 +6,13 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+### Changed
+- **Skill-picker findability.** Both SKILL.md files in this plugin (`agent-plus-meta`, `agent-plus-installer`) now prefix their frontmatter `description` with `agent-plus | ` so typing "agent-plus" in Claude Code's skill picker surfaces the whole suite instead of six generically-named skills.
+- **Marketplace convention docs moved here.** The root README's "The marketplace convention" section (diagram, lifecycle commands, five-gate trust model) now lives in this plugin's README — the marketplace lifecycle is this plugin's feature — with a compact pointer left at the root. Root README keeps its own `## Versioning` section (framework-level, not marketplace).
+
+### Fixed
+- **README purge paragraph realigned to the v0.21.0 TTY contract.** It still claimed `--purge` "always prompts ... even under `--non-interactive`"; since v0.21.0 an un-promptable `--purge` run (non-TTY stdin, `--json`, `--non-interactive`/`--auto`) is refused up front with a structured error rather than prompting.
+
 ## 0.21.0 - 2026-07-03
 
 Launch-gate hardening (2026-07-03): `--json` script mode + uninstall TTY semantics. The one-line rule, stated plainly: **`--json` implies non-interactive for the scope confirmation; purge always requires a real TTY.**

@@ -1,6 +1,6 @@
 ---
 name: agent-plus-installer
-description: Trigger doctrine for Claude Code — when (and when NOT) to offer to install the agent-plus framework on the user's behalf. Pure markdown skill; the runtime is the existing `install.sh --unattended` one-liner that chains into `agent-plus-meta init --non-interactive --auto`. Surfaces an offer, never auto-executes; honors a session-scope decline flag; gates every offer on a `command -v agent-plus-meta` probe so installed users are never pestered.
+description: agent-plus | Trigger doctrine for Claude Code — when (and when NOT) to offer to install the agent-plus framework on the user's behalf. Pure markdown skill; the runtime is the existing `install.sh --unattended` one-liner that chains into `agent-plus-meta init --non-interactive --auto`. Surfaces an offer, never auto-executes; honors a session-scope decline flag; gates every offer on a `command -v agent-plus-meta` probe so installed users are never pestered.
 when_to_use: |
   Trigger when ALL of the following hold:
   (a) the user is doing work agent-plus has a primitive for, AND

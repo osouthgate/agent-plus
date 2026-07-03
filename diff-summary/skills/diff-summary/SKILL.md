@@ -1,6 +1,6 @@
 ---
 name: diff-summary
-description: One-call structured triage of a git diff. Returns per-file role classification (source/test/config/doc/generated/build/fixture/migration), risk tier (low/medium/high) with reasons, public-API touch detection, co-changed-test detection, secret-risk path flagging, and aggregate stats. Replaces the 5-20 Read calls an agent burns reading each modified file individually to figure out "what kind of change is this and how risky is it". Stateless, no network, stdlib Python only.
+description: agent-plus | One-call structured triage of a git diff. Returns per-file role classification (source/test/config/doc/generated/build/fixture/migration), risk tier (low/medium/high) with reasons, public-API touch detection, co-changed-test detection, secret-risk path flagging, and aggregate stats. Replaces the 5-20 Read calls an agent burns reading each modified file individually to figure out "what kind of change is this and how risky is it". Stateless, no network, stdlib Python only.
 when_to_use: Trigger on "what changed in this branch", "triage this PR", "summarize the diff", "is this PR safe to merge", "what's risky about this change", "what did I touch", pre-commit / pre-PR sanity checks, code-review preparation. Use BEFORE reading individual modified files — the structural picture answers most "what kind of PR is this" questions without reading any file content.
 allowed-tools: Bash(diff-summary:*) Bash(python3 *diff-summary*:*)
 ---
