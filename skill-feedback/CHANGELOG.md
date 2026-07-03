@@ -6,6 +6,8 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.6.0 - 2026-07-03
+
 Docs + tests realigned to the v0.19.4 global-storage behaviour (launch-gate closure; the code migration itself shipped in v0.19.4 / commit 7160c4f).
 
 ### Changed
