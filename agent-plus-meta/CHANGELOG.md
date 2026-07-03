@@ -4,6 +4,23 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## Unreleased
+
+Field-reported (2026-07-02): the `nextSteps[]` funnel chain was broken in three separate ways. All three fixed together since they compound (a coverage gap you can't see because the carrier is suppressed is worse than either bug alone).
+
+### Fixed
+- **`init`'s `nextSteps` were non-runnable human prompts.** `_inject_next_steps` phrased them as `"Ask Claude 'what is this repo?' to trigger repo-analyze"` -- self-referential and useless when the reader IS the agent, not a human relaying a question. Every step across every subcommand is now a literal `"<runnable command> -- <one-line why>"`, command always one of `agent-plus-meta`/`repo-analyze`/`skill-plus`/`skill-feedback`/`diff-summary`/`claude`/`git`.
+- **The JSON envelope -- the only carrier of `nextSteps` -- was suppressed on an interactive TTY with no fallback**, so a human running the CLI directly (not `--json`, not piped) never saw the chain at all. `main()` now prints an ASCII `Next: <step>` / `Then: <step>` footer to stderr whenever the envelope is suppressed. Does not change *when* the envelope itself prints (frozen contract) -- footer only. `--version` (which has no envelope at all) gets the same footer.
+- **Coverage gap: only `init`/`doctor`/`envcheck`/`refresh`/`marketplace`/`extensions` injected `nextSteps`.** `list`, `upgrade-check`, `upgrade`, and `uninstall` emitted none; `marketplace` and `extensions` emitted one generic step regardless of which of their 7 and 4 sub-subcommands actually ran. All 10 top-level subcommands and all 11 sub-subcommands now map onto something specific -- see `README.md`'s "nextSteps[] chaining" table for the full mapping.
+
+### Added
+- **History-branch fork.** New `_has_session_history()` helper (any `~/.claude/projects/*/*.jsonl`, deliberately not decoding project-dir slugs back to a specific repo -- that decoder is its own bug class) forks `init`/`envcheck`(ok)/`doctor`(clean)/`list` between `skill-plus scan` (returning user -- mine session history for skill candidates) and `repo-analyze` (brand-new user -- orient on this codebase first).
+- **`uninstall`'s nextSteps are removal-state-aware.** A dry-run or declined confirmation still points back at `agent-plus-meta uninstall`; a real, confirmed removal does NOT suggest another `agent-plus-meta` command (the bins, including this one, are presumed gone by then) -- it surfaces an outstanding `claude plugin uninstall ...` hint if one exists, else a `git status` sanity check.
+- **`marketplace install` respects the first-run trust gate.** If the marketplace was installed but the first-run prompt was declined, `nextSteps` points at `marketplace remove` (re-accept) instead of `refresh` (which would silently skip an un-accepted marketplace).
+- **`extensions validate` only chains to `refresh` when clean.** A failing validate re-suggests `extensions validate` after fixes instead of chaining into `refresh`, which would otherwise run the broken extension script.
+- **SKILL.md: "Always surface nextSteps".** New explicit instruction that after any agent-plus-meta call, the agent must read `nextSteps` and surface the next command every time -- the funnel is the product's first-win path, and a dropped link breaks onboarding for the rest of the session.
+- **Contract test suite** `test/contract/test_next_steps_contract.py`: walks every top-level subcommand and every marketplace/extensions sub-subcommand with representative fake payloads (format + honesty assertions), a history-branch test (fake `HOME` with/without session transcripts), a TTY-footer test (monkeypatched `isatty`), and a subprocess integration test over the credential-free read-only subcommands.
+
 ## 0.20.0 - 2026-07-03
 
 ### Changed

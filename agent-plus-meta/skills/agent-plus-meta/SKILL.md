@@ -27,6 +27,12 @@ agent-plus-meta refresh                   # resolves github + vercel identity in
 agent-plus-meta envcheck --pretty | jq '.plugins["hermes-remote"].ready'
 ```
 
+## Always surface nextSteps
+
+**After ANY agent-plus-meta call, read `nextSteps` and surface the next command to the user -- every time, not just on the first call.** Every subcommand's JSON envelope carries a `nextSteps` array (1-2 entries, most-important first). Each entry is a literal `"<runnable command> -- <why>"` string; the command always starts with `agent-plus-meta`, `repo-analyze`, `skill-plus`, `skill-feedback`, `diff-summary`, `claude`, or `git` -- it is copy-paste runnable, never a natural-language question re-phrased back at yourself. This chain (roughly: install -> init -> envcheck -> `skill-plus scan` for a returning user with prior session history, or -> `repo-analyze` for a brand-new one -- with an equivalent mapping for doctor/refresh/list/upgrade/upgrade-check/uninstall/marketplace/extensions) is the product's first-win path; dropping it silently anywhere in the chain breaks onboarding for the rest of the session.
+
+If stdout is the human's interactive terminal (no `--json`), the JSON envelope itself is suppressed -- look for the same information in the `Next: ...` / (optional) `Then: ...` lines agent-plus-meta prints to stderr instead. `--version` has no envelope at all but still prints a `Next: ...` stderr line the same way.
+
 ## Headline commands
 
 ```bash

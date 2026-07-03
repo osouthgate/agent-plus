@@ -3888,29 +3888,175 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _inject_next_steps(out: dict, cmd: str, payload: dict) -> None:
+def _has_session_history(home: Optional[Path] = None) -> bool:
+    """Cheap any-history signal used to fork the nextSteps funnel: does the
+    user have ANY Claude Code session transcript anywhere on disk? Returning
+    users (True) get routed toward `skill-plus scan` (mine existing session
+    habits for skill candidates); brand-new users (False) get routed toward
+    `repo-analyze` (orient on this codebase first).
+
+    Deliberately just globs for ANY `*.jsonl` under `~/.claude/projects/*/`
+    rather than decoding a project-dir name back to THIS repo's path --
+    that slug decoder (see _subcommands/init.py's _decode_claude_project_dir)
+    is lossy and a known bug class. "Have they used Claude Code at all" is
+    the only signal this fork needs, not "have they used it on this repo".
+    """
+    root = (home or Path.home()) / ".claude" / "projects"
+    try:
+        if not root.is_dir():
+            return False
+        next(root.glob("*/*.jsonl"))
+        return True
+    except (StopIteration, OSError):
+        return False
+
+
+# The two-way fork every "what next" step ultimately bottoms out on.
+_STEP_HISTORY_TRUE = (
+    "skill-plus scan -- mine your session history for repeatable commands to scaffold into skills"
+)
+_STEP_HISTORY_FALSE = "repo-analyze -- orient Claude on this codebase"
+
+
+def _history_branched_step() -> str:
+    return _STEP_HISTORY_TRUE if _has_session_history() else _STEP_HISTORY_FALSE
+
+
+def _uninstall_next_steps(payload: dict) -> list[str]:
+    """uninstall is the one command where suggesting more agent-plus-meta
+    commands can be dishonest: once a real (non-dry-run, confirmed) removal
+    runs, the default tier always includes the primitive bins, so THIS bin
+    may no longer be on disk by the time the user reads the output. Only
+    suggest re-running agent-plus-meta when nothing was actually removed
+    yet (dry-run, or the user declined the confirmation prompt)."""
+    if bool(payload.get("dry_run")):
+        return [
+            "agent-plus-meta uninstall -- re-run without --dry-run and confirm "
+            "to actually remove the listed paths"
+        ]
+    if not bool(payload.get("user_confirmed")):
+        return [
+            "agent-plus-meta uninstall -- re-run and confirm (y) to actually "
+            "remove the listed paths"
+        ]
+    paths = payload.get("paths") or []
+    kept_hints = [
+        p.get("hint") for p in paths
+        if isinstance(p, dict) and p.get("status") == "kept" and p.get("hint")
+    ]
+    if kept_hints:
+        return [f"{kept_hints[0]} -- remove the out-of-scope Claude Code plugin registration too"]
+    return ["git status -- confirm no agent-plus files remain tracked in this repo"]
+
+
+def _marketplace_next_steps(sub_cmd: Optional[str], payload: dict) -> list[str]:
+    marketplace = payload.get("marketplace")
+    if not isinstance(marketplace, dict):
+        marketplace = {}
+    has_error = bool(payload.get("error"))
+
+    if sub_cmd == "init":
+        owner, name = marketplace.get("owner"), marketplace.get("name")
+        if not has_error and owner and name:
+            return [
+                f"agent-plus-meta marketplace install {owner}/{name} -- "
+                "register the marketplace you just scaffolded"
+            ]
+        return ["agent-plus-meta marketplace list -- see what's installed so far"]
+
+    if sub_cmd == "install":
+        owner, name = marketplace.get("owner"), marketplace.get("name")
+        if has_error:
+            return ["agent-plus-meta marketplace list -- see what's currently installed"]
+        if marketplace.get("first_run_accepted") is False and owner and name:
+            return [
+                f"agent-plus-meta marketplace remove {owner}/{name} -- not "
+                "accepted yet; remove and re-install to accept the first-run prompt"
+            ]
+        return ["agent-plus-meta refresh -- resolve the newly installed marketplace's identity/services"]
+
+    if sub_cmd == "search":
+        results = payload.get("results") or []
+        if results and isinstance(results[0], dict) and results[0].get("slug"):
+            return [f"agent-plus-meta marketplace install {results[0]['slug']} -- install the top search result"]
+        return ["agent-plus-meta marketplace search -- no matches for this query; try broader keywords"]
+
+    if sub_cmd in ("update", "remove", "prefer", "list"):
+        return ["agent-plus-meta doctor --pretty -- confirm the framework is still healthy after this change"]
+
+    # No (or unrecognized) sub-subcommand -- still satisfy "nextSteps always non-empty".
+    return ["agent-plus-meta marketplace list -- see installed marketplaces"]
+
+
+def _extensions_next_steps(sub_cmd: Optional[str], payload: dict) -> list[str]:
+    has_error = bool(payload.get("error"))
+
+    if sub_cmd == "add":
+        if not has_error:
+            return ["agent-plus-meta extensions validate -- confirm the new extension is wired correctly"]
+        return ["agent-plus-meta extensions list -- see current extensions"]
+
+    if sub_cmd == "validate":
+        if payload.get("ok"):
+            return ["agent-plus-meta refresh -- run the newly-validated extensions"]
+        return ["agent-plus-meta extensions validate --pretty -- re-run after fixing the reported issues"]
+
+    if sub_cmd in ("list", "remove"):
+        return ["agent-plus-meta extensions validate -- check registered extensions for problems"]
+
+    return ["agent-plus-meta extensions list -- see registered extensions"]
+
+
+def _inject_next_steps(
+    out: dict, cmd: str, payload: dict, sub_cmd: Optional[str] = None,
+) -> None:
+    """Populate `out["nextSteps"]` -- the funnel chain every agent-plus-meta
+    call hands back so an agent always knows the next runnable command.
+
+    Contract: every step is a string `"<runnable command> -- <one-line
+    why>"`; the command MUST start with one of agent-plus-meta /
+    repo-analyze / skill-plus / skill-feedback / diff-summary / claude /
+    git -- never a natural-language "ask Claude to..." phrasing, which is
+    non-runnable when the reader IS the agent. `sub_cmd` carries the
+    marketplace/extensions sub-subcommand (`marketplace_cmd` / `ext_cmd`
+    from argparse) so those two dispatch commands can map on what actually
+    ran rather than emitting one generic step for every sub-subcommand.
+    """
     steps: list[str] = []
     if cmd == "init":
         steps = [
-            "Ask Claude 'what is this repo?' to trigger repo-analyze",
-            "Ask Claude 'what changed on this branch?' to trigger diff-summary",
+            "agent-plus-meta envcheck -- confirm which plugin env vars are already set",
+            _history_branched_step(),
         ]
     elif cmd == "doctor":
         issues = payload.get("issues") or []
         if issues:
-            steps = ["Fix the reported issues, then re-run: agent-plus-meta doctor --pretty"]
+            steps = ["agent-plus-meta doctor --pretty -- re-run after fixing the reported issues above"]
         else:
-            steps = ["repo-analyze -- orient Claude on this codebase"]
+            steps = [_history_branched_step()]
     elif cmd == "envcheck":
         missing = payload.get("missing") or []
         if missing:
-            steps = ["Set the missing env vars, then re-run: agent-plus-meta envcheck"]
+            steps = ["agent-plus-meta envcheck -- re-run after setting the missing env vars listed above"]
         else:
-            steps = ["agent-plus-meta doctor --pretty -- full health check"]
+            steps = [_history_branched_step()]
     elif cmd == "refresh":
         steps = ["agent-plus-meta doctor --pretty -- verify services resolved correctly"]
-    elif cmd in ("marketplace", "extensions"):
-        steps = ["agent-plus-meta list -- see all installed plugins and versions"]
+    elif cmd == "list":
+        steps = [_history_branched_step()]
+    elif cmd == "upgrade-check":
+        if payload.get("verdict") == "upgrade_available":
+            steps = ["agent-plus-meta upgrade -- install the newer version now"]
+        else:
+            steps = ["agent-plus-meta doctor --pretty -- confirm the framework is healthy"]
+    elif cmd == "upgrade":
+        steps = ["agent-plus-meta doctor --pretty -- verify the framework's health after this upgrade attempt"]
+    elif cmd == "uninstall":
+        steps = _uninstall_next_steps(payload)
+    elif cmd == "marketplace":
+        steps = _marketplace_next_steps(sub_cmd, payload)
+    elif cmd == "extensions":
+        steps = _extensions_next_steps(sub_cmd, payload)
     if steps:
         out["nextSteps"] = steps
 
@@ -3932,6 +4078,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.version:
         print(f"{TOOL_NAME} {_plugin_version()}")
+        # No JSON envelope for --version (frozen contract; see
+        # test/contract/test_envelope_contract.py). Still give interactive
+        # users the funnel footer so `--version` isn't a dead end.
+        if sys.stdout.isatty():
+            sys.stderr.write("\nNext: agent-plus-meta doctor --pretty -- full health check\n")
         return 0
 
     handlers = {
@@ -3971,13 +4122,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
 
     out = _with_tool_meta(payload)
-    _inject_next_steps(out, args.cmd, payload)
+    # marketplace/extensions are dispatch commands; _inject_next_steps needs
+    # to know which sub-subcommand actually ran (marketplace_cmd / ext_cmd)
+    # to map onto a specific next step instead of one generic step for all
+    # of init/install/list/update/remove/search/prefer (or list/validate/
+    # add/remove). getattr(..., None) is safe: argparse only sets these
+    # dest names on the Namespace when that subparser's branch was taken.
+    sub_cmd = getattr(args, "marketplace_cmd", None) or getattr(args, "ext_cmd", None)
+    _inject_next_steps(out, args.cmd, payload, sub_cmd)
     indent = 2 if args.pretty else None
     # Suppress raw JSON envelope when stdout is an interactive terminal — the
     # human has already seen the pretty progress output on stderr. Pass --json
     # to force JSON output regardless (for scripts that pipe from a terminal).
     force_json = getattr(args, "force_json", False)
-    if force_json or not sys.stdout.isatty():
+    envelope_suppressed = (not force_json) and sys.stdout.isatty()
+    if not envelope_suppressed:
         print(json.dumps(out, ensure_ascii=False, indent=indent))
 
     # init --pretty: append a human-readable "Suggested skills" section to
@@ -3991,6 +4150,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     # stderr, leaving the JSON envelope untouched on stdout.
     if args.cmd == "doctor" and getattr(args, "pretty", False) and isinstance(out, dict):
         sys.stderr.write(_render_doctor_pretty(out) + "\n")
+
+    # TTY footer (nextSteps-funnel fix): when the envelope above was
+    # suppressed because stdout is an interactive terminal, the human never
+    # sees nextSteps -- it only ever went into the (unprinted) JSON. Print
+    # an ASCII "Next:"/"Then:" footer to stderr so the funnel chain is
+    # visible either way. This does NOT change *when* the envelope itself
+    # prints (frozen contract) -- it only adds a footer alongside it.
+    if envelope_suppressed and isinstance(out, dict):
+        steps = out.get("nextSteps")
+        if steps:
+            sys.stderr.write(f"\nNext: {steps[0]}\n")
+            if len(steps) > 1:
+                sys.stderr.write(f"Then: {steps[1]}\n")
     return 0
 
 
