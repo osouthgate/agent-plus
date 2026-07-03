@@ -126,6 +126,39 @@ def candidates_log_path() -> Path:
     return project_state_root() / "candidates.jsonl"
 
 
+def routine_candidates_log_path() -> Path:
+    """Temporal-lens candidates (kind: routine | habit). Deliberately global
+    (user_config_root, not project_state_root) -- cadence/habit is a personal
+    cross-repo behavior pattern, not one repo's state, independent of however
+    candidates_log_path() happens to be scoped. SKILL_PLUS_DIR overrides for
+    test isolation (checked here directly since user_config_root() does not
+    itself consult the override)."""
+    override = os.environ.get("SKILL_PLUS_DIR")
+    if override:
+        return Path(override).expanduser().resolve() / "routine-candidates.jsonl"
+    return user_config_root() / "routine-candidates.jsonl"
+
+
+def routines_adopted_log_path() -> Path:
+    """Boomerang log: which routine/habit candidates the user adopted or
+    dismissed. Global, same override semantics as routine_candidates_log_path()."""
+    override = os.environ.get("SKILL_PLUS_DIR")
+    if override:
+        return Path(override).expanduser().resolve() / "routines-adopted.jsonl"
+    return user_config_root() / "routines-adopted.jsonl"
+
+
+def blocks_log_path() -> Path:
+    """Friction-lens block records (tool-use permission blocks joined to the
+    action that triggered them). Global like candidates_log_path() -- friction
+    is a personal cross-repo pattern, not one repo's state. SKILL_PLUS_DIR
+    overrides for test isolation."""
+    override = os.environ.get("SKILL_PLUS_DIR")
+    if override:
+        return Path(override).expanduser().resolve() / "blocks.jsonl"
+    return user_config_root() / "blocks.jsonl"
+
+
 def last_scan_path() -> Path:
     return project_state_root() / "last-scan.txt"
 
@@ -365,6 +398,9 @@ def _load_subcommand(name: str):
                 "project_state_root_with_source": project_state_root_with_source,
                 "user_config_root": user_config_root,
                 "candidates_log_path": candidates_log_path,
+                "routine_candidates_log_path": routine_candidates_log_path,
+                "routines_adopted_log_path": routines_adopted_log_path,
+                "blocks_log_path": blocks_log_path,
                 "last_scan_path": last_scan_path,
                 "consent_path": consent_path,
                 "config_path": config_path,
@@ -395,6 +431,7 @@ def _stub(name: str):
 SUBCOMMANDS = (
     "scan", "propose", "install-cron", "scaffold", "list", "feedback", "promote",
     "globalize", "localize", "where", "team-sync", "collisions", "inquire", "review",
+    "routine",
 )
 
 
@@ -444,6 +481,27 @@ def build_parser() -> argparse.ArgumentParser:
     # propose
     sp = sub.add_parser("propose", help="show ranked candidates from the candidate log")
     sp.add_argument("--limit", type=int, default=10)
+    sp.add_argument("--project", default=None)
+    sp.add_argument("--kind",
+                    choices=["skill", "routine", "habit", "blocks", "all"],
+                    default="skill",
+                    help="skill (default, frequency candidates) | routine | "
+                         "habit | all (routine+habit) | blocks (friction lens: "
+                         "tool-use permission blocks, read from blocks.jsonl). "
+                         "routine/habit read the temporal-lens candidate log.")
+    sp.add_argument("--no-settings", dest="no_settings", action="store_true",
+                    help="(--kind blocks only) skip the settings.json coverage "
+                         "cross-reference; emit raw historical block counts.")
+    _add_envelope_args(sp)
+
+    # routine (boomerang: mark a routine/habit candidate adopted or dismissed)
+    sp = sub.add_parser("routine",
+                        help="adopt/dismiss a routine|habit candidate (boomerang)")
+    grp = sp.add_mutually_exclusive_group(required=True)
+    grp.add_argument("--adopt", metavar="ID",
+                     help="mark candidate ID adopted (suppressed from future scans)")
+    grp.add_argument("--dismiss", metavar="ID",
+                     help="mark candidate ID dismissed (de-ranked, annotated)")
     sp.add_argument("--project", default=None)
     _add_envelope_args(sp)
 

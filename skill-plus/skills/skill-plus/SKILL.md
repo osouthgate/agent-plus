@@ -1,7 +1,7 @@
 ---
 name: skill-plus
 description: Mine the Claude Code session log to find commands the user keeps typing by hand, then scaffold them into proper Claude skills under `.claude/skills/<name>/`. Read-only audit of existing skills against the framework contract via `list`. Cross-source feedback aggregator joining `skill-feedback` ratings with implicit session-mining failure signals via `feedback`. Promote project-local skills to a `<user>/agent-plus-skills` marketplace via `promote`. Stdlib Python, local-only, no network.
-when_to_use: Trigger when the user says "I keep doing this", "I've done this three times", "I keep running the same command", "make this repeatable", "I do this every PR", "make this a skill", "what skills should I have", "audit my skills", "scaffold a skill for X", "promote this skill to my marketplace", "show me what I do repeatedly", "feedback on the framework", "is this skill any good", "session mining", "what's in my session log". Also trigger AFTER a stretch of repetitive Bash work where the user expresses friction — surface `skill-plus propose` to show the candidates that have already been mined.
+when_to_use: Trigger when the user says "I keep doing this", "I've done this three times", "I keep running the same command", "make this repeatable", "I do this every PR", "make this a skill", "what skills should I have", "audit my skills", "scaffold a skill for X", "promote this skill to my marketplace", "show me what I do repeatedly", "feedback on the framework", "is this skill any good", "session mining", "what's in my session log", "what could be a routine", "what do I do on a schedule", "what should I automate", "turn this into a routine", "I do this every morning", "what should I cron". For cadence questions surface `skill-plus propose --kind all` (routine = schedulable, habit = diffuse repeat). Also trigger AFTER a stretch of repetitive Bash work where the user expresses friction — surface `skill-plus propose` to show the candidates that have already been mined.
 allowed-tools: Bash(skill-plus:*) Bash(python3 *skill-plus*:*)
 ---
 
@@ -21,6 +21,11 @@ skill-plus scan --accept-consent
 
 # Show ranked candidates from the candidate log
 skill-plus propose --pretty
+
+# Cadence lens: schedulable routines vs diffuse habits (from the same scan)
+skill-plus propose --kind all --pretty
+skill-plus routine --adopt <id>     # you set this routine up -> stop suggesting it
+skill-plus routine --dismiss <id>   # not useful -> de-rank
 
 # Scaffold the top candidate into a real skill
 skill-plus scaffold railway-probe \
