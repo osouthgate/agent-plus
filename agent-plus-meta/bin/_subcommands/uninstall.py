@@ -3,8 +3,17 @@
 Safe-by-default uninstall with opt-in escalation. The default scope removes
 only the 5 framework primitive bins. `--workspace`, `--marketplaces`,
 `--all`, and `--purge` escalate explicitly. `--purge` is the one-way door:
-it always prompts for the literal word `PURGE`, even under
-`--non-interactive`.
+it always requires the literal word `PURGE` typed at a real interactive
+terminal. `--non-interactive`/`--auto`/`--json` do NOT bypass it -- when any
+of those is set (or stdin is not a TTY) a `--purge` run is refused with a
+clean structured error (rc 1) instead of blocking on a prompt nobody can
+answer (or crashing with EOFError at end-of-input).
+
+The y/N scope confirmation prompts only when the session is genuinely
+interactive: not `--non-interactive`, not `--json`, and stdin is a TTY.
+When the prompt is skipped for any of those reasons, the run proceeds with
+the same auto-confirmed semantics `--non-interactive` has always had. The
+envelope's `interactive` field reflects this actual gating.
 
 Stdlib only. Pathlib everywhere. UTF-8 file I/O. `subprocess.run([list])`
 shape only (we don't shell out at all today). `bind(host)` mirrors the
@@ -310,6 +319,16 @@ def build_manifest(*, scope: str, install_dir: Path,
 # ─── confirmation layer ──────────────────────────────────────────────────────
 
 
+def _stdin_is_tty() -> bool:
+    """True iff stdin exists and is a real terminal. Defensive: a closed or
+    replaced stdin (pythonw, some CI harnesses) can raise instead of
+    returning False."""
+    try:
+        return bool(sys.stdin is not None and sys.stdin.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
 def _read_purge_confirmation() -> bool:
     """Return True iff the user typed literal `PURGE`. EOF / KeyboardInterrupt
     aborts."""
@@ -552,8 +571,43 @@ def cmd_uninstall(args: argparse.Namespace) -> dict:
     scope = _scope_from_args(args)
     dry_run = bool(getattr(args, "dry_run", False))
     non_interactive = bool(getattr(args, "non_interactive", False))
-    json_only = bool(getattr(args, "json", False))
-    interactive = not (non_interactive or json_only)
+    # The subparser --json flag shares dest="force_json" with the top-level
+    # flag, so `--json` works in both positions (before/after the subcommand).
+    force_json = bool(getattr(args, "force_json", False))
+    # A prompt can only be answered when nobody asked us not to prompt AND a
+    # human is actually attached. --json is script mode (implies
+    # non-interactive for the scope confirmation); piped/closed stdin means
+    # no one can type. The envelope's `interactive` field records this.
+    interactive = (not non_interactive) and (not force_json) and _stdin_is_tty()
+
+    # PURGE one-way door, TTY-gated (T6): the literal-PURGE confirmation can
+    # never be delegated to a flag, so a --purge run that cannot prompt
+    # (non-TTY stdin, --json, or --non-interactive/--auto) is refused up
+    # front with a clean structured error (rc 1) instead of blocking forever
+    # on input() or dying with EOFError. --dry-run stays allowed: it never
+    # prompts and never removes, so scripts may still preview the purge
+    # manifest.
+    if scope == "purge" and not dry_run and not interactive:
+        host = _h()
+        raise host.StructuredError(
+            "purge requires an interactive terminal; run without --purge "
+            "or confirm at a TTY",
+            problem=(
+                "--purge was requested but the PURGE confirmation prompt "
+                "cannot be answered (stdin is not a TTY, or "
+                "--json/--non-interactive/--auto was set)"
+            ),
+            cause=(
+                "the purge one-way door always requires a human typing the "
+                "literal word PURGE at a real terminal; --auto, "
+                "--non-interactive and --json deliberately do not bypass it"
+            ),
+            fix=(
+                "re-run `agent-plus-meta uninstall --purge` from an "
+                "interactive terminal, or drop --purge (use --all for the "
+                "widest non-interactive scope, or --dry-run to preview)"
+            ),
+        )
 
     # Build manifest first (pure; safe to print even on dry-run / abort).
     paths = build_manifest(scope=scope, install_dir=install_dir, prefix=prefix)
@@ -572,7 +626,8 @@ def cmd_uninstall(args: argparse.Namespace) -> dict:
         )
 
     if scope == "purge":
-        # Always prompt PURGE — even under --non-interactive (T6 one-way door).
+        # Real TTY guaranteed here (the non-interactive/--json/non-TTY case
+        # was refused above). Always prompt for the literal word PURGE.
         _print_default_preview(paths, scope)
         user_confirmed = _read_purge_confirmation()
         if not user_confirmed:
@@ -582,8 +637,11 @@ def cmd_uninstall(args: argparse.Namespace) -> dict:
                 interactive=interactive, user_confirmed=False,
                 install_dir=install_dir, paths=paths, errors=errors,
             )
-    elif non_interactive:
-        # No prompt; the explicit flag set IS the confirmation.
+    elif not interactive:
+        # No prompt possible or wanted (--non-interactive, --json script
+        # mode, or stdin is not a TTY): proceed with the auto-confirmed
+        # semantics the --non-interactive path has always had. The explicit
+        # flag set (or script context) IS the confirmation.
         user_confirmed = True
     else:
         # Interactive default: preview + y/N confirm.

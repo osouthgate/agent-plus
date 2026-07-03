@@ -421,6 +421,123 @@ class TestTTYFooter(unittest.TestCase):
         self.assertEqual(err_buf.getvalue(), "")
 
 
+class _FakeVersionResp:
+    """Minimal urlopen()-shaped response for upgrade-check probes."""
+
+    def __init__(self, body: bytes = b"9.9.9", status: int = 200):
+        self._body = body
+        self._status = status
+
+    def read(self):  # noqa: D102
+        return self._body
+
+    def getcode(self):  # noqa: D102
+        return self._status
+
+    def __enter__(self):  # noqa: D105
+        return self
+
+    def __exit__(self, *exc):  # noqa: D105
+        return False
+
+
+class TestJsonFlagBothPositionsTTY(unittest.TestCase):
+    """v0.20.x contract: `--json` forces the JSON envelope onto stdout even
+    when stdout is an interactive TTY, in BOTH positions -- top-level
+    (`--json <cmd>`, which always worked) and after the subcommand
+    (`<cmd> --json`, the documented script-mode spelling, which used to be
+    silently swallowed: upgrade-check/upgrade/uninstall each declared their
+    own --json with dest="json" that main() never read). Reuses the
+    _TTYStringIO fake-TTY pattern from TestTTYFooter. Envelope print timing
+    for every other invocation shape is unchanged (frozen contract)."""
+
+    def _invoke_tty(self, argv: list[str], home: Path):
+        out_buf, err_buf = _TTYStringIO(), io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(sys, "stdout", out_buf))
+            stack.enter_context(patch.object(sys, "stderr", err_buf))
+            stack.enter_context(patch.object(Path, "home", return_value=home))
+            rc = ap.main(argv)
+        return rc, out_buf.getvalue(), err_buf.getvalue()
+
+    def _assert_envelope_forced(self, rc, out, err, ctx: str) -> dict:
+        self.assertEqual(rc, 0, f"{ctx}: rc={rc}; stderr={err!r}")
+        self.assertTrue(
+            out.strip(),
+            f"{ctx}: stdout empty -- the envelope was suppressed on a TTY "
+            "despite --json",
+        )
+        envelope = json.loads(out)
+        self.assertIn("tool", envelope, ctx)
+        self.assertNotIn(
+            "Next: ", err,
+            f"{ctx}: stderr footer must be suppressed when the envelope prints",
+        )
+        return envelope
+
+    # ── uninstall (dry-run: prompts nothing, removes nothing) ──────────────
+
+    def test_uninstall_json_after_subcommand_forces_envelope_on_tty(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            home.mkdir()
+            rc, out, err = self._invoke_tty(
+                ["uninstall", "--json", "--dry-run"], home)
+        env = self._assert_envelope_forced(
+            rc, out, err, "uninstall --json (flag after subcommand)")
+        self.assertEqual(env.get("action"), "uninstall")
+        self.assertTrue(env.get("dry_run"))
+
+    def test_uninstall_json_before_subcommand_forces_envelope_on_tty(self):
+        # Regression guard: the top-level spelling must keep working with
+        # the shared dest (subparser default=SUPPRESS must not clobber it).
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            home.mkdir()
+            rc, out, err = self._invoke_tty(
+                ["--json", "uninstall", "--dry-run"], home)
+        env = self._assert_envelope_forced(
+            rc, out, err, "--json uninstall (flag before subcommand)")
+        self.assertEqual(env.get("action"), "uninstall")
+
+    def test_uninstall_no_json_on_tty_still_suppresses_envelope(self):
+        # Frozen contract: withOUT --json, an interactive TTY still gets the
+        # suppressed envelope + stderr footer.
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            home.mkdir()
+            rc, out, err = self._invoke_tty(["uninstall", "--dry-run"], home)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        self.assertIn("Next: ", err)
+
+    # ── upgrade-check (network mocked) ──────────────────────────────────────
+
+    def test_upgrade_check_json_after_subcommand_forces_envelope_on_tty(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            home.mkdir()
+            with patch("urllib.request.urlopen",
+                       return_value=_FakeVersionResp()):
+                rc, out, err = self._invoke_tty(
+                    ["upgrade-check", "--json"], home)
+        env = self._assert_envelope_forced(
+            rc, out, err, "upgrade-check --json (flag after subcommand)")
+        self.assertIn("verdict", env)
+
+    def test_upgrade_check_json_before_subcommand_forces_envelope_on_tty(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            home.mkdir()
+            with patch("urllib.request.urlopen",
+                       return_value=_FakeVersionResp()):
+                rc, out, err = self._invoke_tty(
+                    ["--json", "upgrade-check"], home)
+        env = self._assert_envelope_forced(
+            rc, out, err, "--json upgrade-check (flag before subcommand)")
+        self.assertIn("verdict", env)
+
+
 class TestIntegrationSubprocess(unittest.TestCase):
     """Runs the safe, read-only, credential-free subcommands as a real
     subprocess (stdout is never a TTY under subprocess capture, so the

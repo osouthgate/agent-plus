@@ -146,6 +146,23 @@ PLUGIN_BINARY_REQUIREMENT: dict[str, str] = {
 # ─── workspace resolution ────────────────────────────────────────────────────
 
 
+def _msys_to_windows(p: str) -> str:
+    """Convert MSYS/Git-Bash paths like /c/dev/foo -> C:/dev/foo on Windows.
+
+    Git for Windows can emit POSIX-style toplevel paths; Path("/c/dev/foo")
+    on Windows silently mis-roots to C:\\c\\dev\\foo (real past incident: a
+    stamp landed in C:\\c\\dev\\<repo>\\.agent-plus\\ -- see TODOS.md's
+    "Windows path audit" item). Same accepted idiom as skill-feedback /
+    repo-analyze / the init.py cold-repo hook template. No-op on non-Windows
+    platforms and for paths that are already Windows-shaped.
+    """
+    if sys.platform == "win32":
+        m = re.match(r"^/([a-zA-Z])(/.*)$", p)
+        if m:
+            return m.group(1).upper() + ":" + m.group(2)
+    return p
+
+
 def _git_toplevel(cwd: Optional[Path] = None) -> Optional[Path]:
     try:
         out = subprocess.run(
@@ -159,7 +176,7 @@ def _git_toplevel(cwd: Optional[Path] = None) -> Optional[Path]:
     if out.returncode != 0:
         return None
     line = out.stdout.strip()
-    return Path(line) if line else None
+    return Path(_msys_to_windows(line)) if line else None
 
 
 def resolve_workspace(dir_flag: Optional[str] = None) -> tuple[Path, str]:
@@ -3695,8 +3712,18 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="set snooze with explicit ladder step")
     s_uc.add_argument("--clear-snooze", dest="clear_snooze", action="store_true",
                       help="reset the snooze ladder to none")
-    s_uc.add_argument("--json", action="store_true",
-                      help="emit the JSON envelope (default; flag is for symmetry)")
+    # dest="force_json" so the flag works both before AND after the
+    # subcommand (main() reads only force_json). default=SUPPRESS is
+    # load-bearing: argparse (3.7+) parses subparser args into a FRESH
+    # namespace and copies every attr back over the parent's, so a plain
+    # store_true default False here would clobber a `--json` given before
+    # the subcommand. SUPPRESS keeps the attr out of the sub-namespace
+    # unless the flag was actually passed at this position.
+    s_uc.add_argument("--json", dest="force_json", action="store_true",
+                      default=argparse.SUPPRESS,
+                      help="always emit the JSON envelope on stdout even when "
+                           "stdout is a TTY (accepted before or after the "
+                           "subcommand)")
     s_uc.add_argument("--non-interactive", dest="non_interactive",
                       action="store_true",
                       help="alias for non-TTY-detection scripts")
@@ -3725,8 +3752,13 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="restore the most recent .bak set; no upgrade")
     s_up.add_argument("--dry-run", dest="dry_run", action="store_true",
                       help="show what would happen, change nothing")
-    s_up.add_argument("--json", action="store_true",
-                      help="emit the JSON envelope (default; flag is for symmetry)")
+    # dest="force_json" + default=SUPPRESS: see the upgrade-check --json
+    # comment above for why SUPPRESS is load-bearing.
+    s_up.add_argument("--json", dest="force_json", action="store_true",
+                      default=argparse.SUPPRESS,
+                      help="always emit the JSON envelope on stdout even when "
+                           "stdout is a TTY (accepted before or after the "
+                           "subcommand)")
     s_up.add_argument("--no-telemetry", dest="no_telemetry", action="store_true",
                       help="disable the placeholder telemetry ping (no-op today)")
 
@@ -3744,19 +3776,29 @@ def _build_parser() -> argparse.ArgumentParser:
     s_un.add_argument("--all", action="store_true",
                       help="bins + workspace + marketplaces (does NOT include --purge)")
     s_un.add_argument("--purge", action="store_true",
-                      help="--all PLUS any other agent-plus state we own; ALWAYS prompts "
-                           "(literal 'PURGE' typed) even under --non-interactive")
+                      help="--all PLUS any other agent-plus state we own; requires "
+                           "typing the literal word PURGE at a real interactive "
+                           "terminal. Refused cleanly (rc 1) when stdin is not a "
+                           "TTY or --json/--non-interactive is set")
     s_un.add_argument("--dry-run", dest="dry_run", action="store_true",
                       help="print manifest + envelope; remove nothing")
     s_un.add_argument("--non-interactive", dest="non_interactive",
                       action="store_true",
                       help="skip prompt; auto-accept the safe default OR explicitly-flagged "
-                           "scope. Does NOT bypass --purge confirmation.")
+                           "scope. Does NOT bypass --purge confirmation: --purge is "
+                           "refused (rc 1) under this flag.")
     s_un.add_argument("--auto", dest="non_interactive", action="store_true",
                       help="alias for --non-interactive (mirrors init/upgrade idiom). "
-                           "Does NOT bypass --purge confirmation (T6 one-way door).")
-    s_un.add_argument("--json", action="store_true",
-                      help="emit JSON envelope only (suppress human preview)")
+                           "Does NOT bypass --purge confirmation (T6 one-way door): "
+                           "--purge is refused (rc 1) under this flag.")
+    # dest="force_json" + default=SUPPRESS: see the upgrade-check --json
+    # comment above for why SUPPRESS is load-bearing.
+    s_un.add_argument("--json", dest="force_json", action="store_true",
+                      default=argparse.SUPPRESS,
+                      help="emit JSON envelope only (suppress human preview; "
+                           "accepted before or after the subcommand). Implies "
+                           "non-interactive for the scope confirmation; --purge "
+                           "still requires a real TTY")
     s_un.add_argument("--install-dir", dest="install_dir",
                       help="explicit override for $INSTALL_DIR "
                            "(defaults to AGENT_PLUS_INSTALL_DIR or ~/.local/bin)")
@@ -4134,6 +4176,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Suppress raw JSON envelope when stdout is an interactive terminal — the
     # human has already seen the pretty progress output on stderr. Pass --json
     # to force JSON output regardless (for scripts that pipe from a terminal).
+    # --json is accepted both before and after the subcommand; both spellings
+    # land in force_json (the subparser flags share the dest).
     force_json = getattr(args, "force_json", False)
     envelope_suppressed = (not force_json) and sys.stdout.isatty()
     if not envelope_suppressed:
