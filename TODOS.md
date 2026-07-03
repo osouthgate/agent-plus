@@ -53,3 +53,13 @@ Deferred items that don't fit active plans but must not be forgotten.
 **Why:** Cross-platform is a hard requirement for agent-plus (Windows + macOS + Linux). A Windows-only regression -- like the collapsed/stripped/re-prepended slug encoder that silently found 0 sessions -- can ship again without CI ever noticing, because nothing in the pipeline runs on `windows-latest` or `macos-latest`.
 
 **How to apply:** Add `windows-latest` (and ideally `macos-latest`) to the `runs-on` matrix in `ci.yml` for the plugin test job(s). Watch for POSIX-isms (path separators, shell built-ins) that pass today only because they've never run on Windows in CI.
+
+---
+
+## bootstrap_fixtures.py must scrub secret-shaped strings on copy (small, security)
+
+**What:** `evals/scripts/bootstrap_fixtures.py` copies real local repos verbatim into `evals/fixtures/<name>/` (gitignored, local-only). A 2026-07-03 adversarial review found a real Langfuse `sk-lf-`/`pk-lf-` key pair materialized into `evals/fixtures/rainshift/archive/plans/langfuse-otel-observability.md` this way.
+
+**Why:** the fixture dirs are gitignored so nothing ships, but plaintext credentials on disk outside their source repo is silent risk, and it recurs on every re-bootstrap of a real repo.
+
+**How to apply:** route every text file through the same `scrub_text`/`_SECRET_PATTERNS` machinery skill-plus uses (or a copy of the pattern list) during the bootstrap copy; add a test with a seeded fake `sk-lf-` token. Rotate the specific leaked key at the Langfuse instance regardless (its true source is the rainshift repo itself).
