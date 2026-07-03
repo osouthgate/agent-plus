@@ -821,7 +821,7 @@ def cmd_upgrade(args: argparse.Namespace) -> dict:
     bak_dir = _create_bak_dir()
 
     bins_replaced: list = []
-    bak_paths: dict[str, Path] = {}
+    bak_paths: dict[str, Optional[Path]] = {}
     fail_count = 0
 
     for name in PRIMITIVES:

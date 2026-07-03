@@ -23,3 +23,16 @@ plans/*
 
 # agent-plus workspace cache (per-repo, populated by `agent-plus init/refresh`)
 .agent-plus/
+
+# evals (local-only; not run in CI)
+evals/__pycache__/
+evals/reports/
+evals/ollama.env
+
+# Minimal two-commit git fixtures (generated; nested .git cannot be tracked sanely in parent)
+/evals/fixtures/osdb/
+/evals/fixtures/rainshift/
+/evals/fixtures/tinker-tailor/
+
+# Local eval benchmark runs (commit-keyed; do not commit rolling history)
+evals/benchmarks/history.jsonl

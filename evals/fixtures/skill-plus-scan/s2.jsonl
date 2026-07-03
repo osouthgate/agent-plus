@@ -1,0 +1,2 @@
+{"type": "assistant", "sessionId": "s2", "message": {"type": "message", "role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "railway logs --service api"}}]}}
+{"type": "assistant", "sessionId": "s2", "message": {"type": "message", "role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "railway logs --service api"}}]}}
