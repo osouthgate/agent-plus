@@ -4,7 +4,11 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
-## Unreleased
+## 0.20.0 - 2026-07-03
+
+### Changed
+- **Companion keystone bump for framework v0.20.0** (staging-repo reconciliation release: skill-plus 0.7.0 cadence + friction lenses; `evals/` suite, `mypy.ini`, and `TODOS.md` land at the repo root). agent-plus-meta behavior unchanged except:
+- **Typing pass.** Behavior-preserving type annotations/guards across `init.py`, `upgrade.py`, `upgrade_check.py` from the fresh mypy run against `mypy.ini`; full unit suite green before and after.
 
 ## 0.19.8 - 2026-07-02
 
