@@ -3,7 +3,8 @@
 Joins two streams keyed by skill name:
 
   Stream 1: explicit ratings written by the `skill-feedback` plugin to
-            <git-toplevel>/.agent-plus/skill-feedback/<skill>.jsonl
+            ~/.agent-plus/skill-feedback/<skill>.jsonl (user-global since
+            v0.19.4; SKILL_FEEDBACK_DIR env overrides, same as the CLI)
   Stream 2: implicit signals mined from Claude Code session JSONL logs
             under ~/.claude/projects/<encoded-cwd>/*.jsonl (consent-gated).
 
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 from pathlib import Path
 
 # ─── known-plugin tables (judgement calls — flagged for /review) ──────────────
@@ -378,8 +380,17 @@ def run(args, emit_fn) -> int:
     since_days = int(getattr(args, "since_days", 30))
     only_skill = getattr(args, "skill", None) or None
 
-    # 2. Stream 1 — skill-feedback rows (no extra consent; user's own repo)
-    feedback_dir = project / ".agent-plus" / "skill-feedback"
+    # 2. Stream 1 — skill-feedback rows (no extra consent; user's own data).
+    # Resolve EXACTLY the way the skill-feedback CLI does (v0.19.4+):
+    # SKILL_FEEDBACK_DIR env override, else the user-global store. Do NOT
+    # also read <project>/.agent-plus/skill-feedback/ — that location
+    # stopped receiving writes in v0.19.4, and reading both would
+    # double-count entries a user hand-merged into the global store.
+    override = os.environ.get("SKILL_FEEDBACK_DIR")
+    if override:
+        feedback_dir = Path(override).expanduser().resolve()
+    else:
+        feedback_dir = (Path.home() / ".agent-plus" / "skill-feedback").resolve()
     stream1 = _read_stream1(feedback_dir, since_days, only_skill)
 
     # 3. Stream 2 — session mining (consent-gated)

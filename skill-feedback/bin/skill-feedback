@@ -3,7 +3,7 @@
 skill-feedback — local-first agent self-assessment for Claude Code skills.
 
 After an agent uses a skill, it appends one structured entry to a JSONL
-log under .agent-plus/skill-feedback/<skill>.jsonl. Authors of the skill
+log under ~/.agent-plus/skill-feedback/<skill>.jsonl. Authors of the skill
 can then aggregate, inspect, and (optionally) bundle entries into a
 GitHub issue body for the skill's source repo. No SaaS, no SDK.
 
@@ -17,11 +17,11 @@ Subcommands (all emit JSON; --pretty for indented):
   feedback <skill>           provenance-aware "what should I do" advisor
   path [--skill <name>]
 
-Storage precedence (highest first):
+Storage resolution (highest first):
   1. SKILL_FEEDBACK_DIR env var (absolute path)
-  2. <git-toplevel>/.agent-plus/skill-feedback/  (if cwd is in a git repo)
-  3. <cwd>/.agent-plus/skill-feedback/           (project, no git)
-  4. ~/.agent-plus/skill-feedback/               (last-resort fallback)
+  2. ~/.agent-plus/skill-feedback/               (user-global; default)
+  Ratings reflect skill quality, not a specific repo, so feedback always
+  lands in one place per machine unless SKILL_FEEDBACK_DIR overrides it.
 
 Hard rules:
   - Free-text fields (friction, note) are length-capped and regex-scrubbed
@@ -86,6 +86,18 @@ MAX_SKILL_NAME = 128
 SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
 
+def _msys_to_windows(p: str) -> str:
+    """Convert MSYS/Git-Bash paths like /c/dev/foo -> C:/dev/foo on Windows.
+    Git for Windows can emit POSIX-style toplevel paths; comparing those
+    against native Path objects silently resolves to the wrong directory
+    (see TODOS.md's Windows path audit item for a prior incident)."""
+    if sys.platform == "win32":
+        m = re.match(r"^/([a-zA-Z])(/.*)$", p)
+        if m:
+            return m.group(1).upper() + ":" + m.group(2)
+    return p
+
+
 def _git_toplevel() -> Path | None:
     try:
         out = subprocess.run(
@@ -97,7 +109,7 @@ def _git_toplevel() -> Path | None:
     if out.returncode != 0:
         return None
     line = out.stdout.strip()
-    return Path(line) if line else None
+    return Path(_msys_to_windows(line)) if line else None
 
 
 def _storage_root_with_source() -> tuple[Path, str]:
@@ -120,6 +132,46 @@ def _log_path(skill: str) -> Path:
 
 def _ensure_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+
+
+# ─── legacy store detection ───────────────────────────────────────────────────
+
+# Pre-v0.19.4 builds wrote project-local .agent-plus/skill-feedback/. Storage
+# is now user-global (see _storage_root_with_source), so that data is no
+# longer read. Rather than silently orphan it, `path` and `log` surface it.
+
+def _legacy_candidate_dir() -> Path:
+    """Where pre-v0.19.4 project-local feedback would have been written:
+    <git-toplevel>/.agent-plus/skill-feedback/ if cwd is inside a git repo,
+    else <cwd>/.agent-plus/skill-feedback/. Does not check existence."""
+    toplevel = _git_toplevel()
+    base = toplevel if toplevel is not None else Path.cwd()
+    return base / ".agent-plus" / "skill-feedback"
+
+
+def _detect_legacy_store() -> Path | None:
+    """Return the legacy project-local store's path if pre-v0.19.4 data is
+    still sitting there unread, else None. Counts as a legacy store only
+    when the directory exists, contains at least one *.jsonl file, and
+    resolves to a different path than the active storage root -- so a
+    SKILL_FEEDBACK_DIR override that happens to point at the same place the
+    legacy walk would find isn't flagged as orphaned. Best-effort: any
+    filesystem error resolves to None rather than raising."""
+    try:
+        candidate = _legacy_candidate_dir().resolve()
+    except OSError:
+        return None
+    if not candidate.is_dir():
+        return None
+    try:
+        has_jsonl = next(candidate.glob("*.jsonl"), None) is not None
+    except OSError:
+        return None
+    if not has_jsonl:
+        return None
+    if candidate == _storage_root():
+        return None
+    return candidate
 
 
 # ─── input scrubbing ──────────────────────────────────────────────────────────
@@ -316,6 +368,17 @@ def cmd_log(args: argparse.Namespace) -> dict:
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    legacy = _detect_legacy_store()
+    if legacy is not None:
+        # ASCII only -- no em-dashes / unicode arrows, they mojibake on the
+        # Windows console. One-time nudge; doesn't affect exit code or the
+        # stdout JSON contract.
+        print(
+            f"note: legacy project-local feedback store at {legacy} is no "
+            f"longer read; merge it into {_storage_root()} (one-time)",
+            file=sys.stderr,
+        )
+
     return {"logged": entry, "path": str(path)}
 
 
@@ -393,7 +456,12 @@ def cmd_report(args: argparse.Namespace) -> dict:
 
 def cmd_path(args: argparse.Namespace) -> dict:
     root, source = _storage_root_with_source()
-    out: dict[str, Any] = {"storage_root": str(root), "source": source}
+    legacy = _detect_legacy_store()
+    out: dict[str, Any] = {
+        "storage_root": str(root),
+        "source": source,
+        "legacy_store": str(legacy) if legacy is not None else None,
+    }
     if args.skill:
         skill = _validate_skill_name(args.skill)
         out["skill"] = skill

@@ -188,13 +188,21 @@ class TestStorageRoot(unittest.TestCase):
         self.assertEqual(data["source"], "env")
         self.assertEqual(Path(data["storage_root"]), target.resolve())
 
-    def test_home_fallback_when_no_git_no_marker(self) -> None:
-        # Use a fake HOME so we don't touch the user's real home dir.
+    def test_home_wins_even_inside_git_repo(self) -> None:
+        # Regression test: pre-v0.19.4, cwd-in-a-git-repo would have won
+        # with source "git" and rooted the store under the repo. Storage is
+        # now user-global unconditionally, so even running from INSIDE a
+        # real git repo must still resolve to home -- being in a repo no
+        # longer has any effect on where feedback lands.
         fake_home = Path(self.tmp.name) / "home"
         fake_home.mkdir()
         # HOME for POSIX, USERPROFILE for Windows (Path.home() reads USERPROFILE on win32).
         env = {"HOME": str(fake_home), "USERPROFILE": str(fake_home)}
-        # Run from a non-git, no-marker directory.
+        init_proc = subprocess.run(
+            ["git", "init", "-q", str(self.cwd)],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(init_proc.returncode, 0, init_proc.stderr)
         proc = subprocess.run(
             [sys.executable, str(BIN), "path"],
             capture_output=True, text=True, cwd=str(self.cwd),
@@ -203,14 +211,98 @@ class TestStorageRoot(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         data = json.loads(proc.stdout)
-        self.assertIn(data["source"], ("git", "cwd", "home"))
-        # If the test runner itself is in a git repo, source will be 'git' and
-        # the root will live under that repo. Otherwise we expect home.
-        if data["source"] == "home":
-            self.assertEqual(
-                Path(data["storage_root"]),
-                (fake_home / ".agent-plus" / "skill-feedback").resolve(),
-            )
+        self.assertEqual(data["source"], "home")
+        self.assertEqual(
+            Path(data["storage_root"]),
+            (fake_home / ".agent-plus" / "skill-feedback").resolve(),
+        )
+
+
+# ──────────────────────────── legacy store detection ────────────────────────────
+
+
+class TestLegacyStoreDetection(unittest.TestCase):
+    """Pre-v0.19.4 builds wrote project-local .agent-plus/skill-feedback/.
+    That location is no longer read (storage is user-global), so leftover
+    data there would silently orphan unless surfaced. `path` reports it via
+    `legacy_store`; `log` prints a one-time stderr note on the write path."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.fake_home = Path(self.tmp.name) / "home"
+        self.fake_home.mkdir()
+        self.git_repo = Path(self.tmp.name) / "repo"
+        self.git_repo.mkdir()
+        init_proc = subprocess.run(
+            ["git", "init", "-q", str(self.git_repo)],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(init_proc.returncode, 0, init_proc.stderr)
+        self.env = {
+            k: v for k, v in os.environ.items() if k != "SKILL_FEEDBACK_DIR"
+        }
+        self.env["HOME"] = str(self.fake_home)
+        self.env["USERPROFILE"] = str(self.fake_home)
+
+    def _run_in_repo(self, *args: str):
+        return subprocess.run(
+            [sys.executable, str(BIN), *args],
+            capture_output=True, text=True, cwd=str(self.git_repo),
+            env=self.env, timeout=10,
+        )
+
+    def _write_legacy_entry(self) -> Path:
+        legacy_dir = self.git_repo / ".agent-plus" / "skill-feedback"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "foo.jsonl").write_text(
+            json.dumps({
+                "ts": "2026-01-01T00:00:00Z", "skill": "foo",
+                "rating": 4, "outcome": "success", "schema": 1,
+            }) + "\n",
+            encoding="utf-8",
+        )
+        return legacy_dir
+
+    def test_path_reports_legacy_store_when_present(self) -> None:
+        legacy_dir = self._write_legacy_entry()
+
+        proc = self._run_in_repo("path")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertIsNotNone(data["legacy_store"])
+        self.assertEqual(Path(data["legacy_store"]), legacy_dir.resolve())
+
+    def test_log_emits_stderr_note_and_still_writes_home(self) -> None:
+        legacy_dir = self._write_legacy_entry()
+
+        proc = self._run_in_repo(
+            "log", "demo-skill", "--rating", "5", "--outcome", "success",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("note: legacy project-local feedback store at", proc.stderr)
+        self.assertIn(str(legacy_dir.resolve()), proc.stderr)
+        self.assertIn("is no longer read", proc.stderr)
+        self.assertIn("one-time", proc.stderr)
+
+        data = json.loads(proc.stdout)
+        home_store = self.fake_home / ".agent-plus" / "skill-feedback" / "demo-skill.jsonl"
+        self.assertEqual(Path(data["path"]), home_store.resolve())
+        self.assertTrue(home_store.is_file())
+        self.assertIn("logged", data)
+
+    def test_no_legacy_store_reports_null_and_no_stderr_note(self) -> None:
+        # Negative case: no .agent-plus/skill-feedback dir at all in the repo.
+        proc = self._run_in_repo("path")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertIsNone(data["legacy_store"])
+
+        proc = self._run_in_repo(
+            "log", "demo-skill2", "--rating", "5", "--outcome", "success",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("note: legacy", proc.stderr)
 
 
 # ──────────────────────────── schema round-trip ────────────────────────────

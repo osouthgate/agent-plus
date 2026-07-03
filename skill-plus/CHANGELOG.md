@@ -4,6 +4,14 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## Unreleased
+
+### Fixed
+- **`feedback`'s stream 1 (explicit ratings) read the dead project-local store.** `bin/_subcommands/feedback.py` still resolved `<project>/.agent-plus/skill-feedback/`, but the skill-feedback plugin has written to the user-global store (`~/.agent-plus/skill-feedback/`) since framework v0.19.4 — so the headline cross-plugin join was reading a directory that no longer receives writes and silently reported no explicit ratings. Stream 1 now resolves exactly the way the skill-feedback CLI does: `SKILL_FEEDBACK_DIR` env override (expanduser + resolve), else `~/.agent-plus/skill-feedback/`. Deliberately does NOT read the project-local dir in addition — a user who hand-merged legacy data into the global store would be double-counted. The `stream1Source` envelope field now reports the resolved global path. Module docstring and README's "feedback — close the loop" section updated to match.
+
+### Tests
+- Stream-1 fixtures (`test_stream1_aggregation`, `test_skill_filter`, `test_since_days_zero_returns_no_entries`) repointed from the project-local dir to the fake home's user-global store; `test_malformed_jsonl_line_tolerated` repointed via `SKILL_FEEDBACK_DIR` so the env-override tier gets coverage too. New regression test `test_stream1_reads_user_global_not_project_local`: a rating in `~/.agent-plus/skill-feedback/` IS aggregated while one in `<project>/.agent-plus/skill-feedback/` is NOT, and `stream1Source` points at the global store.
+
 ## 0.7.0 - 2026-07-03
 
 ### Added

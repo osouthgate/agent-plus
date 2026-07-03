@@ -46,6 +46,9 @@ def _setup_env(tmp_path: Path) -> dict[str, str]:
     fake_home.mkdir(parents=True, exist_ok=True)
     state = tmp_path / "state"
     env = os.environ.copy()
+    # Don't inherit a real override from the outer environment -- stream 1
+    # must resolve against the fake home unless a test sets this itself.
+    env.pop("SKILL_FEEDBACK_DIR", None)
     env["HOME"] = str(fake_home)
     env["USERPROFILE"] = str(fake_home)
     env["SKILL_PLUS_DIR"] = str(state)
@@ -82,8 +85,12 @@ def _now_iso(offset_seconds: int = 0) -> str:
     return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _seed_stream1(project: Path, skill: str, entries: list[dict]) -> Path:
-    fb_dir = project / ".agent-plus" / "skill-feedback"
+def _seed_stream1(tmp_path: Path, skill: str, entries: list[dict]) -> Path:
+    """Write ratings where the skill-feedback CLI writes them since v0.19.4:
+    the user-global store under the fake home (`_setup_env` points HOME /
+    USERPROFILE at `tmp_path / "home"`). Previously seeded the project-local
+    dir, which stopped being read when stream 1 moved to global resolution."""
+    fb_dir = tmp_path / "home" / ".agent-plus" / "skill-feedback"
     fb_dir.mkdir(parents=True, exist_ok=True)
     p = fb_dir / f"{skill}.jsonl"
     with p.open("w", encoding="utf-8") as fh:
@@ -117,7 +124,7 @@ def _write_session(sess_dir: Path, name: str, lines: list[str]) -> Path:
 
 def test_stream1_aggregation(tmp_path: Path):
     proj, _ = _seed_project(tmp_path)
-    _seed_stream1(proj, "foo", [
+    _seed_stream1(tmp_path, "foo", [
         {"ts": _now_iso(-60), "skill": "foo", "rating": 5, "outcome": "success",
          "friction": "Too verbose"},
         {"ts": _now_iso(-30), "skill": "foo", "rating": 3, "outcome": "partial",
@@ -168,10 +175,10 @@ def test_stream2_fallback_rate(tmp_path: Path):
 
 def test_skill_filter(tmp_path: Path):
     proj, _ = _seed_project(tmp_path)
-    _seed_stream1(proj, "foo", [
+    _seed_stream1(tmp_path, "foo", [
         {"ts": _now_iso(-10), "skill": "foo", "rating": 4, "outcome": "success"},
     ])
-    _seed_stream1(proj, "bar", [
+    _seed_stream1(tmp_path, "bar", [
         {"ts": _now_iso(-10), "skill": "bar", "rating": 1, "outcome": "failure"},
     ])
     env = _setup_env(tmp_path)
@@ -217,7 +224,7 @@ def test_discoverability_gap(tmp_path: Path):
 
 def test_since_days_zero_returns_no_entries(tmp_path: Path):
     proj, _ = _seed_project(tmp_path)
-    _seed_stream1(proj, "foo", [
+    _seed_stream1(tmp_path, "foo", [
         {"ts": _now_iso(-60), "skill": "foo", "rating": 5, "outcome": "success"},
     ])
     env = _setup_env(tmp_path)
@@ -232,8 +239,10 @@ def test_since_days_zero_returns_no_entries(tmp_path: Path):
 
 
 def test_malformed_jsonl_line_tolerated(tmp_path: Path):
+    # Seeds via the SKILL_FEEDBACK_DIR override (the other resolution tier;
+    # the rest of the stream-1 tests exercise the default home-store tier).
     proj, _ = _seed_project(tmp_path)
-    fb_dir = proj / ".agent-plus" / "skill-feedback"
+    fb_dir = tmp_path / "override-store"
     fb_dir.mkdir(parents=True, exist_ok=True)
     p = fb_dir / "foo.jsonl"
     valid1 = json.dumps({"ts": _now_iso(-10), "skill": "foo", "rating": 4,
@@ -242,11 +251,54 @@ def test_malformed_jsonl_line_tolerated(tmp_path: Path):
                          "outcome": "success"})
     p.write_text(f"{valid1}\n{{not valid json,,,\n{valid2}\n", encoding="utf-8")
     env = _setup_env(tmp_path)
+    env["SKILL_FEEDBACK_DIR"] = str(fb_dir)
     res = _run_feedback(env, "--project", str(proj))
     assert res.returncode == 0, res.stdout + res.stderr
     payload = json.loads(res.stdout)
     skills = {s["skill"]: s for s in payload["skills"]}
     assert skills["foo"]["stream1"]["count"] == 2
+
+
+def test_stream1_reads_user_global_not_project_local(tmp_path: Path):
+    """Regression test for the v0.19.4 global-path migration, reader side.
+
+    skill-feedback has written to ~/.agent-plus/skill-feedback/ since
+    v0.19.4, but feedback.py's stream 1 kept reading
+    <project>/.agent-plus/skill-feedback/ -- a dir that no longer receives
+    writes -- so explicit ratings silently vanished from the join. Assert
+    the fix: a rating in the user-global store IS aggregated; a rating in
+    the legacy project-local dir is NOT (reading both would double-count
+    hand-merged legacy data); stream1Source reports the global store."""
+    proj, _ = _seed_project(tmp_path)
+    env = _setup_env(tmp_path)
+
+    global_dir = tmp_path / "home" / ".agent-plus" / "skill-feedback"
+    global_dir.mkdir(parents=True, exist_ok=True)
+    (global_dir / "globalskill.jsonl").write_text(
+        json.dumps({"ts": _now_iso(-10), "skill": "globalskill",
+                    "rating": 4, "outcome": "success"}) + "\n",
+        encoding="utf-8",
+    )
+
+    legacy_dir = proj / ".agent-plus" / "skill-feedback"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    (legacy_dir / "legacyskill.jsonl").write_text(
+        json.dumps({"ts": _now_iso(-10), "skill": "legacyskill",
+                    "rating": 1, "outcome": "failure"}) + "\n",
+        encoding="utf-8",
+    )
+
+    res = _run_feedback(env, "--project", str(proj))
+    assert res.returncode == 0, res.stdout + res.stderr
+    payload = json.loads(res.stdout)
+    skills = {s["skill"]: s for s in payload["skills"]}
+
+    assert "globalskill" in skills, payload
+    assert skills["globalskill"]["stream1"]["count"] == 1
+    assert "legacyskill" not in skills, (
+        "project-local store must no longer be read: " + str(payload)
+    )
+    assert Path(payload["stream1Source"]).resolve() == global_dir.resolve()
 
 
 def test_session_files_for_project_resolves_fixture(tmp_path: Path, monkeypatch):

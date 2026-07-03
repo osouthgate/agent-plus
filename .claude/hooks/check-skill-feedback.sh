@@ -3,8 +3,9 @@
 # Stop hook: nudge the agent to log skill-feedback before stopping.
 #
 # DRAFT — opt-in only. Does nothing unless the marker file
-#   <project-or-home>/.agent-plus/skill-feedback/.enabled
-# exists. To wire it into the session-end flow, ALSO add this entry to
+#   $HOME/.agent-plus/skill-feedback/.enabled
+# exists (or $SKILL_FEEDBACK_DIR/.enabled when the env override is set).
+# To wire it into the session-end flow, ALSO add this entry to
 # .claude/settings.json under "hooks.Stop":
 #
 #   {
@@ -38,22 +39,15 @@
 
 set -u
 
-# Resolve storage root the same way the CLI does: SKILL_FEEDBACK_DIR env
-# wins; else <git-toplevel>/.agent-plus/skill-feedback/; else cwd
-# fallback; else ~/.agent-plus/skill-feedback/.
+# Resolve storage root the same way the CLI does (v0.19.4+):
+# SKILL_FEEDBACK_DIR env wins; else the user-global store
+# ~/.agent-plus/skill-feedback/. (Storage stopped being project-local in
+# v0.19.4 — ratings reflect skill quality, not a specific repo — so this
+# hook must NOT watch git-toplevel/cwd dirs the CLI never writes to, or
+# the nudge would fire forever even after feedback was logged.)
 storage_root() {
     if [ -n "${SKILL_FEEDBACK_DIR:-}" ]; then
         printf '%s\n' "$SKILL_FEEDBACK_DIR"
-        return
-    fi
-    local top
-    top=$(git rev-parse --show-toplevel 2>/dev/null) || top=""
-    if [ -n "$top" ]; then
-        printf '%s\n' "$top/.agent-plus/skill-feedback"
-        return
-    fi
-    if [ -d "$PWD/.agent-plus" ]; then
-        printf '%s\n' "$PWD/.agent-plus/skill-feedback"
         return
     fi
     printf '%s\n' "$HOME/.agent-plus/skill-feedback"

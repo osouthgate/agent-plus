@@ -26,7 +26,7 @@
     {
       "name": "skill-feedback",
       "source": "./skill-feedback",
-      "description": "Local-first agent self-assessment for Claude Code skills. Agent appends a structured rating + friction note to .agent-plus/skill-feedback/<skill>.jsonl after each skill use. Skill authors aggregate locally with `report` or bundle entries into a GitHub issue body for the skill's source repo with `submit`. No SaaS, no SDK, scrub-on-write."
+      "description": "Local-first agent self-assessment for Claude Code skills. Agent appends a structured rating + friction note to ~/.agent-plus/skill-feedback/<skill>.jsonl after each skill use. Skill authors aggregate locally with `report` or bundle entries into a GitHub issue body for the skill's source repo with `submit`. No SaaS, no SDK, scrub-on-write."
     },
     {
       "name": "skill-plus",
