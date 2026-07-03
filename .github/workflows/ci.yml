@@ -7,10 +7,18 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ['3.11', '3.12']
+    # windows-latest defaults to pwsh and these run steps are POSIX. Under
+    # `shell: bash` on Windows runners, Git Bash provides sh/tar/curl, so the
+    # root test/ suite can spawn `sh` for the install.sh tests.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,15 +26,31 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install pytest
         run: pip install pytest
-      - name: Run plugin tests
+      - name: Run test suites
         run: |
           set -e
-          for plugin in agent-plus-meta repo-analyze diff-summary skill-feedback skill-plus; do
-            if [ -d "$plugin/test" ]; then
-              echo "=== $plugin ==="
-              python -m pytest "$plugin/test" -v
+          for suite in agent-plus-meta/test repo-analyze/test diff-summary/test skill-feedback/test skill-plus/test test evals/tests; do
+            if [ -d "$suite" ]; then
+              echo "=== $suite ==="
+              python -m pytest "$suite" -q
             fi
           done
+
+  # Enforces the declared health stack (typecheck: mypy). Bare `python -m mypy`
+  # so mypy.ini's `files` list drives the targets -- `mypy .` would skip the
+  # dot-dirs (.claude/hooks, .github/scripts) and pull in undeclared dirs.
+  # pytest is installed because evals' modules import it and mypy follows them.
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install mypy and pytest
+        run: pip install mypy pytest
+      - name: Run mypy
+        run: python -m mypy
 
   envelope-contract:
     runs-on: ubuntu-latest
