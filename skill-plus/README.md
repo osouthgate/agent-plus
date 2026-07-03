@@ -247,6 +247,8 @@ Every output envelope includes a `nextSteps` array. Per-command hints: `scan` �
 
 Storage precedence (highest first): `SKILL_PLUS_DIR` env override → git toplevel → cwd `.agent-plus/` if present → home fallback.
 
+On Windows, the git-toplevel path is normalised from MSYS/Git-Bash form (`/c/dev/foo` -> `C:/dev/foo`) before use — `git rev-parse --show-toplevel` under Git Bash emits POSIX-style paths, which would otherwise resolve project state to a phantom `C:\c\...` tree. Scaffolded skills carry the same normalisation in their generated `bin/<name>.py`.
+
 ## Install
 
 ### Marketplace

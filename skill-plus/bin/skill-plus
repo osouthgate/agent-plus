@@ -82,6 +82,21 @@ def _now_iso() -> str:
 # ─── storage resolution (mirrors skill-feedback) ──────────────────────────────
 
 
+def _msys_to_windows(p: str) -> str:
+    """Convert MSYS/Git-Bash paths like /c/dev/foo -> C:/dev/foo on Windows.
+    Git for Windows can emit POSIX-style toplevel paths; comparing those
+    against native Path objects silently resolves to the wrong directory
+    (see TODOS.md's Windows path audit item for a prior incident: state
+    written under C:\\c\\dev\\... instead of C:\\dev\\...). Same helper as
+    skill-feedback/bin/skill-feedback -- duplicated because bin scripts
+    have no .py extension and cannot import each other."""
+    if sys.platform == "win32":
+        m = re.match(r"^/([a-zA-Z])(/.*)$", p)
+        if m:
+            return m.group(1).upper() + ":" + m.group(2)
+    return p
+
+
 def _git_toplevel() -> Path | None:
     try:
         out = subprocess.run(
@@ -93,7 +108,7 @@ def _git_toplevel() -> Path | None:
     if out.returncode != 0:
         return None
     line = out.stdout.strip()
-    return Path(line) if line else None
+    return Path(_msys_to_windows(line)) if line else None
 
 
 def project_state_root_with_source() -> tuple[Path, str]:
