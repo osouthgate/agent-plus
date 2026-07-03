@@ -1,0 +1,2 @@
+{"type": "assistant", "sessionId": "lf-s2", "message": {"type": "message", "role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "langfuse-remote health --json"}}]}}
+{"type": "assistant", "sessionId": "lf-s2", "message": {"type": "message", "role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "langfuse-remote health --json"}}]}}

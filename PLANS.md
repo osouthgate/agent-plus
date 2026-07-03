@@ -99,3 +99,43 @@ Rename binaries and plugin.json names to `agent-plus-repo-analyze`, `agent-plus-
 - Does Claude Code support one plugin registering multiple slash commands, each mapping to a different binary? Check plugin spec.
 - Migration path for existing installs: `claude plugin uninstall repo-analyze@agent-plus` + `claude plugin install agent-plus@agent-plus`? Or can `agent-plus-meta upgrade` handle it?
 - Does individual plugin versioning (repo-analyze@0.2.1 vs framework@0.19.x) survive the umbrella model, or do all primitives share one version?
+
+## Session-derived skill-effectiveness signal for arbitrary skills (medium)
+
+**Effort:** medium — extends `skill-plus feedback` stream-2; no new plugin, no network  
+**Status:** scoped — see `plans/backlog/2026-05-16-skill-effectiveness-signal.md`
+
+Triggered by a competitor (Nua) pitch: "look at every session using each skill,
+flag if it works or doesn't." Gap analysis showed agent-plus already ships ~80%
+of this (`skill-feedback` explicit stream + `skill-plus feedback` implicit
+session-mining stream + concern scoring + promote/team-sync). The one real gap:
+stream-2 only mines `Bash` tool calls, and fallback detection is a hand-curated
+5-plugin table (`feedback.py:32`), so a **user-authored** skill — or any skill
+invoked via the Skill tool / slash command rather than a bin — produces no
+effectiveness signal. `skill-feedback`'s own README flags the root weakness:
+"No retroactive transcript scraping. Agent has to log explicitly."
+
+Proposed: a generic, deterministic per-skill outcome signal (skill invocation →
+following `tool_result` `is_error` → generalized re-invocation), with the
+known-skill set built dynamically from `skill-plus where/list` provenance instead
+of the hardcoded table. Reuses the existing consent gate + `scrub_text`; only
+derived counts persisted, never raw transcript.
+
+**Hard boundary:** stays on the "deterministic reflexes" side. Extracts
+structural facts (errored: y/n; re-invoked: y/n) only — does **not** model *why*
+the agent acted, which is the explicitly-rejected "observability of agent
+decisions" (`plans/backlog/2026-04-24-strategic-direction.md`). Abandonment /
+intent heuristics are out of v0 for this reason. Do **not** copy Nua's
+hosted/telemetry model — it contradicts the local-first positioning.
+
+**Open questions:**
+- Exact session-JSONL shape for `Skill` tool_use and slash-command turns in
+  current Claude Code transcripts (needs a fixture-capture spike).
+- `tool_use_id` ↔ `tool_result` correlation reliability across schema variants.
+- Shared session walker vs the intentional scan.py/feedback.py duplication
+  (slice independence — `feedback.py:171` says "do NOT import scan").
+- Does reading additional tool types need consent beyond the existing
+  project-scope grant (same files, more tool types)?
+- Concern-score weight for the new `errorRate` term.
+
+---

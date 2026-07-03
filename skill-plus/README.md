@@ -10,7 +10,8 @@ Authoring a good Claude skill isn't hard because of the boilerplate — it's har
 
 ```bash
 skill-plus scan             [--accept-consent] [--all-projects] [--pretty]
-skill-plus propose          [--limit 10] [--pretty]
+skill-plus propose          [--limit 10] [--kind skill|routine|habit|blocks|all] [--pretty]
+skill-plus routine          (--adopt ID | --dismiss ID) [--pretty]
 skill-plus install-cron     [--frequency weekly]
 skill-plus scaffold <name>  [--description ...] [--when-to-use ...]
                             [--killer-command ...] [--do-not-use-for ...]
@@ -72,6 +73,27 @@ Walks `~/.claude/projects/<encoded-cwd>/*.jsonl`, extracts `Bash` tool calls, cl
 ### propose — pick the best one
 
 Reads the candidate log, scores by `count + 0.5 × distinct_sessions + recency_boost`, returns the top N. Each row carries a `proposedSkillName` (e.g. `railway logs --service` → `railway-logs`) and `kind: "new" | "enhance"` — flips to `enhance` when a skill of that name already exists.
+
+### propose --kind routine|habit, and routine — the cadence lens
+
+`scan` also runs a **temporal** pass over the same session history (full history, watermark-bypassed) and writes `routine-candidates.jsonl`. A cluster that recurs on `>= 5` distinct calendar dates is classified:
+
+- **`routine`** — tight `(weekday-class, 3h-bucket)` signature (`>= 50%` of hits in one 3h bucket AND `>= 70%` in one weekday-class). Gets a deterministic, paste-ready `scheduleString` for Claude Code [routines](https://code.claude.com/docs/en/routines), e.g. `On weekday mornings around 09:00 UTC, run the workflow that does \`vercel deploy --prod\` (refine this intent before saving)`. The `(refine ...)` marker is honest: agent-plus runs offline and cannot infer task intent, so the command is a proxy you sharpen.
+- **`habit`** — recurs on many dates but the time is diffuse (no schedulable trigger). Gets a `suggestion` to consider a skill instead, not a `scheduleString`.
+
+```bash
+skill-plus propose --kind routine     # schedulable cadences only
+skill-plus propose --kind habit       # diffuse repeats -> skill candidates
+skill-plus propose --kind all         # both
+skill-plus routine --adopt <id>       # you set this up -> suppress from future scans
+skill-plus routine --dismiss <id>     # not useful -> de-rank, annotate "dismissed Nx"
+```
+
+**Known limitation (documented, not hidden):** Claude Code routines require a Pro/Max/Team/Enterprise plan with Claude Code on the web, and the cron minimum interval is 1 hour. The detector runs fully offline regardless — `propose`/`routine` work without any of that; only the eventual `/schedule` paste needs it. On organic history with no clock-shaped cadence the detector correctly emits **zero** routine candidates (it is precision-first); `habit` is what surfaces for diffuse-but-frequent work.
+
+### propose --kind blocks — the friction lens
+
+`scan` additionally mines tool-permission blocks and denials from the same session history into `blocks.jsonl`. `propose --kind blocks` ranks the block clusters so you can remove the friction at the source — a settings allowlist entry, a skill, or a workflow change — instead of re-hitting the same denial every session. Records pass through the same `scrub_text` redaction as every other persisted log.
 
 ### scaffold — turn it into a skill
 

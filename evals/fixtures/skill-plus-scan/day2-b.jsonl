@@ -1,0 +1,2 @@
+{"type": "assistant", "sessionId": "day2-b", "message": {"type": "message", "role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "kubectl get pods -n prod"}}]}}
+{"type": "assistant", "sessionId": "day2-b", "message": {"type": "message", "role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "kubectl get pods -n prod"}}]}}

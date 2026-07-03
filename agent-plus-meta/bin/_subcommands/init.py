@@ -1163,13 +1163,13 @@ def cmd_init(args: argparse.Namespace) -> dict:
                     break
                 if not raw.strip():
                     break
-                p, warn = _validate_manual_path(raw)
-                if p is None:
+                manual_p, warn = _validate_manual_path(raw)
+                if manual_p is None:
                     _eprint(f"  ! {warn}, skipped")
                     continue
                 if warn and warn.startswith("warn:"):
-                    _eprint(f"  ! {p}: no git or project markers detected — scan may yield nothing")
-                chosen.append(p)
+                    _eprint(f"  ! {manual_p}: no git or project markers detected — scan may yield nothing")
+                chosen.append(manual_p)
 
         # Run scans, streaming progress.
         if chosen:

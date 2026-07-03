@@ -382,7 +382,7 @@ def cmd_upgrade_check(args: argparse.Namespace) -> dict:
                 use_cache = True
 
     # ─── retrieve latest version ─────────────────────────────────────────────
-    network = {
+    network: dict[str, Any] = {
         "attempted": False,
         "ok": False,
         "elapsed_ms": 0,

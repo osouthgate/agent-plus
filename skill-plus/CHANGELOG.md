@@ -4,6 +4,18 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## 0.7.0 - 2026-07-03
+
+### Added
+- **Cadence lens (ported from staging).** `scan` runs a temporal pass over full session history (watermark-bypassed) and writes `routine-candidates.jsonl`. Clusters recurring on >= 5 distinct dates classify as `routine` (tight weekday/3h-bucket signature; gets a deterministic, paste-ready `scheduleString` for Claude Code routines) or `habit` (diffuse timing; gets a skill suggestion instead). New envelope fields `routineCandidates` / `routineCandidatesTop`.
+- **`routine` subcommand.** `skill-plus routine --adopt <id> | --dismiss <id>` — boomerang state in `routines-adopted.jsonl`; adopted candidates are suppressed from future scans, dismissed ones de-ranked and annotated.
+- **`propose --kind skill|routine|habit|blocks|all`.** Kind-dispatched proposals over the frequency, cadence, and friction lenses.
+- **Friction lens (ported from staging).** `scan` mines tool-permission blocks/denials into `blocks.jsonl`; `propose --kind blocks` ranks block clusters.
+
+### Fixed
+- **Rescrub-on-write extended to the new logs.** `routine-candidates.jsonl` full rewrites pass every carried-forward record through `scrub_text` (same threat model as the 0.6.1 candidates.jsonl fix), and the append-only `routines-adopted.jsonl` scrubs `clusterKey`/`scheduleString` at append time. Regression tests included.
+- Ported test fixtures pin literal correctly-encoded project slugs and real current-time clocks (the private originals used the pre-0.6.1 buggy slug encoder and hardcoded authoring-date timestamps that would silently age out of the scan window).
+
 ## 0.6.2 - 2026-07-02
 
 ### Fixed
