@@ -6,6 +6,8 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+## 0.21.0 - 2026-07-03
+
 Launch-gate hardening (2026-07-03): `--json` script mode + uninstall TTY semantics. The one-line rule, stated plainly: **`--json` implies non-interactive for the scope confirmation; purge always requires a real TTY.**
 
 ### Fixed
