@@ -1,6 +1,6 @@
 ---
 name: repo-analyze
-description: One-call cold-start orientation for an unfamiliar repo. Returns a structured map — file tree (compact per-folder summary by default, full per-file listing with --tree-mode full), language mix, framework + build-tool detection, top-level deps, entrypoints, README highlights — so you don't burn 60+ Read/Glob/Grep calls re-mining the same facts every fresh session. Stateless, no network, stdlib Python only.
+description: agent-plus | One-call cold-start orientation for an unfamiliar repo. Returns a structured map — file tree (compact per-folder summary by default, full per-file listing with --tree-mode full), language mix, framework + build-tool detection, top-level deps, entrypoints, README highlights — so you don't burn 60+ Read/Glob/Grep calls re-mining the same facts every fresh session. Stateless, no network, stdlib Python only.
 when_to_use: Trigger on phrases like "what is this project", "tell me about this repo", "give me an overview", "what's the tech stack", "where do I start in this repo", "scan the codebase", "what does this codebase use", "list the entrypoints". This is the first call in any new repo. Use ONCE per session, then drop to Read/Grep for the actual file contents.
 allowed-tools: Bash(repo-analyze:*) Bash(python3 *repo-analyze*:*)
 ---

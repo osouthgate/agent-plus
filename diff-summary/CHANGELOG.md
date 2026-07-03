@@ -4,6 +4,11 @@ All notable changes to this plugin.
 
 Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
+## Unreleased
+
+### Changed
+- **Skill-picker findability.** SKILL.md frontmatter `description` now prefixed with `agent-plus | ` so typing "agent-plus" in Claude Code's skill picker surfaces this skill alongside the rest of the suite.
+
 ## 0.3.0 - 2026-05-02
 
 ### Added

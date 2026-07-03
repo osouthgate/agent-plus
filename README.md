@@ -18,19 +18,11 @@ Windows (PowerShell):
 powershell -c "irm https://github.com/osouthgate/agent-plus/releases/latest/download/install.ps1 | iex"
 ```
 
-**Cut tokens. Kill context bloat. Run 20x faster.**
+**Find what you keep typing by hand. Cut tokens. Run 20x faster.**
 
 Drop-in plugins for Claude Code that turn 127-tool-call dances into 1-tool-call answers. **No SDK, no config file, no auth dance.**
 
 Five plugins. Zero dependencies. Mined from real Claude Code session transcripts — not guessed at. Stdlib Python, also runs standalone.
-
-### It collapses every cold start.
-
-<p align="center">
-  <img src="./assets/hero-v1-side-by-side.png" alt="every cold start vs with agent-plus — 127 tool calls collapsed into 1" width="100%">
-  <br>
-  <sub><i>One call replaces the cold-start grep dance. That's the whole product.</i></sub>
-</p>
 
 ### It learns from how you actually work.
 
@@ -87,6 +79,16 @@ Deterministic shape in, deterministic shape out. Permanent across every future s
   <img src="./assets/use-side-by-side.png" alt="manual railway logs dance vs one railway-logs call" width="100%">
   <br>
   <sub><i>One clean call where 14 used to be — same skill, every service, forever.</i></sub>
+</p>
+
+It's not just the patterns you repeat -- the first minute in an unfamiliar repo gets the same treatment.
+
+### It collapses every cold start.
+
+<p align="center">
+  <img src="./assets/hero-v1-side-by-side.png" alt="every cold start vs with agent-plus — 127 tool calls collapsed into 1" width="100%">
+  <br>
+  <sub><i>One call replaces the cold-start grep dance — the other half of the product.</i></sub>
 </p>
 
 ```bash
@@ -328,39 +330,9 @@ This skips the wizard — run `agent-plus-meta init` in Git Bash or WSL afterwar
 
 ## The marketplace convention
 
-`<user>/agent-plus-skills` is the convention. Anyone can publish their own collection at their GitHub handle. agent-plus's tooling discovers, installs, and updates them by that naming pattern — borrowed from Homebrew taps and the GitHub Actions marketplace. **No central registry to run.**
+`<user>/agent-plus-skills` is the convention: anyone can publish a skill collection at their GitHub handle, and agent-plus tooling discovers, installs, and updates it by that naming pattern — borrowed from Homebrew taps and the GitHub Actions marketplace, with **no central registry to run**. Installs are commit-pinned with a first-run review and five enforced trust gates. Full details — diagram, lifecycle commands, trust model: [the marketplace convention in agent-plus-meta's README](./agent-plus-meta/README.md#the-marketplace-convention).
 
-```text
-                  ┌─────────────────────────────────────┐
-                  │   osouthgate/agent-plus  (this repo)│
-                  │   The 5 universal primitives        │
-                  └────────────────┬────────────────────┘
-                                   │
-                  agent-plus-meta marketplace install
-                                   │
-                                   ▼
-        ┌────────────────────────────────────────────────────┐
-        │  <user>/agent-plus-skills  (anyone can publish)    │
-        │  github-remote, vercel-remote, supabase-remote,    │
-        │  railway-ops, linear-remote, openrouter-remote,    │
-        │  langfuse-remote, hermes-remote, coolify-remote,   │
-        │  hcloud-remote  (the reference marketplace)        │
-        │  + your own at <your-handle>/agent-plus-skills     │
-        └────────────────────────────────────────────────────┘
-```
-
-```bash
-agent-plus-meta marketplace search          # gh search repos topic:agent-plus-skills
-agent-plus-meta marketplace install <user>/agent-plus-skills    # commit-pinned + first-run review
-agent-plus-meta marketplace list
-agent-plus-meta marketplace update [<user>/<repo>]
-agent-plus-meta marketplace prefer <user>/<repo> --skill <name>  # collision resolution
-agent-plus-meta marketplace remove <user>/<repo>
-```
-
-**Trust model — five gates enforced.** Install pins the commit SHA. Nothing in the cloned repo runs at install time. A first-run review is shown once per install (and re-armed on every accepted update). Updates are opt-in only — `--cron` is parsed only so it can be refused. When a marketplace declares `checksums`, install verifies them. Plugins from un-accepted marketplaces are skipped.
-
-### Versioning
+## Versioning
 
 The umbrella `VERSION` file (and the badge above) is **tag-bound** — it tracks the framework release tag (e.g. `0.16.0`). Each plugin under `agent-plus-meta/`, `repo-analyze/`, `diff-summary/`, `skill-feedback/`, and `skill-plus/` carries its own `plugin.json#version` that bumps **independently** when that specific plugin changes. So `repo-analyze@0.2.1` shipping inside framework `0.16.0` is normal, not drift.
 
