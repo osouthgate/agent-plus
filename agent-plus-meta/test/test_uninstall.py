@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -41,6 +43,8 @@ un.bind(HOST)
 
 
 def _ns(**kw) -> argparse.Namespace:
+    # force_json mirrors what argparse produces since the subparser --json
+    # flag moved to dest="force_json" (shared with the top-level flag).
     defaults = dict(
         workspace=False,
         marketplaces=False,
@@ -48,12 +52,21 @@ def _ns(**kw) -> argparse.Namespace:
         purge=False,
         dry_run=False,
         non_interactive=True,
-        json=True,
+        force_json=True,
         install_dir=None,
         prefix=None,
     )
     defaults.update(kw)
     return argparse.Namespace(**defaults)
+
+
+class _FakeTTYStdin(io.StringIO):
+    """Stands in for a real terminal on sys.stdin: isatty() -> True.
+    cmd_uninstall's TTY gate reads sys.stdin.isatty(); the actual PURGE
+    keystrokes go through builtins.input (patched separately)."""
+
+    def isatty(self) -> bool:  # noqa: D102
+        return True
 
 
 class _TempHome(unittest.TestCase):
@@ -199,10 +212,21 @@ class TestUninstallScopes(_TempHome):
 
 
 class TestUninstallPurge(_TempHome):
+    """The PURGE one-way door on a real TTY. All tests here fake an
+    interactive session (no --non-interactive, no --json, TTY stdin) --
+    the non-TTY / script-mode refusal lives in TestUninstallPurgeTTYGate.
+    (Updated for the v0.20.x TTY gate: purge prompts only reach a genuinely
+    interactive session; everything else is refused up front.)"""
+
+    @staticmethod
+    def _tty_purge_ns() -> argparse.Namespace:
+        return _ns(purge=True, non_interactive=False, force_json=False)
+
     def test_uninstall_purge_requires_literal_PURGE(self) -> None:
         for word in ["y", "yes", "Y", "purge", ""]:
-            with patch("builtins.input", return_value=word):
-                out = un.cmd_uninstall(_ns(purge=True))
+            with patch.object(sys, "stdin", _FakeTTYStdin()), \
+                 patch("builtins.input", return_value=word):
+                out = un.cmd_uninstall(self._tty_purge_ns())
             self.assertFalse(
                 out["user_confirmed"],
                 msg=f"word {word!r} should NOT confirm PURGE",
@@ -214,23 +238,39 @@ class TestUninstallPurge(_TempHome):
                     msg=f"bin removed despite aborted PURGE (word={word!r})",
                 )
         # Now the magic word.
-        with patch("builtins.input", return_value="PURGE"):
-            out = un.cmd_uninstall(_ns(purge=True))
+        with patch.object(sys, "stdin", _FakeTTYStdin()), \
+             patch("builtins.input", return_value="PURGE"):
+            out = un.cmd_uninstall(self._tty_purge_ns())
         self.assertTrue(out["user_confirmed"])
+        # A real-TTY purge is the interactive path; the envelope must say so.
+        self.assertTrue(out["interactive"])
         for name in un.PRIMITIVES:
             self.assertFalse((self.bin_dir / name).is_file())
 
-    def test_uninstall_purge_under_non_interactive_still_prompts(self) -> None:
-        # --non-interactive does NOT bypass the PURGE confirmation (T6).
-        # Empty input → abort.
-        with patch("builtins.input", return_value="") as mock_in:
-            out = un.cmd_uninstall(_ns(purge=True, non_interactive=True))
-        self.assertTrue(mock_in.called, "PURGE prompt did not fire")
-        self.assertFalse(out["user_confirmed"])
+    def test_uninstall_purge_under_non_interactive_refuses(self) -> None:
+        # Contract change (v0.20.x, documented in docs/uninstall-envelope.md):
+        # --non-interactive STILL does not bypass the PURGE confirmation (T6),
+        # but instead of prompting anyway (which hung forever on a held-open
+        # non-TTY stdin and crashed with EOFError at end-of-input), the run
+        # is now refused up front with a structured error (rc 1 at the CLI).
+        # Even a TTY stdin doesn't help: the flag explicitly says "no
+        # prompts", and purge cannot proceed without one.
+        with patch.object(sys, "stdin", _FakeTTYStdin()), \
+             patch("builtins.input",
+                   side_effect=AssertionError("PURGE prompt must not fire")):
+            with self.assertRaises(HOST.StructuredError) as cm:
+                un.cmd_uninstall(
+                    _ns(purge=True, non_interactive=True, force_json=False))
+        self.assertIn("purge requires an interactive terminal",
+                      str(cm.exception))
+        # Nothing was removed.
+        for name in un.PRIMITIVES:
+            self.assertTrue((self.bin_dir / name).is_file())
 
     def test_uninstall_purge_keeps_user_skills_and_sessions(self) -> None:
-        with patch("builtins.input", return_value="PURGE"):
-            un.cmd_uninstall(_ns(purge=True))
+        with patch.object(sys, "stdin", _FakeTTYStdin()), \
+             patch("builtins.input", return_value="PURGE"):
+            un.cmd_uninstall(self._tty_purge_ns())
         # User-owned territory: never removed.
         self.assertTrue(self.user_skills.is_dir())
         self.assertTrue((self.user_skills / "my-skill").is_dir())
@@ -318,9 +358,16 @@ class TestUninstallSelfDeleteWindows(_TempHome):
         HOST.__file__ = str(self_bin)
         try:
             real_unlink = Path.unlink
+            # Compare via realpath, not raw strings: the manifest path is
+            # resolve()d by the product code, and on GitHub runners the raw
+            # and resolved forms differ (8.3 short names like RUNNER~1 on
+            # windows-latest; /var -> /private/var on macOS), so a raw
+            # string match silently never intercepts and the stub really
+            # gets deleted ('removed' instead of 'error').
+            self_real = os.path.realpath(str(self_bin))
 
             def fake_unlink(self, *a, **kw):
-                if str(self) == str(self_bin):
+                if os.path.realpath(str(self)) == self_real:
                     raise PermissionError(13, "Access is denied")
                 return real_unlink(self, *a, **kw)
 
@@ -400,6 +447,196 @@ class TestUninstallPrimitiveTree(_TempHome):
                 self.assertFalse((prefix_env / name).is_dir())
             trees = [p for p in out["paths"] if p["kind"] == "primitive_tree"]
             self.assertEqual({t["status"] for t in trees}, {"removed"})
+
+
+class TestUninstallPurgeTTYGate(_TempHome):
+    """v0.20.x: --purge is refused up front (StructuredError -> rc 1 at the
+    CLI) whenever the PURGE prompt could not be answered: --json,
+    --non-interactive/--auto, or stdin not a TTY. Previously `uninstall
+    --purge --json` piped from automation blocked forever on input() (or
+    died with EOFError at end-of-input)."""
+
+    def test_purge_with_json_refuses_even_on_tty(self) -> None:
+        with patch.object(sys, "stdin", _FakeTTYStdin()), \
+             patch("builtins.input",
+                   side_effect=AssertionError("PURGE prompt must not fire")):
+            with self.assertRaises(HOST.StructuredError) as cm:
+                un.cmd_uninstall(
+                    _ns(purge=True, non_interactive=False, force_json=True))
+        self.assertIn("purge requires an interactive terminal",
+                      str(cm.exception))
+        for name in un.PRIMITIVES:
+            self.assertTrue((self.bin_dir / name).is_file())
+
+    def test_purge_with_non_tty_stdin_refuses(self) -> None:
+        # No flags set at all -- just piped/closed stdin. This is the
+        # automation-hang case from the field report.
+        with patch.object(sys, "stdin", io.StringIO()), \
+             patch("builtins.input",
+                   side_effect=AssertionError("PURGE prompt must not fire")):
+            with self.assertRaises(HOST.StructuredError) as cm:
+                un.cmd_uninstall(
+                    _ns(purge=True, non_interactive=False, force_json=False))
+        exc = cm.exception
+        self.assertIn("purge requires an interactive terminal", exc.summary)
+        # Three-tier framing present and ASCII-only (Windows console safety).
+        for field in (exc.summary, exc.problem, exc.cause, exc.fix):
+            self.assertTrue(field)
+            field.encode("ascii")  # raises UnicodeEncodeError on violation
+        for name in un.PRIMITIVES:
+            self.assertTrue((self.bin_dir / name).is_file())
+
+    def test_purge_dry_run_still_allowed_without_tty(self) -> None:
+        # --dry-run never prompts and never removes, so scripts may still
+        # preview the purge manifest under --json / non-TTY stdin.
+        with patch.object(sys, "stdin", io.StringIO()), \
+             patch("builtins.input",
+                   side_effect=AssertionError("PURGE prompt must not fire")):
+            out = un.cmd_uninstall(_ns(purge=True, dry_run=True))
+        self.assertEqual(out["mode"], "purge")
+        self.assertTrue(out["dry_run"])
+        self.assertFalse(out["interactive"])
+        self.assertFalse(out["user_confirmed"])
+        self.assertEqual(out["summary"]["removed"], 0)
+        for name in un.PRIMITIVES:
+            self.assertTrue((self.bin_dir / name).is_file())
+
+    def test_purge_refusal_subprocess_rc1_clean_stderr_envelope(self) -> None:
+        # End-to-end: real subprocess with PIPED stdin (input="") -- the
+        # automation shape from the field report, and isatty()==False on
+        # every platform. (Deliberately NOT stdin=subprocess.DEVNULL: on
+        # Windows the NUL device is a character device, so isatty() returns
+        # True for it and the TTY gate correctly treats it as interactive;
+        # the prompt then hits immediate EOF and aborts cleanly instead.)
+        # Must exit 1 promptly (no hang), stdout empty, stderr a single
+        # clean JSON structured-error envelope -- no Python traceback.
+        bin_path = _BIN_DIR / "agent-plus-meta"
+        with tempfile.TemporaryDirectory() as td:
+            fake_home = Path(td) / "home"
+            fake_home.mkdir()
+            env = {
+                **os.environ,
+                "HOME": str(fake_home),
+                "USERPROFILE": str(fake_home),
+                "AGENT_PLUS_INSTALL_DIR": str(fake_home / "bin"),
+                "AGENT_PLUS_PREFIX": str(fake_home / "share"),
+            }
+            proc = subprocess.run(
+                [sys.executable, str(bin_path), "uninstall", "--purge"],
+                capture_output=True, text=True, timeout=20,
+                input="", env=env, cwd=td,
+            )
+        self.assertEqual(proc.returncode, 1,
+                         msg=f"stdout={proc.stdout!r} stderr={proc.stderr!r}")
+        self.assertEqual(proc.stdout, "")
+        self.assertNotIn("Traceback", proc.stderr)
+        payload = json.loads(proc.stderr.strip())
+        self.assertIn("purge requires an interactive terminal",
+                      payload.get("error", ""))
+        for k in ("problem", "cause", "fix", "tool", "cmd"):
+            self.assertIn(k, payload, f"missing {k} in {payload!r}")
+        self.assertEqual(payload["cmd"], "uninstall")
+
+
+class TestUninstallJsonScriptMode(_TempHome):
+    """v0.20.x: --json implies non-interactive for the y/N scope
+    confirmation, and a non-TTY stdin alone also skips it. Previously the
+    prompt was gated only on --non-interactive, so `uninstall --json`
+    piped from automation blocked on stdin (EOFError at end-of-input)."""
+
+    def test_json_dry_run_records_interactive_false(self) -> None:
+        with patch.object(sys, "stdin", io.StringIO()):
+            out = un.cmd_uninstall(
+                _ns(non_interactive=False, force_json=True, dry_run=True))
+        self.assertFalse(out["interactive"])
+        self.assertFalse(out["user_confirmed"])
+        self.assertEqual(out["summary"]["removed"], 0)
+
+    def test_json_skips_scope_prompt_and_proceeds(self) -> None:
+        # The prompt must never fire; the run proceeds with the same
+        # auto-confirmed semantics --non-interactive has always had.
+        # Removal is real but confined to the staged temp home.
+        with patch.object(HOST, "_read_yes_no",
+                          side_effect=AssertionError(
+                              "y/N prompt must not fire under --json")), \
+             patch("builtins.input",
+                   side_effect=AssertionError(
+                       "input() must not fire under --json")), \
+             patch.object(sys, "stdin", io.StringIO()):
+            out = un.cmd_uninstall(_ns(non_interactive=False, force_json=True))
+        self.assertFalse(out["interactive"])
+        self.assertTrue(out["user_confirmed"])
+        self.assertEqual(out["summary"]["removed"], 5)
+        for name in un.PRIMITIVES:
+            self.assertFalse((self.bin_dir / name).is_file())
+
+    def test_non_tty_stdin_alone_skips_scope_prompt(self) -> None:
+        # No flags at all, stdin piped: same non-interactive semantics.
+        with patch.object(HOST, "_read_yes_no",
+                          side_effect=AssertionError(
+                              "y/N prompt must not fire on non-TTY stdin")), \
+             patch.object(sys, "stdin", io.StringIO()):
+            out = un.cmd_uninstall(
+                _ns(non_interactive=False, force_json=False))
+        self.assertFalse(out["interactive"])
+        self.assertTrue(out["user_confirmed"])
+        self.assertEqual(out["summary"]["removed"], 5)
+
+    def test_real_tty_without_flags_still_prompts(self) -> None:
+        # Regression guard: a genuinely interactive session still gets the
+        # y/N prompt (decline -> abort, nothing removed).
+        with patch.object(HOST, "_read_yes_no", return_value=False), \
+             patch.object(sys, "stdin", _FakeTTYStdin()):
+            out = un.cmd_uninstall(
+                _ns(non_interactive=False, force_json=False))
+        self.assertTrue(out["interactive"])
+        self.assertFalse(out["user_confirmed"])
+        self.assertEqual(out["summary"]["removed"], 0)
+        for name in un.PRIMITIVES:
+            self.assertTrue((self.bin_dir / name).is_file())
+
+
+class TestJsonFlagPositions(unittest.TestCase):
+    """The `--json` flag must set force_json in BOTH positions for the three
+    subcommands that declare their own --json. Verifies the argparse
+    subtlety directly: subparsers parse into a fresh namespace and copy
+    every attr back over the parent's, so the subparser flags need
+    default=SUPPRESS to avoid clobbering a top-level `--json` (empirically
+    confirmed on CPython 3.12: a plain store_true default DOES clobber)."""
+
+    SUBCOMMANDS = ("uninstall", "upgrade-check", "upgrade")
+
+    def test_json_after_subcommand_sets_force_json(self) -> None:
+        parser = HOST._build_parser()
+        for sub in self.SUBCOMMANDS:
+            with self.subTest(sub=sub):
+                ns = parser.parse_args([sub, "--json"])
+                self.assertTrue(getattr(ns, "force_json", False))
+
+    def test_json_before_subcommand_sets_force_json(self) -> None:
+        parser = HOST._build_parser()
+        for sub in self.SUBCOMMANDS:
+            with self.subTest(sub=sub):
+                ns = parser.parse_args(["--json", sub])
+                self.assertTrue(
+                    getattr(ns, "force_json", False),
+                    msg=f"--json before {sub!r} was clobbered by the "
+                        "subparser default (SUPPRESS regression)",
+                )
+
+    def test_json_both_positions_sets_force_json(self) -> None:
+        parser = HOST._build_parser()
+        for sub in self.SUBCOMMANDS:
+            with self.subTest(sub=sub):
+                ns = parser.parse_args(["--json", sub, "--json"])
+                self.assertTrue(getattr(ns, "force_json", False))
+
+    def test_no_json_flag_defaults_false(self) -> None:
+        parser = HOST._build_parser()
+        for sub in self.SUBCOMMANDS:
+            with self.subTest(sub=sub):
+                ns = parser.parse_args([sub])
+                self.assertFalse(getattr(ns, "force_json", False))
 
 
 class TestUninstallAutoFlag(unittest.TestCase):

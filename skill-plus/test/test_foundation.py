@@ -142,3 +142,52 @@ def test_encoded_cwd_for_matches_observed_format(tmp_path: Path):
     assert mod.encoded_cwd_for(tmp_path) == expected
     enc = mod.encoded_cwd_for(tmp_path)
     assert "/" not in enc and ":" not in enc and "\\" not in enc
+
+
+# ── MSYS path normalisation (Windows path audit launch gate) ──────────────────
+#
+# `git rev-parse --show-toplevel` under Git Bash/MSYS returns `/c/dev/foo`;
+# Path("/c/dev/foo") on Windows resolves to C:\c\dev\foo (a real past incident
+# wrote state to C:\c\dev\Tinker-Tailor\.agent-plus). Mirrors the coverage
+# style used for skill-feedback's identical helper.
+
+
+def test_msys_to_windows_converts_drive_path_on_win32(monkeypatch):
+    mod = _load_bin_module()
+    monkeypatch.setattr(mod.sys, "platform", "win32")
+    assert mod._msys_to_windows("/c/dev/foo") == "C:/dev/foo"
+    # Drive letter is upcased; rest of the path is untouched.
+    assert mod._msys_to_windows("/d/Work/Repo") == "D:/Work/Repo"
+
+
+def test_msys_to_windows_posix_path_passthrough(monkeypatch):
+    mod = _load_bin_module()
+    # Even on win32, a multi-letter first component is not a drive letter.
+    monkeypatch.setattr(mod.sys, "platform", "win32")
+    assert mod._msys_to_windows("/home/user/x") == "/home/user/x"
+    # On POSIX platforms the helper is a strict no-op, drive-shaped or not.
+    monkeypatch.setattr(mod.sys, "platform", "linux")
+    assert mod._msys_to_windows("/c/dev/foo") == "/c/dev/foo"
+    assert mod._msys_to_windows("/home/user/x") == "/home/user/x"
+
+
+def test_msys_to_windows_plain_windows_form_unchanged(monkeypatch):
+    mod = _load_bin_module()
+    monkeypatch.setattr(mod.sys, "platform", "win32")
+    assert mod._msys_to_windows("C:/dev/foo") == "C:/dev/foo"
+    assert mod._msys_to_windows("C:\\dev\\foo") == "C:\\dev\\foo"
+
+
+def test_git_toplevel_normalises_msys_output(monkeypatch):
+    # The wiring, not just the helper: _git_toplevel() must route git's stdout
+    # through _msys_to_windows before building the Path.
+    mod = _load_bin_module()
+    monkeypatch.setattr(mod.sys, "platform", "win32")
+
+    class _FakeProc:
+        returncode = 0
+        stdout = "/c/dev/foo\n"
+        stderr = ""
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _FakeProc())
+    assert mod._git_toplevel() == Path("C:/dev/foo")

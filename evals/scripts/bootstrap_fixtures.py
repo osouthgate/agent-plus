@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -52,6 +53,101 @@ EXCLUDE_EXTS = {
     ".woff", ".woff2", ".ttf", ".eot",
     ".trace",
 }
+
+# ── secret scrub ──────────────────────────────────────────────────────────────
+#
+# Real repos contain secret-shaped strings in ordinary text files (a 2026-07-03
+# review found a live Langfuse sk-lf-/pk-lf- pair copied verbatim into
+# evals/fixtures/rainshift/ by this script). Every text file is therefore
+# scrubbed after the copy and BEFORE the fixture's git history is created.
+#
+# _SECRET_PATTERNS + scrub_text are DUPLICATED from the canonical copy in
+# skill-plus/bin/skill-plus (its "secret redaction" section). That bin script
+# has no .py extension and lives in another plugin's tree, so it cannot be
+# imported from here; the repo's accepted idiom is to duplicate the list with
+# a provenance note (skill-plus/bin/_subcommands/scaffold.py's generated-skill
+# template does the same). Keep the copies in sync until centralized.
+#
+# List order matters: the value-consuming header-name pattern runs first, so
+# it swallows the whole "Name: <value>" span before the narrower token-shaped
+# patterns below get a chance to see a partial value.
+
+_SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (
+        re.compile(
+            r"\b(Authorization|Proxy-Authorization|Cookie|Set-Cookie|X-Api-Key|"
+            r"X-Auth-Token|Private-Token|CF-Access-Client-Secret|"
+            r"CF-Access-Client-Id|X-Amz-Security-Token)\s*:\s*[^\r\n'\"]+",
+            re.IGNORECASE,
+        ),
+        r"\g<1>: [REDACTED]",
+    ),
+    (re.compile(r"ghp_[A-Za-z0-9]{20,}"), "[REDACTED]"),
+    (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "[REDACTED]"),
+    (re.compile(r"gh[ousr]_[A-Za-z0-9]{20,}"), "[REDACTED]"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "[REDACTED]"),
+    (re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
+    (re.compile(r"sk-lf-[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
+    (re.compile(r"pk-lf-[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
+    # webhook URLs (Slack/Discord) — token in URL path
+    (re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9/_-]+"), "[REDACTED]"),
+    (re.compile(r"https://discord(?:app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9._-]+"), "[REDACTED]"),
+    (re.compile(r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{20,}"), "[REDACTED]"),
+    (re.compile(r"sk-or-[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
+    (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
+    (re.compile(r"sbp_[A-Za-z0-9]{20,}"), "[REDACTED]"),
+    (re.compile(r"sntrys_[A-Za-z0-9._-]{20,}"), "[REDACTED]"),
+    (re.compile(r"AIza[0-9A-Za-z_-]{35}"), "[REDACTED]"),
+    (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "[REDACTED]"),
+    (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"), "[REDACTED]"),
+    # Laravel Sanctum / other opaque "<id>|<hash>" bearer tokens (e.g. "4|<40-char-hash>").
+    (re.compile(r"\b\d+\|[A-Za-z0-9]{20,}\b"), "[REDACTED]"),
+    # Widened: any non-space/quote token of 8+ chars, not just the old
+    # [A-Za-z0-9._-]{20,} charset -- that excluded "|" (Sanctum tokens) and
+    # missed short-but-real tokens under 20 chars.
+    (re.compile(r"Bearer\s+[^\s\"']{8,}", re.IGNORECASE), "[REDACTED]"),
+    # connection strings
+    (re.compile(r"(postgres|mysql|redis|mongodb(?:\+srv)?)://[^\s'\"]+@", re.IGNORECASE), "[REDACTED]"),
+    # argv-style secret pairs
+    (re.compile(r"--(?:password|token|secret|api[-_]?key)[= ]\S+", re.IGNORECASE), "[REDACTED]"),
+]
+
+
+def scrub_text(s: str | None) -> str | None:
+    if s is None:
+        return None
+    out = s
+    for pat, repl in _SECRET_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
+def _scrub_tree(dst: Path) -> int:
+    """Scrub secret-shaped strings from every text file under dst, in place.
+
+    Must run BEFORE _git_init_two_commits so the scrubbed content is what gets
+    committed into the fixture's history. Files that do not decode as utf-8
+    are treated as binary and skipped byte-identical. Rewrites via write_bytes
+    only when the scrub changed something, so line endings and unchanged files
+    stay untouched. Returns the number of files rewritten.
+    """
+    changed = 0
+    for p in sorted(dst.rglob("*")):
+        if not p.is_file():
+            continue
+        try:
+            raw = p.read_bytes()
+        except OSError:
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            continue  # binary -> leave byte-identical
+        scrubbed = scrub_text(text)
+        if scrubbed is not None and scrubbed != text:
+            p.write_bytes(scrubbed.encode("utf-8"))
+            changed += 1
+    return changed
 
 
 def _run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> None:
@@ -169,6 +265,10 @@ def _build_real_fixture(name: str, src: Path) -> bool:
     # Do NOT mkdir here — _copytree_selective / shutil.copytree creates dst.
     try:
         n = _copytree_selective(src, dst)
+        scrubbed = _scrub_tree(dst)
+        if scrubbed:
+            print(f"  {name}: scrubbed secret-shaped strings in {scrubbed} file(s)",
+                  file=sys.stderr)
         _write_source_marker(dst, f"real:{src}")
         _git_init_two_commits(dst, name, real=True)
         print(f"  {name}: copied {n} files from {src}", file=sys.stderr)
@@ -189,6 +289,13 @@ def _build_synthetic_fixture(name: str, files: dict[str, str]) -> None:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
     _write_source_marker(dst, "synthetic")
+    # Synthetic content is authored above (no secrets by construction), but
+    # running it through the same scrub as real repos costs nothing and keeps
+    # one invariant: nothing under evals/fixtures/ gets committed unscrubbed.
+    scrubbed = _scrub_tree(dst)
+    if scrubbed:
+        print(f"  {name}: scrubbed secret-shaped strings in {scrubbed} file(s)",
+              file=sys.stderr)
     _git_init_two_commits(dst, name, real=False)
     print(f"  {name}: synthetic fixture written", file=sys.stderr)
 

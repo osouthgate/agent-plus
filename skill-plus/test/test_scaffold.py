@@ -1,6 +1,7 @@
 """Tests for skill-plus scaffold subcommand."""
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -208,3 +209,28 @@ def test_from_candidate_unknown_id_errors(git_repo: Path):
     assert res.returncode == 2
     payload = json.loads(res.stdout)
     assert payload["error"] == "candidate_not_found"
+
+
+def test_generated_py_git_toplevel_normalises_msys_paths(git_repo: Path, monkeypatch):
+    """Generated skills are self-contained (they duplicate helpers instead of
+    importing skill-plus), so the MSYS path fix must ship inside the template
+    too: `git rev-parse --show-toplevel` under Git Bash returns `/c/dev/foo`,
+    which Path() on Windows resolves to C:\\c\\dev\\foo."""
+    _scaffold_full(git_repo)
+    p = git_repo / ".claude" / "skills" / "my-skill" / "bin" / "my-skill.py"
+
+    # The wiring, not just the helper: _git_toplevel must route through it.
+    src = p.read_text(encoding="utf-8")
+    assert "_msys_to_windows(line)" in src
+
+    spec = importlib.util.spec_from_file_location("generated_skill_under_test", p)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    monkeypatch.setattr(mod.sys, "platform", "win32")
+    assert mod._msys_to_windows("/c/dev/foo") == "C:/dev/foo"
+    assert mod._msys_to_windows("/home/user/x") == "/home/user/x"
+    assert mod._msys_to_windows("C:/dev/foo") == "C:/dev/foo"
+    monkeypatch.setattr(mod.sys, "platform", "linux")
+    assert mod._msys_to_windows("/c/dev/foo") == "/c/dev/foo"

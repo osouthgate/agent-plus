@@ -403,10 +403,12 @@ agent-plus-meta uninstall                 # 5 bins only — interactive y/N
 agent-plus-meta uninstall --workspace     # also remove .agent-plus/ workspaces
 agent-plus-meta uninstall --marketplaces  # also unregister marketplace state
 agent-plus-meta uninstall --all           # bins + workspace + marketplaces
-agent-plus-meta uninstall --purge         # all + everything we own; ALWAYS prompts 'PURGE'
+agent-plus-meta uninstall --purge         # all + everything we own; requires typing 'PURGE' at a real TTY
 agent-plus-meta uninstall --dry-run       # preview manifest, remove nothing
-agent-plus-meta uninstall --json          # JSON envelope only (script mode)
+agent-plus-meta uninstall --json          # JSON envelope only (script mode; implies non-interactive)
 ```
+
+`--json` is accepted before or after the subcommand (`agent-plus-meta --json uninstall` and `agent-plus-meta uninstall --json` are equivalent) and forces the JSON envelope onto stdout even on an interactive terminal. **`--json` implies non-interactive for the scope confirmation; purge always requires a real TTY.** A non-TTY stdin (piped/closed) also skips the y/N scope prompt and proceeds with the same auto-confirmed semantics as `--non-interactive` -- scripts should select scope with flags, not by piping `y`/`n`. `--purge` combined with `--json`, `--non-interactive`/`--auto`, or a non-TTY stdin is refused up front (exit code 1, structured error envelope on stderr, nothing removed) instead of blocking on a prompt automation can never answer; `--dry-run --purge` still works everywhere since it never prompts and never removes.
 
 The `install.sh --uninstall` shim delegates to this command when `agent-plus-meta` is reachable. When it's not (broken/partial install), `install.sh` falls back to a self-contained POSIX shell path that removes the 5 bins only — expanded scopes are refused with exit 3 in fallback mode.
 
@@ -418,10 +420,10 @@ The `install.sh --uninstall` shim delegates to this command when `agent-plus-met
 | `--workspace`        | `<repo>/.agent-plus/` AND `~/.agent-plus/`                  |
 | `--marketplaces`     | `~/.agent-plus/marketplaces/<owner>-<name>/` registrations  |
 | `--all`              | bins + workspace + marketplaces (does NOT include `--purge`) |
-| `--purge`            | `--all` PLUS any other agent-plus state we own. ALWAYS prompts `PURGE`. |
+| `--purge`            | `--all` PLUS any other agent-plus state we own. Requires typing `PURGE` at a real TTY; refused (rc 1) under `--json`/`--non-interactive` or piped stdin. |
 | `--dry-run`          | preview only; remove nothing                                |
-| `--non-interactive`  | skip y/N prompt; does NOT bypass `--purge` confirmation     |
-| `--json`             | suppress human preview; emit JSON envelope on stdout        |
+| `--non-interactive`  | skip y/N prompt; does NOT bypass `--purge` confirmation (`--purge` is refused, rc 1) |
+| `--json`             | suppress human preview; emit JSON envelope on stdout (before or after the subcommand); implies non-interactive for the scope confirmation |
 | `--install-dir PATH` | override `$INSTALL_DIR` (defaults to `AGENT_PLUS_INSTALL_DIR` or `~/.local/bin`) |
 
 #### What the uninstall NEVER touches
@@ -499,7 +501,7 @@ Most subcommands fork on one signal: does `~/.claude/projects/*/*.jsonl` exist a
 | `extensions validate` (issues) | re-run `extensions validate` after fixing them |
 | `extensions list` / `remove` | `extensions validate` |
 
-**TTY footer.** When stdout is a human's interactive terminal (no `--json`), the JSON envelope is suppressed and the same information prints to stderr instead: `Next: <first step>` and, if there's a second one, `Then: <second step>`. `--json` always forces the envelope back onto stdout (and suppresses the footer). `--version` has no envelope at all (frozen contract) but still prints a `Next: agent-plus-meta doctor ...` stderr line when run interactively.
+**TTY footer.** When stdout is a human's interactive terminal (no `--json`), the JSON envelope is suppressed and the same information prints to stderr instead: `Next: <first step>` and, if there's a second one, `Then: <second step>`. `--json` -- accepted before or after the subcommand -- always forces the envelope back onto stdout (and suppresses the footer). `--version` has no envelope at all (frozen contract) but still prints a `Next: agent-plus-meta doctor ...` stderr line when run interactively.
 
 Claude follows these automatically without the user needing to know the workflow -- see `skills/agent-plus-meta/SKILL.md`'s "Always surface nextSteps" section for the read-every-time contract.
 

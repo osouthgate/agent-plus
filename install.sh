@@ -13,6 +13,16 @@
 #   sh install.sh --dry-run        # print what would happen, install nothing
 #   sh install.sh --no-init        # skip the agent-plus-meta init chain (CI)
 #   sh install.sh --unattended     # no prompts, accept defaults, exit 0 on partial install
+#                                   # NOTE: a checksum MISMATCH is a hard integrity failure,
+#                                   # not a "partial install" -- it always exits 1, even
+#                                   # under --unattended, and the tarball is discarded.
+#   AGENT_PLUS_NO_VERIFY=1 sh install.sh   # skip sha256 verification of the release tarball
+#
+# Tagged releases install from a self-built release-asset tarball and verify
+# it (sha256) against a SHA256SUMS file published alongside it. Releases
+# before v0.21.0 predate published checksums and fall back to the unverified
+# GitHub auto-archive URL, with a stderr note. main/master installs are
+# always unverified (moving target).
 #
 # Verify post-install:
 #   agent-plus-meta doctor --pretty
@@ -25,6 +35,12 @@ REPO_OWNER="osouthgate"
 REPO_NAME="agent-plus"
 INSTALL_DIR="${AGENT_PLUS_INSTALL_DIR:-$HOME/.local/bin}"
 PREFIX="${AGENT_PLUS_PREFIX:-$HOME/.local/share/agent-plus}"
+NO_VERIFY="${AGENT_PLUS_NO_VERIFY:-0}"
+# Test-only: overrides the release-asset base URL (precedent: --source-dir
+# below). Lets the test suite point at a local file:// dir with a seeded
+# tarball + SHA256SUMS instead of a real GitHub release. See
+# test/test_install_script.py.
+ASSET_BASE_URL_OVERRIDE="${AGENT_PLUS_ASSET_BASE_URL:-}"
 
 # Primitives shipped from the framework marketplace.
 PRIMITIVES="agent-plus-meta repo-analyze diff-summary skill-feedback skill-plus"
@@ -153,7 +169,7 @@ for arg in "$@"; do
             SOURCE_DIR="${arg#--source-dir=}"
             ;;
         -h|--help)
-            sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -207,6 +223,54 @@ tarball_url_for() {
             echo "https://github.com/$REPO_OWNER/$REPO_NAME/archive/refs/tags/v$tag.tar.gz"
             ;;
     esac
+}
+
+is_release_tag() {
+    # A release tag is anything that isn't one of the two branch names we
+    # treat as moving targets. Kept in sync with the case pattern above.
+    case "$1" in
+        main|master) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+normalize_tag() {
+    # Ensure a "v" prefix: "0.21.0" -> "v0.21.0", "v0.21.0" -> "v0.21.0".
+    case "$1" in
+        v*) echo "$1" ;;
+        *) echo "v$1" ;;
+    esac
+}
+
+bare_version() {
+    # Strip the "v" prefix: "v0.21.0" -> "0.21.0".
+    norm=$(normalize_tag "$1")
+    echo "${norm#v}"
+}
+
+asset_base_url_for() {
+    # Base URL for release-asset downloads (the tarball + SHA256SUMS live
+    # next to the install.sh/install.ps1 assets on the same release).
+    if [ -n "$ASSET_BASE_URL_OVERRIDE" ]; then
+        echo "$ASSET_BASE_URL_OVERRIDE"
+        return 0
+    fi
+    tag_norm=$(normalize_tag "$1")
+    echo "https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/$tag_norm"
+}
+
+asset_tarball_url_for() {
+    # The self-built, byte-stable tarball uploaded by .github/workflows/release.yml
+    # -- preferred over tarball_url_for()'s GitHub auto-archive for tagged
+    # releases, since auto-archives are not guaranteed byte-stable long-term.
+    ver=$(bare_version "$1")
+    base=$(asset_base_url_for "$1")
+    echo "$base/agent-plus-$ver.tar.gz"
+}
+
+asset_sums_url_for() {
+    base=$(asset_base_url_for "$1")
+    echo "$base/SHA256SUMS"
 }
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -308,17 +372,74 @@ locate_agent_plus_meta() {
     return 1
 }
 
+# Portable sha256 tool discovery. Always exits 0 (safe under `set -e` when
+# used as `tool=$(find_hash_tool)`); an empty result means "none found" and
+# callers must handle that explicitly.
+find_hash_tool() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        echo "sha256sum"
+    elif command -v shasum >/dev/null 2>&1; then
+        echo "shasum"
+    elif command -v openssl >/dev/null 2>&1; then
+        echo "openssl"
+    else
+        echo ""
+    fi
+}
+
+sha256_of() {
+    # $1 = tool name from find_hash_tool, $2 = file path. Always exits 0 --
+    # the final pipeline stage (cut/sed) succeeds regardless of its input.
+    tool="$1"
+    file="$2"
+    case "$tool" in
+        sha256sum) sha256sum "$file" | cut -d' ' -f1 ;;
+        shasum) shasum -a 256 "$file" | cut -d' ' -f1 ;;
+        openssl) openssl dgst -sha256 "$file" | sed 's/^.*= //' ;;
+    esac
+}
+
+expected_hash_for() {
+    # $1 = SHA256SUMS path, $2 = filename to look up within it. Empty
+    # output (not a nonzero exit) if there's no matching entry -- keeps
+    # this safe to use as `expected=$(expected_hash_for ...)` under `set -e`.
+    sums_file="$1"
+    name="$2"
+    grep "$name" "$sums_file" 2>/dev/null | head -1 | cut -d' ' -f1
+}
+
 # ─── main ────────────────────────────────────────────────────────────────────
 
 print_header
 
 TAG=$(resolve_tag)
-TARBALL=$(tarball_url_for "$TAG")
+RELEASE_TAG=0
+if is_release_tag "$TAG"; then
+    RELEASE_TAG=1
+fi
+AUTOARCHIVE_TARBALL=$(tarball_url_for "$TAG")
+ASSET_TARBALL=""
+if [ "$RELEASE_TAG" -eq 1 ]; then
+    ASSET_TARBALL=$(asset_tarball_url_for "$TAG")
+    TARBALL="$ASSET_TARBALL"
+else
+    TARBALL="$AUTOARCHIVE_TARBALL"
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
     echo ""
     echo "tag:          $TAG"
     echo "tarball:      $TARBALL"
+    if [ "$RELEASE_TAG" -eq 1 ]; then
+        echo "fallback:     $AUTOARCHIVE_TARBALL (used if this release predates published checksums)"
+        if [ "$NO_VERIFY" = "1" ]; then
+            echo "verification: skipped (AGENT_PLUS_NO_VERIFY=1)"
+        else
+            echo "verification: sha256, checked against SHA256SUMS from the release; a mismatch aborts the install (set AGENT_PLUS_NO_VERIFY=1 to skip)"
+        fi
+    else
+        echo "verification: skipped ($TAG installs are unverified by design -- pin a release via AGENT_PLUS_VERSION for a verified install)"
+    fi
     echo "prefix:       $PREFIX"
     echo "install dir:  $INSTALL_DIR"
     echo ""
@@ -382,17 +503,75 @@ if [ -n "$SOURCE_DIR" ]; then
 else
     TMPDIR=$(mktemp -d 2>/dev/null || mktemp -d -t agentplus)
     trap 'rm -rf "$TMPDIR"' EXIT
+    TARBALL_PATH="$TMPDIR/agent-plus.tar.gz"
+    USED_ASSET=0
     echo ""
-    echo "Downloading $TARBALL ..."
-    if ! curl -fsSL "$TARBALL" -o "$TMPDIR/agent-plus.tar.gz"; then
-        echo "install.sh: tarball download failed: $TARBALL" >&2
-        echo "[install_sh_curl_failed] tarball: $TARBALL" >&2
-        if [ "$UNATTENDED" -eq 1 ]; then
-            exit 0
+    if [ "$RELEASE_TAG" -eq 1 ]; then
+        echo "Downloading $ASSET_TARBALL ..."
+        if curl -fsSL "$ASSET_TARBALL" -o "$TARBALL_PATH" 2>/dev/null; then
+            USED_ASSET=1
+        else
+            echo "install.sh: release asset not found -- this release predates published checksums; verification skipped. Falling back to source archive." >&2
+            echo "Downloading $AUTOARCHIVE_TARBALL ..."
+            if ! curl -fsSL "$AUTOARCHIVE_TARBALL" -o "$TARBALL_PATH"; then
+                echo "install.sh: tarball download failed: $AUTOARCHIVE_TARBALL" >&2
+                echo "[install_sh_curl_failed] tarball: $AUTOARCHIVE_TARBALL" >&2
+                if [ "$UNATTENDED" -eq 1 ]; then
+                    exit 0
+                fi
+                exit 1
+            fi
         fi
-        exit 1
+    else
+        echo "install.sh: installing from $TAG -- unverified (moving target)." >&2
+        echo "Downloading $AUTOARCHIVE_TARBALL ..."
+        if ! curl -fsSL "$AUTOARCHIVE_TARBALL" -o "$TARBALL_PATH"; then
+            echo "install.sh: tarball download failed: $AUTOARCHIVE_TARBALL" >&2
+            echo "[install_sh_curl_failed] tarball: $AUTOARCHIVE_TARBALL" >&2
+            if [ "$UNATTENDED" -eq 1 ]; then
+                exit 0
+            fi
+            exit 1
+        fi
     fi
-    if ! tar -xzf "$TMPDIR/agent-plus.tar.gz" -C "$TMPDIR"; then
+
+    if [ "$USED_ASSET" -eq 1 ]; then
+        if [ "$NO_VERIFY" = "1" ]; then
+            echo "install.sh: AGENT_PLUS_NO_VERIFY=1 -- skipping checksum verification." >&2
+        else
+            hash_tool=$(find_hash_tool)
+            if [ -z "$hash_tool" ]; then
+                echo "install.sh: no sha256 tool found (sha256sum, shasum, or openssl) -- continuing WITHOUT verification. Set AGENT_PLUS_NO_VERIFY=1 to silence this warning." >&2
+            else
+                sums_path="$TMPDIR/SHA256SUMS"
+                sums_url=$(asset_sums_url_for "$TAG")
+                if ! curl -fsSL "$sums_url" -o "$sums_path" 2>/dev/null; then
+                    echo "install.sh: could not download SHA256SUMS ($sums_url) -- continuing WITHOUT verification." >&2
+                else
+                    ver=$(bare_version "$TAG")
+                    tarball_name="agent-plus-$ver.tar.gz"
+                    expected=$(expected_hash_for "$sums_path" "$tarball_name")
+                    if [ -z "$expected" ]; then
+                        echo "install.sh: SHA256SUMS has no entry for $tarball_name -- continuing WITHOUT verification." >&2
+                    else
+                        actual=$(sha256_of "$hash_tool" "$TARBALL_PATH")
+                        if [ "$expected" != "$actual" ]; then
+                            echo "install.sh: CHECKSUM MISMATCH for $tarball_name" >&2
+                            echo "install.sh:   expected $expected" >&2
+                            echo "install.sh:   actual   $actual" >&2
+                            echo "[install_sh_checksum_failed] $tarball_name expected=$expected actual=$actual" >&2
+                            echo "install.sh: downloaded tarball discarded; refusing to install an unverified payload." >&2
+                            rm -f "$TARBALL_PATH"
+                            exit 1
+                        fi
+                        echo "Checksum verified (sha256 via $hash_tool): $tarball_name"
+                    fi
+                fi
+            fi
+        fi
+    fi
+
+    if ! tar -xzf "$TARBALL_PATH" -C "$TMPDIR"; then
         echo "install.sh: tarball extraction failed" >&2
         echo "[install_sh_extract_failed] tar -xzf failed" >&2
         exit 1

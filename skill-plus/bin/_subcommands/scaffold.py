@@ -230,6 +230,20 @@ def _parse_dotenv(path: Path) -> dict:
     return out
 
 
+def _msys_to_windows(p: str) -> str:
+    """Convert MSYS/Git-Bash paths like /c/dev/foo -> C:/dev/foo on Windows.
+
+    Git for Windows can emit POSIX-style toplevel paths; Path("/c/dev/foo")
+    on Windows silently resolves to C:\\c\\dev\\foo. Duplicated from
+    bin/skill-plus (same import-isolation rationale as _SECRET_PATTERNS
+    above -- scaffolded skills are self-contained)."""
+    if sys.platform == "win32":
+        m = re.match(r"^/([a-zA-Z])(/.*)$", p)
+        if m:
+            return m.group(1).upper() + ":" + m.group(2)
+    return p
+
+
 def _git_toplevel() -> Optional[Path]:
     import subprocess
     try:
@@ -240,7 +254,7 @@ def _git_toplevel() -> Optional[Path]:
     if r.returncode != 0:
         return None
     line = r.stdout.strip()
-    return Path(line) if line else None
+    return Path(_msys_to_windows(line)) if line else None
 
 
 def resolve_env(env_file: Optional[str]) -> dict:

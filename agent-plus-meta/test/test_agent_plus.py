@@ -160,18 +160,22 @@ class TestInitBadDirError(unittest.TestCase):
     """
 
     def test_bad_dir_returns_structured_envelope(self) -> None:
-        # Pick a path whose deepest existing ancestor is read-only on every
-        # platform: on POSIX this is `/proc/1` (owned by root), on Windows
-        # we use a path under the system root that's reliably write-denied
-        # for unprivileged users. We just need ANY OSError on mkdir to
-        # exercise the structured-error path; the contents of `cause` are
+        # Nest the target under an EXISTING FILE so mkdir fails with
+        # NotADirectoryError (POSIX ENOTDIR / [WinError 267]) regardless of
+        # privilege. The old approach (write-denied system dirs like
+        # C:\Windows\System32 or /proc/1) broke on GitHub's windows-latest
+        # runners, which run as Administrator and can create directories
+        # there. We just need ANY OSError on mkdir to exercise the
+        # structured-error path; the contents of `cause` are
         # platform-specific by design.
-        if sys.platform == "win32":
-            bad = r"C:\Windows\System32\agent-plus-test-deny-xxx"
-        else:
-            bad = "/proc/1/agent-plus-test-deny-xxx"
-        rc, out, err = _run("init", "--non-interactive", "--auto",
-                            "--dir", bad)
+        fd, blocker = tempfile.mkstemp(prefix="agent-plus-deny-")
+        os.close(fd)
+        try:
+            bad = os.path.join(blocker, "agent-plus-test-deny-xxx")
+            rc, out, err = _run("init", "--non-interactive", "--auto",
+                                "--dir", bad)
+        finally:
+            os.unlink(blocker)
         self.assertEqual(rc, 1, msg=f"expected rc=1, got {rc}; stderr={err!r}")
         # Structured envelope is emitted on stderr (matches the existing
         # generic-error contract).

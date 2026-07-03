@@ -19,6 +19,7 @@ jobs:
         run: |
           set -e
           TAG="${GITHUB_REF#refs/tags/}"
+          VER="${TAG#v}"
 
           # Create the release if it doesn't already exist.
           # Using view-or-create avoids swallowing real errors (auth, rate limits).
@@ -28,5 +29,14 @@ jobs:
               --generate-notes \
               --verify-tag
 
-          # Upload both installers as release assets.
-          gh release upload "$TAG" install.sh install.ps1 --clobber
+          # Build a deterministic, self-built source tarball. GitHub's
+          # auto-generated archive/refs/tags/*.tar.gz is NOT guaranteed
+          # byte-stable long-term, so install.sh/install.ps1 verify against
+          # this tarball instead (uploaded below as a release asset).
+          git archive --format=tar.gz --prefix="agent-plus-${VER}/" -o "agent-plus-${VER}.tar.gz" "$TAG"
+
+          # Checksums cover exactly: the tarball + the two installer scripts.
+          sha256sum "agent-plus-${VER}.tar.gz" install.sh install.ps1 > SHA256SUMS
+
+          # Upload the installers, the tarball, and the checksums as release assets.
+          gh release upload "$TAG" install.sh install.ps1 "agent-plus-${VER}.tar.gz" SHA256SUMS --clobber
