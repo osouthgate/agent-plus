@@ -113,7 +113,7 @@ Walks `<project>/.claude/skills/`, scores each skill against the framework contr
 
 ### feedback — close the loop
 
-Reads `.agent-plus/skill-feedback/<skill>.jsonl` (explicit ratings) AND the session log (implicit signals: plugin invocation followed by manual fallback, plugin re-invoked with different flags within 5 calls, raw command pattern that an installed plugin would obviate but the user keeps typing). Joins both streams per-skill, ranks by combined-concern score. Read-only — never mutates either log.
+Reads `~/.agent-plus/skill-feedback/<skill>.jsonl` (explicit ratings — user-global, resolved the same way the skill-feedback CLI does: `SKILL_FEEDBACK_DIR` env overrides) AND the session log (implicit signals: plugin invocation followed by manual fallback, plugin re-invoked with different flags within 5 calls, raw command pattern that an installed plugin would obviate but the user keeps typing). Joins both streams per-skill, ranks by combined-concern score. Read-only — never mutates either log.
 
 ### promote — ship it to the marketplace
 

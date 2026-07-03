@@ -26,59 +26,63 @@ skill-feedback --version
 
 ```bash
 $ skill-feedback log hermes-remote --rating 3 --outcome partial \
-    --friction "no streaming chat support; fell back to curl + SSE"
+    --friction "no streaming chat support; fell back to curl + SSE" --pretty
 {
-  "tool": {"name": "skill-feedback", "version": "0.4.0"},
-  "ok": true,
-  "skill": "hermes-remote",
-  "appended": "/repo/.agent-plus/skill-feedback/hermes-remote.jsonl",
-  "entry": {
+  "tool": {"name": "skill-feedback", "version": "0.5.0"},
+  "logged": {
     "ts": "2026-04-26T21:30:00Z",
     "skill": "hermes-remote",
     "rating": 3,
     "outcome": "partial",
     "friction": "no streaming chat support; fell back to curl + SSE",
     "session_id": "abc123",
-    "tool_version": "0.4.0",
     "schema": 1
-  }
+  },
+  "path": "/home/you/.agent-plus/skill-feedback/hermes-remote.jsonl",
+  "nextSteps": ["skill-feedback report to see quality trends across logged skills"]
 }
 
 $ skill-feedback report --skill hermes-remote --since 30d --pretty
 {
-  "tool": {"name": "skill-feedback", "version": "0.4.0"},
-  "window": "30d",
+  "tool": {"name": "skill-feedback", "version": "0.5.0"},
+  "since": "30d",
+  "skill_filter": "hermes-remote",
+  "total_entries": 14,
   "skills": [{
     "skill": "hermes-remote",
     "count": 14,
-    "avg_rating": 3.6,
+    "avg_rating": 3.64,
+    "rating_histogram": {"2": 1, "3": 4, "4": 8, "5": 1},
     "outcomes": {"success": 9, "partial": 4, "failure": 1},
     "top_friction": [
-      {"label": "no streaming chat support", "count": 3},
-      {"label": "missing --json flag", "count": 2}
+      {"text": "no streaming chat support", "count": 3},
+      {"text": "missing --json flag", "count": 2}
     ]
-  }]
+  }],
+  "storage_root": "/home/you/.agent-plus/skill-feedback",
+  "provenance": {"tier": "unknown", "primary_path": null, "marketplace_repo": null, "edit_hint": null, "collision": false},
+  "nextSteps": ["skill-feedback submit to share anonymised aggregates (optional)"]
 }
 ```
 
 ## What it covers
 
 - **`log` is one CLI call.** No SDK, no config file. The footer at the bottom of any SKILL.md teaches the agent the contract.
-- **JSONL on disk.** `.agent-plus/skill-feedback/<skill>.jsonl`. Trivially `jq`-able, `grep`-able, deletable.
+- **JSONL on disk.** `~/.agent-plus/skill-feedback/<skill>.jsonl`. Trivially `jq`-able, `grep`-able, deletable.
 - **`report` aggregates locally.** Average rating, outcome histogram, top friction strings — one blob, not 200 raw lines.
 - **`submit` is dry-run by default.** Prints a markdown issue body for review. `--no-dry-run` files via `gh` (using your existing GitHub auth), or writes `<storage-root>/<skill>.submit.md` for manual paste if `gh` is missing.
-- **Repo resolution for `submit`** (highest first): `--repo owner/name` → `repository`/`homepage` in the skill's `plugin.json` (dev checkout under `<agent-plus>/<skill>/.claude-plugin/` or installed under `~/.claude/plugins/<skill>/.claude-plugin/`) → error and ask for `--repo`.
+- **Repo resolution for `submit`** (highest first): `--repo owner/name` → `repository` in the skill's `plugin.json` (dev checkout under `<agent-plus>/<skill>/.claude-plugin/` or installed under `~/.claude/plugins/<skill>/.claude-plugin/`; the `homepage` fallback was removed in v0.3.0) → error and ask for `--repo`.
 
 ## Storage resolution
 
 Highest precedence first:
 
 1. `SKILL_FEEDBACK_DIR` env var (absolute path)
-2. `<git-toplevel>/.agent-plus/skill-feedback/` (cwd in a git repo)
-3. `<cwd>/.agent-plus/skill-feedback/` (project-local `.agent-plus/` exists)
-4. `~/.agent-plus/skill-feedback/` (last-resort)
+2. `~/.agent-plus/skill-feedback/` (user-global — default)
 
-`skill-feedback path` prints the resolved root + the rule that fired (`source: env|git|cwd|home`). The `.agent-plus/` directory is the standard agent-plus convention — gitignore it for personal feedback, commit it to share with the team.
+Ratings reflect skill quality, not a specific repo, so feedback always lands in one place per machine instead of being scattered per project. `skill-feedback path` prints the resolved root + the rule that fired (`source: env|home`), plus a `legacy_store` field: non-null when a pre-v0.19.4 project-local `.agent-plus/skill-feedback/` directory is still sitting nearby with `.jsonl` files in it. That data is no longer read — merge it into the active root by hand.
+
+Need a repo-scoped or team-shared store instead of the user-global default? Set `SKILL_FEEDBACK_DIR` explicitly — that's the escape hatch for both cases.
 
 `CLAUDE_SESSION_ID` is auto-attached to each entry when Claude Code sets it, so the author can correlate logs from one session.
 
@@ -166,7 +170,7 @@ leaves the machine unless the user runs `skill-feedback submit --no-dry-run`.
 
 ## Optional Stop hook
 
-The repo ships a draft `.claude/hooks/check-skill-feedback.sh` that nudges Claude to log feedback when a skill ran but no entry was appended. **NOT registered by default** — wire it into `.claude/settings.json` yourself if you want it. Off unless `.agent-plus/skill-feedback/.enabled` exists.
+The repo ships a draft `.claude/hooks/check-skill-feedback.sh` that nudges Claude to log feedback when a skill ran but no entry was appended. **NOT registered by default** — wire it into `.claude/settings.json` yourself if you want it. Off unless `~/.agent-plus/skill-feedback/.enabled` exists (or `$SKILL_FEEDBACK_DIR/.enabled` when the env override is set).
 
 ## Install
 

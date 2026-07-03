@@ -16,16 +16,6 @@ Deferred items that don't fit active plans but must not be forgotten.
 
 ---
 
-## Plan #3 (skill-feedback global path) must complete before public launch
-
-**What:** The "no migration needed" assumption in Plan #3 is only valid while there are no live users. If Plan #3 is not completed before any public release, it becomes a migration problem.
-
-**Why:** Once users have ratings in `<project>/.agent-plus/skill-feedback/`, moving to the global path requires a migration script. The plan skips the migration step because there are no live users today — this assumption decays the moment anything ships.
-
-**How to apply:** Block any public release / marketplace listing on Plan #3 completion. Add this to the release checklist.
-
----
-
 ## Windows path audit: scan for raw Path(git_output) calls (small)
 
 **What:** The MSYS `/c/dev/foo` -> `C:/dev/foo` normalisation was only added to `_write_stamp` and `_git_toplevel` in the hook. Any other place in the codebase that does `Path(subprocess_git_output.strip())` on Windows is vulnerable to the same silent wrong-path bug.
@@ -40,7 +30,7 @@ Deferred items that don't fit active plans but must not be forgotten.
 
 **What:** Verify where `.agent-plus/marketplaces/` lands and whether it's project-local or global. Marketplace installs shouldn't reinstall per repo.
 
-**Why:** Plan #3 identifies this as an open audit item but makes no claim and gives no resolution path. If marketplaces are per-project, users who switch repos find their marketplace settings missing.
+**Why:** Left as an open audit item by the skill-feedback global-path migration (since shipped), which made no claim and gave no resolution path. If marketplaces are per-project, users who switch repos find their marketplace settings missing.
 
 **How to apply:** Read `agent-plus-meta` marketplace install code. Check where it writes. If project-local, move to `~/.agent-plus/marketplaces/` and update any path resolution logic.
 
@@ -63,3 +53,13 @@ Deferred items that don't fit active plans but must not be forgotten.
 **Why:** the fixture dirs are gitignored so nothing ships, but plaintext credentials on disk outside their source repo is silent risk, and it recurs on every re-bootstrap of a real repo.
 
 **How to apply:** route every text file through the same `scrub_text`/`_SECRET_PATTERNS` machinery skill-plus uses (or a copy of the pattern list) during the bootstrap copy; add a test with a seeded fake `sk-lf-` token. Rotate the specific leaked key at the Langfuse instance regardless (its true source is the rainshift repo itself).
+
+---
+
+## `--json` dest mismatch on upgrade-check / upgrade / uninstall (small)
+
+**What:** Those three subparsers each define their own `--json` as a plain `store_true` (dest `json`), separate from the top-level `--json` (dest `force_json`). Passing the flag AFTER the subcommand (`agent-plus-meta uninstall --json`) sets `args.json`, which `main()`'s envelope-suppression check never reads -- so documented "script mode" still suppresses the JSON envelope on an interactive terminal. Additionally, `cmd_uninstall` computes an `interactive` flag from this `json`/`non_interactive` pair but only records it in the envelope; the y/N confirmation is gated solely by `non_interactive`, so `uninstall --json` without `--non-interactive` can still block on `input()`.
+
+**Why:** Scripts using the documented `--json` script mode get a silently-suppressed envelope from a terminal, and automation can hang on a hidden prompt. Found during the 2026-07 nextSteps contract work; both defects are pre-existing and were left alone because fixing them changes frozen envelope-timing/prompt behavior.
+
+**How to apply:** Point the three subparser `--json` flags at `dest="force_json"` (or hoist into the shared pretty/json parent parser); add a regression test that `uninstall --json` on a fake TTY prints the envelope; decide whether `--json` should imply `--non-interactive` for the prompt (contract change -- document in the uninstall envelope doc if so).

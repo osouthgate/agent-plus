@@ -65,6 +65,8 @@ of truth for the envelope's shape.
 }
 ```
 
+**Note (2026-07, additive, non-breaking):** the envelope also carries a `nextSteps` (camelCase) field -- the cross-plugin funnel-chain contract shared by every agent-plus-meta subcommand (see `README.md`'s "nextSteps[] chaining"). It is distinct from this doc's `next_steps` (snake_case, uninstall-specific reinstall pointer) and follows the `"<runnable command> -- <why>"` shape. Because a real (non-dry-run, confirmed) removal deletes this bin along with the rest of the default tier, `nextSteps` deliberately does NOT chain into another `agent-plus-meta` command in that case -- it surfaces an outstanding `claude plugin uninstall ...` hint if one exists, else a `git status` sanity check. A dry-run or a declined confirmation (nothing actually removed yet) still points back at `agent-plus-meta uninstall`.
+
 ## Enums
 
 ### `mode`

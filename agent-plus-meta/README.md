@@ -472,7 +472,36 @@ Every other mode is recoverable via re-install. `--purge` removes user data we o
 
 ## nextSteps[] chaining
 
-Every command output envelope includes a `nextSteps` array. Per-command hints: `init` → `repo-analyze` + `diff-summary`; `doctor` (degraded) → fix-and-rerun; `doctor` (healthy) → `repo-analyze`; `envcheck` (missing vars) → remediate + rerun; `refresh` → doctor for verification. Claude follows these automatically without the user needing to know the workflow.
+Every subcommand's JSON envelope includes a `nextSteps` array (1-2 entries, most-important first). Each entry is a literal, copy-paste-runnable string: `"<command> -- <why>"`. The command always starts with one of `agent-plus-meta`, `repo-analyze`, `skill-plus`, `skill-feedback`, `diff-summary`, `claude`, or `git` -- never a natural-language "ask Claude to..." phrasing, which is non-runnable when the reader is already the agent.
+
+Most subcommands fork on one signal: does `~/.claude/projects/*/*.jsonl` exist anywhere (i.e. has this user used Claude Code before, on any project)? Returning users are routed to `skill-plus scan` (mine session history for skill candidates); brand-new users are routed to `repo-analyze` (orient on this codebase first).
+
+| Command | nextSteps |
+|---|---|
+| `init` | `envcheck`, then the history-branched step |
+| `envcheck` (missing required vars) | re-run `envcheck` after setting them |
+| `envcheck` (all set) | history-branched step |
+| `doctor` (issues present) | re-run `doctor --pretty` after fixing them |
+| `doctor` (clean) | history-branched step |
+| `refresh` | `doctor --pretty` to verify |
+| `list` | history-branched step |
+| `upgrade-check` (update available) | `upgrade` |
+| `upgrade-check` (up to date / unknown) | `doctor --pretty` |
+| `upgrade` | `doctor --pretty` to verify post-upgrade health |
+| `uninstall` (dry-run, or declined) | re-run `uninstall` to actually remove |
+| `uninstall` (real removal confirmed) | an outstanding `claude plugin uninstall ...` hint, else `git status` -- never another `agent-plus-meta` command, since the bins (including this one) are presumed gone by then |
+| `marketplace init` | `marketplace install` on success, `marketplace list` on error |
+| `marketplace install` | `refresh`, unless the first-run prompt was declined (then `marketplace remove` to re-accept) |
+| `marketplace search` | `marketplace install <top-result-slug>`, or re-search on zero results |
+| `marketplace update` / `remove` / `prefer` / `list` | `doctor --pretty` to confirm the framework is still healthy |
+| `extensions add` | `extensions validate` |
+| `extensions validate` (ok) | `refresh` |
+| `extensions validate` (issues) | re-run `extensions validate` after fixing them |
+| `extensions list` / `remove` | `extensions validate` |
+
+**TTY footer.** When stdout is a human's interactive terminal (no `--json`), the JSON envelope is suppressed and the same information prints to stderr instead: `Next: <first step>` and, if there's a second one, `Then: <second step>`. `--json` always forces the envelope back onto stdout (and suppresses the footer). `--version` has no envelope at all (frozen contract) but still prints a `Next: agent-plus-meta doctor ...` stderr line when run interactively.
+
+Claude follows these automatically without the user needing to know the workflow -- see `skills/agent-plus-meta/SKILL.md`'s "Always surface nextSteps" section for the read-every-time contract.
 
 ## What it doesn't do
 

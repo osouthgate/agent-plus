@@ -1,13 +1,13 @@
 ---
 name: skill-feedback
-description: Local-first self-assessment for Claude Code skills. After you use any skill (your own or someone else's), call `skill-feedback log <skill> --rating N --outcome ... [--friction "..."]` to append one entry to `.agent-plus/skill-feedback/<skill>.jsonl`. The skill author can then run `skill-feedback report` for an aggregate, or `skill-feedback submit <skill>` to bundle entries into a GitHub issue body for the skill's source repo. No telemetry leaves the machine unless the user explicitly runs `submit`.
+description: Local-first self-assessment for Claude Code skills. After you use any skill (your own or someone else's), call `skill-feedback log <skill> --rating N --outcome ... [--friction "..."]` to append one entry to `~/.agent-plus/skill-feedback/<skill>.jsonl`. The skill author can then run `skill-feedback report` for an aggregate, or `skill-feedback submit <skill>` to bundle entries into a GitHub issue body for the skill's source repo. No telemetry leaves the machine unless the user explicitly runs `submit`.
 when_to_use: Trigger immediately AFTER using any other agent-plus skill (or any third-party skill the user installed) — log a one-line self-assessment so the skill's author has signal. Also trigger on phrases like "that worked well", "that skill was useful", "this skill is broken", "rate that last skill", "log feedback for X", "show feedback for X", "rate this skill", "report skill usage", "what's the feedback on the hermes skill", "submit the feedback to the upstream repo", "where are the skill logs stored".
 allowed-tools: Bash(skill-feedback:*) Bash(python3 *skill-feedback*:*)
 ---
 
 # skill-feedback
 
-Append-only self-assessment log for Claude Code skills. The agent rates its own use of a skill; the rating lands in `.agent-plus/skill-feedback/<skill>.jsonl` next to the project, never on a network. Skill authors run `report` to aggregate, or `submit` to bundle into a GitHub issue body for the skill's source repo.
+Append-only self-assessment log for Claude Code skills. The agent rates its own use of a skill; the rating lands in `~/.agent-plus/skill-feedback/<skill>.jsonl` (user-global), never on a network. Skill authors run `report` to aggregate, or `submit` to bundle into a GitHub issue body for the skill's source repo.
 
 The binary lives at `${CLAUDE_SKILL_DIR}/../../bin/skill-feedback`; the plugin auto-adds `bin/` to PATH, so call it as `skill-feedback`.
 
@@ -67,17 +67,17 @@ JSONL, one entry per line, append-only:
 
 ```jsonc
 {"ts":"2026-04-26T21:30:00Z","skill":"hermes-remote","rating":5,
- "outcome":"success","session_id":"...","tool_version":"0.4.1","schema":1}
+ "outcome":"success","session_id":"...","tool_version":"0.5.0","schema":1}
 ```
 
 Storage root is resolved in this order (highest first):
 
 1. `SKILL_FEEDBACK_DIR` env var (absolute path)
-2. `<git-toplevel>/.agent-plus/skill-feedback/` if cwd is in a git repo
-3. `<cwd>/.agent-plus/skill-feedback/` if a project-local `.agent-plus/` exists
-4. `~/.agent-plus/skill-feedback/` (last-resort fallback)
+2. `~/.agent-plus/skill-feedback/` (user-global — default)
 
-Run `skill-feedback path` to print the resolved root, or `skill-feedback path --skill X` for the per-skill jsonl path.
+Ratings reflect skill quality, not a specific repo, so they always land in the user-global store unless `SKILL_FEEDBACK_DIR` overrides it — that's also the escape hatch for a repo-scoped or team-shared store.
+
+Run `skill-feedback path` to print the resolved root, or `skill-feedback path --skill X` for the per-skill jsonl path. The `path` output also carries `legacy_store`: non-null when a pre-v0.19.4 project-local `.agent-plus/skill-feedback/` directory (with `.jsonl` files in it) is still sitting nearby — that data is no longer read; merge it into the active root by hand.
 
 ## Submit flow (opt-in)
 
@@ -194,7 +194,7 @@ Deliberately out of scope for v1:
 - No retroactive transcript scraping. The agent has to log explicitly.
 - No edit / delete commands — the file is plain `.jsonl`, edit it yourself if needed.
 - No SaaS upload. `submit` only opens a GitHub issue (and only with `--no-dry-run`).
-- No automatic re-submission or de-duplication; once an issue is filed, those entries are not marked "submitted" — the user can purge or rotate `.agent-plus/skill-feedback/<skill>.jsonl` themselves.
+- No automatic re-submission or de-duplication; once an issue is filed, those entries are not marked "submitted" — the user can purge or rotate `~/.agent-plus/skill-feedback/<skill>.jsonl` themselves.
 
 ## Example: log → report → submit cycle
 
