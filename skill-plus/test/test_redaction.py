@@ -180,3 +180,74 @@ def test_scaffold_generated_skill_scrub_text_parity(tmp_path: Path):
     assert fake_hash not in out
     assert "[REDACTED]" in out
     assert "Authorization" in out
+    # Scaffolded skills must also carry the env-assignment + Netlify PAT
+    # patterns. Locks the template<->canonical sync that this commit
+    # restored: the template had drifted 7 patterns behind.
+    fake_pat = "nfp_" + "z" * 36
+    out2 = gen_mod.scrub_text(f"NETLIFY_AUTH_TOKEN={fake_pat} bunx netlify-cli deploy")
+    assert fake_pat not in out2
+    assert "[REDACTED]" in out2
+    assert "netlify-cli" in out2  # non-secret tail preserved
+
+
+# ─── env-var assignment secrets + Netlify PAT ─────────────────────────────────
+#
+# Env-assignment secrets (VAR=secret) and Netlify `nfp_` tokens must be redacted
+# from persisted candidates: the prior _SECRET_PATTERNS matched `--flag=value`
+# but not shell env-assignment prefixes, and `nfp_` was not a known token
+# prefix. All tokens below are FAKE.
+
+
+def test_env_assignment_prefix_on_command_redacted():
+    """A NETLIFY_AUTH_TOKEN=... env-assignment prefix on a netlify-cli
+    one-liner. Value gone, NAME + command kept."""
+    mod = _load_bin_module()
+    fake_pat = "nfp_" + "A1b2C3" * 6  # nfp_ + 36 chars
+    cmd = (f'NETLIFY_AUTH_TOKEN={fake_pat} bunx netlify-cli deploy --prod '
+           f'--dir="C:/site" --site=abc123')
+    out = mod.scrub_text(cmd)
+    assert fake_pat not in out
+    assert "[REDACTED]" in out
+    assert "NETLIFY_AUTH_TOKEN" in out          # name stays readable
+    assert "bunx netlify-cli deploy" in out     # non-secret command preserved
+    assert "--site=abc123" in out               # unrelated flag untouched
+
+
+def test_bare_netlify_pat_redacted():
+    """A standalone nfp_ token with no assignment in front (e.g. pasted in a
+    doc or URL) is still caught by the token-prefix pattern."""
+    mod = _load_bin_module()
+    fake_pat = "nfp_" + "9" * 40
+    out = mod.scrub_text(f"token is {fake_pat} use it for deploys")
+    assert fake_pat not in out
+    assert "[REDACTED]" in out
+
+
+def test_generic_env_assignment_secrets_redacted():
+    """Name-based env-assignment redaction covers common secret-bearing var
+    names beyond Netlify. Value dropped, NAME kept."""
+    mod = _load_bin_module()
+    for name, secret in [
+        ("DB_PASSWORD", "hunter2superlongsecret"),
+        ("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMIabcdef1234567890ABCDEF"),
+        ("STRIPE_SECRET", "totallyfakestripesecret123456"),
+        ("MY_PRIVATE_KEY", "fakeprivatekeymaterial9999"),
+    ]:
+        out = mod.scrub_text(f"{name}={secret} run-the-thing")
+        assert secret not in out, f"{name} value leaked: {out!r}"
+        assert name in out
+        assert "[REDACTED]" in out
+        assert "run-the-thing" in out
+
+
+def test_env_assignment_no_false_positive_on_keylike_words():
+    """The env-assignment pattern must NOT redact ordinary `word=value` pairs
+    whose name merely ends in letters like KEY (e.g. MONKEY, TURKEY). Scoped
+    to API_KEY / ACCESS_KEY / PRIVATE_KEY, not bare KEY, to avoid this."""
+    mod = _load_bin_module()
+    for line in [
+        "the MONKEY=banana joke should be fine",
+        "set DONKEY=grey in the config",
+        "COLUMN_KEYED=true is a real flag",  # KEYED != KEY suffix boundary
+    ]:
+        assert mod.scrub_text(line) == line, f"false positive: {line!r}"

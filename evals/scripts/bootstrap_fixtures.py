@@ -82,6 +82,14 @@ _SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
         ),
         r"\g<1>: [REDACTED]",
     ),
+    (
+        re.compile(
+            r"\b([A-Za-z][A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|"
+            r"API[-_]?KEY|ACCESS[-_]?KEY|PRIVATE[-_]?KEY|AUTH))\s*=\s*[^\s\"']+",
+            re.IGNORECASE,
+        ),
+        r"\g<1>=[REDACTED]",
+    ),
     (re.compile(r"ghp_[A-Za-z0-9]{20,}"), "[REDACTED]"),
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "[REDACTED]"),
     (re.compile(r"gh[ousr]_[A-Za-z0-9]{20,}"), "[REDACTED]"),
@@ -97,6 +105,7 @@ _SECRET_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "[REDACTED]"),
     (re.compile(r"sbp_[A-Za-z0-9]{20,}"), "[REDACTED]"),
     (re.compile(r"sntrys_[A-Za-z0-9._-]{20,}"), "[REDACTED]"),
+    (re.compile(r"nfp_[A-Za-z0-9_-]{20,}"), "[REDACTED]"),  # Netlify personal access token
     (re.compile(r"AIza[0-9A-Za-z_-]{35}"), "[REDACTED]"),
     (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "[REDACTED]"),
     (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"), "[REDACTED]"),
