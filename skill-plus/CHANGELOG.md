@@ -6,6 +6,9 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+### Security
+- **`scan`'s redactor now catches `VAR=secret` env-assignments and Netlify `nfp_` tokens.** A real `NETLIFY_AUTH_TOKEN=nfp_<...> bunx netlify-cli` command was mined from session history and persisted to `candidates.jsonl` unredacted: nothing in `_SECRET_PATTERNS` matched the shell env-assignment shape, and `nfp_` was not a known token prefix. Added a name-based env-assignment pattern (`<NAME ending in TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH>=<value>` -> `NAME=[REDACTED]`, keeping the name readable like the header-name rule) plus an `nfp_` token pattern. `_scrub_record` already rescrubs every record on every rewrite, so the next `scan` also cleans any already-persisted candidate. Synced the same additions into `bin/_subcommands/scaffold.py`'s generated-skill template, which had additionally drifted 7 patterns behind canonical (`gh[ousr]_`, `pk-lf-`, Slack/Discord webhooks, Stripe `(sk|rk|pk)_(live|test)_`, `sbp_`, `sntrys_`) — those are restored too (closes the TODOS.md template-scrubber-drift item). Same additions mirrored into `evals/scripts/bootstrap_fixtures.py`.
+
 ### Changed
 - **Skill-picker findability.** SKILL.md frontmatter `description` now prefixed with `agent-plus | ` so typing "agent-plus" in Claude Code's skill picker surfaces this skill alongside the rest of the suite.
 

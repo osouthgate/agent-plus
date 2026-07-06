@@ -19,27 +19,6 @@ honors script mode; purge refuses cleanly off-TTY).
 
 ---
 
-## Generated-skill template scrubber is missing 7 secret patterns (small, security)
-
-**What:** `skill-plus/bin/_subcommands/scaffold.py`'s `_GENERATED_PY_TEMPLATE`
-carries its own copy of `_SECRET_PATTERNS` that has drifted from the canonical
-list in `skill-plus/bin/skill-plus`. Missing: `gh[ousr]_`, `pk-lf-`, Slack
-webhook URLs, Discord webhook URLs, Stripe `(sk|rk|pk)_(live|test)_`, `sbp_`,
-`sntrys_`. (`sk-lf-` is incidentally caught by the template's generic `sk-`
-pattern; `pk-lf-` is not.)
-
-**Why:** Skills scaffolded today ship with the weaker redactor and keep it
-forever — the gap compounds in end-user repos, not ours. Found 2026-07-03
-while duplicating the canonical list into `bootstrap_fixtures.py`.
-
-**How to apply:** Sync the template's list with the canonical one; add a test
-that renders the template and asserts pattern-list parity against
-`bin/skill-plus` (string-compare the pattern sources so future drift fails
-loudly). Longer term: centralize generation of the list at scaffold time
-instead of a frozen literal.
-
----
-
 ## `--pretty` before a subcommand is clobbered on CPython 3.12 (small)
 
 **What:** Same argparse mechanics as the fixed `--json` bug: subparsers parse

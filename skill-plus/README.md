@@ -33,7 +33,7 @@ Every subcommand emits envelope-compliant JSON; `--pretty` for human reading.
 
 ### scan — find what you actually do
 
-Walks `~/.claude/projects/<encoded-cwd>/*.jsonl`, extracts `Bash` tool calls, clusters by first-three-tokens, applies a denylist (`git status`, `ls`, `grep` — 80% of Bash calls and never skill candidates), and writes deduped candidates to `<git-toplevel>/.agent-plus/skill-plus/candidates.jsonl`. Allowlist bias keeps anything carrying `--service`, `--env`, `--project`, `--deployment`, or an MCP tool name through the filter.
+Walks `~/.claude/projects/<encoded-cwd>/*.jsonl`, extracts `Bash` tool calls, clusters by first-three-tokens, applies a denylist (`git status`, `ls`, `grep` — 80% of Bash calls and never skill candidates), and writes deduped candidates to `<git-toplevel>/.agent-plus/skill-plus/candidates.jsonl`. Allowlist bias keeps anything carrying `--service`, `--env`, `--project`, `--deployment`, or an MCP tool name through the filter. Every persisted string is scrubbed on write (`scrub_text`): API tokens, `Authorization`/`Cookie` header values, and `VAR=secret` env-assignments (e.g. `NETLIFY_AUTH_TOKEN=…`, `AWS_SECRET_ACCESS_KEY=…`) become `[REDACTED]`, and the whole file is re-scrubbed on every rewrite so a pattern added in a later version also cleans records mined before it existed.
 
 ```json
 {
