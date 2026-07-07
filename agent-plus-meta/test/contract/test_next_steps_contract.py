@@ -240,17 +240,59 @@ class TestHonestBranches(unittest.TestCase):
         ap._inject_next_steps(out, "upgrade-check", {"verdict": "up_to_date"})
         self.assertNotIn("agent-plus-meta upgrade --", out["nextSteps"][0])
 
+    def test_upgrade_check_available_but_never_ask_does_not_upsell_upgrade(self) -> None:
+        # 2026-07-07 red-team fix: before the envcheck funnel wiring, this
+        # branch was unreachable in practice (nothing ever called
+        # upgrade-check), so its blind verdict-only check never mattered.
+        # The funnel now makes it reachable every session -- a user who
+        # already chose "Never ask again" (config.update_check=false) must
+        # not get funneled straight to "run upgrade now" anyway.
+        out: dict = {}
+        ap._inject_next_steps(
+            out, "upgrade-check",
+            {"verdict": "upgrade_available", "config": {"update_check": False}},
+        )
+        self.assertNotIn("agent-plus-meta upgrade --", out["nextSteps"][0])
+
+    def test_upgrade_check_available_but_snoozed_does_not_upsell_upgrade(self) -> None:
+        # Same reasoning: an active snooze window means nothing if the
+        # funnel suggests "run upgrade now" regardless.
+        out: dict = {}
+        ap._inject_next_steps(
+            out, "upgrade-check",
+            {"verdict": "upgrade_available", "snooze": {"active": True}},
+        )
+        self.assertNotIn("agent-plus-meta upgrade --", out["nextSteps"][0])
+
     def test_envcheck_clean_appends_upgrade_check_as_second_step(self) -> None:
         # 2026-07-07 funnel fix: upgrade-check used to be a dead end reachable
         # only by typing it by hand. envcheck's clean path now appends it as
         # entry #2 -- the history-branched first-win step MUST stay at index
         # 0 (most-important-first is a real contract, not just a docstring).
-        out: dict = {}
-        ap._inject_next_steps(out, "envcheck", {"missing": []})
-        steps = out["nextSteps"]
-        self.assertEqual(len(steps), 2, steps)
-        self.assertEqual(steps[0], ap._history_branched_step())
-        self.assertTrue(steps[1].startswith("agent-plus-meta upgrade-check"), steps)
+        # Pin against the literal _STEP_HISTORY_FALSE/_STEP_HISTORY_TRUE
+        # constants under a mocked Path.home() (matching TestHistoryBranch's
+        # convention below) rather than re-deriving via a second live call to
+        # _history_branched_step() -- keeps this test independent of whatever
+        # real session history happens to exist on the machine running it.
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(Path, "home", return_value=Path(td)):
+                out: dict = {}
+                ap._inject_next_steps(out, "envcheck", {"missing": []})
+                steps = out["nextSteps"]
+                self.assertEqual(len(steps), 2, steps)
+                self.assertEqual(steps[0], ap._STEP_HISTORY_FALSE)
+                self.assertTrue(steps[1].startswith("agent-plus-meta upgrade-check"), steps)
+
+            proj = Path(td) / ".claude" / "projects" / "some-project"
+            proj.mkdir(parents=True)
+            (proj / "session.jsonl").write_text("{}\n", encoding="utf-8")
+            with patch.object(Path, "home", return_value=Path(td)):
+                out2: dict = {}
+                ap._inject_next_steps(out2, "envcheck", {"missing": []})
+                steps2 = out2["nextSteps"]
+                self.assertEqual(len(steps2), 2, steps2)
+                self.assertEqual(steps2[0], ap._STEP_HISTORY_TRUE)
+                self.assertTrue(steps2[1].startswith("agent-plus-meta upgrade-check"), steps2)
 
     def test_envcheck_missing_vars_does_not_append_upgrade_check(self) -> None:
         # Unchanged regression guard: the dirty path stays a single

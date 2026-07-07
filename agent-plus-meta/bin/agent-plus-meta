@@ -4090,7 +4090,13 @@ def _inject_next_steps(
     elif cmd == "list":
         steps = [_history_branched_step()]
     elif cmd == "upgrade-check":
-        if payload.get("verdict") == "upgrade_available":
+        _uc_config = payload.get("config") or {}
+        _uc_snooze = payload.get("snooze") or {}
+        if (
+            payload.get("verdict") == "upgrade_available"
+            and _uc_config.get("update_check", True)
+            and not _uc_snooze.get("active", False)
+        ):
             steps = ["agent-plus-meta upgrade -- install the newer version now"]
         else:
             steps = ["agent-plus-meta doctor --pretty -- confirm the framework is healthy"]

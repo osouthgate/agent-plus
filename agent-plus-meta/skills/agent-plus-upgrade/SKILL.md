@@ -73,10 +73,20 @@ the JSON envelope's gating fields before deciding whether to say anything:
 
 | Field | Meaning | Your action |
 |---|---|---|
-| `verdict` | `up_to_date` \| `upgrade_available` \| `just_upgraded` \| `unknown` | Only `upgrade_available` is worth surfacing. |
+| `verdict` | `up_to_date` \| `upgrade_available` \| `unknown` (`just_upgraded` is reserved in the frozen contract but not currently emitted by `cmd_upgrade_check` — don't branch on it) | Only `upgrade_available` is worth surfacing. |
 | `config.update_check` | `false` means the user already chose "Never ask again" | If `false`, stay silent — don't surface anything, don't re-probe later this session either. |
 | `snooze.active` | `true` means the user is inside an active 24h/48h/7d/never snooze window | If `true`, stay silent even when `verdict == upgrade_available`. |
 | `errors` | Non-empty on network failure | Stay silent; this probe is best-effort by design. |
+
+**This table is the authority, not the envelope's own `nextSteps` field.**
+The JSON `agent-plus-meta upgrade-check` returns carries a `nextSteps`
+suggestion of its own (part of the framework's general funnel convention) —
+when it says `verdict == upgrade_available`, that field does now also check
+`config.update_check`/`snooze.active` before suggesting `upgrade` (fixed
+2026-07-07), but decide your own next action from the four rows above
+regardless of what `nextSteps` says. Don't chain into a second, redundant
+`agent-plus-meta doctor` call just because the envelope's `nextSteps`
+mentions one — you already have everything you need from this one probe.
 
 Set `AGENT_PLUS_UPGRADE_CHECKED=1` in conversation memory immediately after
 the probe (regardless of outcome) so this skill does not re-probe again this
@@ -103,7 +113,7 @@ Only when the table above clears do you act — and the first branch is
   | Choice | `--user-choice` | Effect |
   |---|---|---|
   | Yes — upgrade now | `yes` | Applies immediately. |
-  | Always — silent on patch bumps | `always` | Sets `silent_upgrade: true`; minor/major bumps still ask. |
+  | Always — silent on patch bumps | `always` | Applies immediately (same as "Yes") AND sets `silent_upgrade: true`; future minor/major bumps still ask. |
   | Snooze — remind me later | `snooze` | Advances the ladder (24h → 48h → 7d → never); no upgrade. |
   | Never ask again | `never` | Sets `update_check: false`; no upgrade. |
 
@@ -151,14 +161,19 @@ Only when the table above clears do you act — and the first branch is
    `verdict: "rolled_back"` or a `broken` doctor verdict. Never manually
    delete `.bak` snapshots, never pass `--rollback` without an explicit user
    ask, never retry a failed upgrade in a loop.
-4. **Only a pre-approved patch bump may skip the prompt.**
-   `agent-plus-meta upgrade --non-interactive --auto` bypasses
-   `AskUserQuestion` ONLY when `config.silent_upgrade == true` — and even
-   then, the CLI itself (not this skill) still refuses to silently land a
-   minor/major bump, degrading to `snooze` instead. Every other case (first
-   encounter, `silent_upgrade` still `false`) always gets a fresh
-   `AskUserQuestion` — no exceptions, and no bump-kind math for this skill
-   to get wrong.
+4. **The `silent_upgrade` check is this skill's own gate, not something the
+   CLI enforces for you.** `agent-plus-meta upgrade --non-interactive --auto`
+   applies a patch bump regardless of `config.silent_upgrade` — that flag
+   only changes which label the CLI records (`"always"` vs `"yes"`), not
+   whether the bump lands. This skill is the one that must never invoke
+   `--auto` except when it has already confirmed `config.silent_upgrade ==
+   true` (per "Offering the upgrade" above) — invoking it "just because
+   `verdict == upgrade_available`" would apply a patch bump nobody ever
+   consented to. Minor/major bumps are the one thing the CLI itself still
+   refuses to silently land under `--auto` (degrades to `snooze`
+   regardless of `silent_upgrade`) — but don't rely on that as your only
+   guard; the skill's own gate above is what actually protects patch bumps
+   on a first encounter.
 5. **Report failures verbatim.** If `upgrade` returns `verdict: "rolled_back"`
    or `"error"`, paste the envelope's `errors[]` back to the user exactly.
    Do not retry silently. Do not paraphrase the error away.

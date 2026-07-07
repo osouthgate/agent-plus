@@ -108,13 +108,17 @@ class TestUpgradeSkill(unittest.TestCase):
         self.assertIn("agent-plus-meta upgrade-check", body)
 
     def test_upgrade_command_covers_all_four_choices(self) -> None:
+        # Pin against the literal --user-choice <...> invocation itself, not
+        # bare substrings anywhere in the doc: "always"/"never"/etc. also
+        # occur repeatedly in ordinary prose (e.g. "never raises, never
+        # blocks"), so a regression that drops or mistypes a choice on the
+        # actual command line would still pass a bare assertIn check.
         _fm, body = _split_frontmatter(_read_skill())
-        self.assertIn("agent-plus-meta upgrade --user-choice", body)
-        for choice in ("yes", "always", "snooze", "never"):
-            self.assertIn(
-                choice, body,
-                f"missing --user-choice value {choice!r} in body",
-            )
+        match = re.search(r"agent-plus-meta upgrade --user-choice <([a-z|]+)>", body)
+        self.assertIsNotNone(
+            match, "missing the literal 'agent-plus-meta upgrade --user-choice <...>' invocation"
+        )
+        self.assertEqual(set(match.group(1).split("|")), {"yes", "always", "snooze", "never"})
 
     def test_gating_fields_documented(self) -> None:
         _fm, body = _split_frontmatter(_read_skill())
