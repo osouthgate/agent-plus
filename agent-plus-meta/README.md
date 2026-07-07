@@ -362,7 +362,7 @@ Idempotent. History persists at `~/.agent-plus/migrations.json` keyed by id (fil
 ```json
 {
   "tool": {"name": "agent-plus-meta", "version": "0.13.5"},
-  "verdict": "success" | "noop" | "warn" | "error" | "rolled_back",
+  "verdict": "success" | "noop" | "error" | "rolled_back",
   "from_version": "0.13.5",
   "to_version": "0.13.5",
   "install_type_detected": "global" | "git_local" | "unknown",
@@ -393,6 +393,11 @@ Four codes, mirroring v0.12.0's pattern:
 4. `upgrade_rollback_required` — post-upgrade doctor returned `broken`. Bins restored from `.bak`.
 
 User-declined runs are NOT errors — verdict `noop` plus `user_choice: "snooze" | "never"` carries that signal. Telemetry derives the declined-rate from `user_choice` distribution.
+
+**Two complementary fixes close the "nobody ever calls `upgrade-check`" gap** (until 2026-07-07 it was a dead end reachable only by typing it by hand — wired into no `nextSteps` chain at all):
+
+- **Reach**, via the funnel: `envcheck`'s clean path (see the table above) now appends `upgrade-check` as its second `nextSteps` entry, so any session that runs the standard `init` → `envcheck` → `refresh` bootstrap surfaces it too. This is *suggestion only* — a `nextSteps` string, not an automatic action — and only fires when `envcheck` itself actually runs with nothing missing.
+- **Judgment**, via the `agent-plus-upgrade` skill: once per session (or immediately on an explicit "is agent-plus up to date" ask), it probes and decides whether surfacing anything is actually warranted — `verdict == upgrade_available` AND `config.update_check != false` AND no active snooze — then drives the 4-option prompt (or the `silent_upgrade` fast path) via `AskUserQuestion`. The funnel entry above still lands here for the actual offer/act logic. See [skills/agent-plus-upgrade/SKILL.md](./skills/agent-plus-upgrade/SKILL.md).
 
 ### `uninstall`
 
@@ -516,7 +521,7 @@ Most subcommands fork on one signal: does `~/.claude/projects/*/*.jsonl` exist a
 |---|---|
 | `init` | `envcheck`, then the history-branched step |
 | `envcheck` (missing required vars) | re-run `envcheck` after setting them |
-| `envcheck` (all set) | history-branched step |
+| `envcheck` (all set) | history-branched step, then `upgrade-check` |
 | `doctor` (issues present) | re-run `doctor --pretty` after fixing them |
 | `doctor` (clean) | history-branched step |
 | `refresh` | `doctor --pretty` to verify |
