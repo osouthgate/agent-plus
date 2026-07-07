@@ -4081,7 +4081,10 @@ def _inject_next_steps(
         if missing:
             steps = ["agent-plus-meta envcheck -- re-run after setting the missing env vars listed above"]
         else:
-            steps = [_history_branched_step()]
+            steps = [
+                _history_branched_step(),
+                "agent-plus-meta upgrade-check -- confirm the framework itself is on the latest release",
+            ]
     elif cmd == "refresh":
         steps = ["agent-plus-meta doctor --pretty -- verify services resolved correctly"]
     elif cmd == "list":

@@ -240,6 +240,28 @@ class TestHonestBranches(unittest.TestCase):
         ap._inject_next_steps(out, "upgrade-check", {"verdict": "up_to_date"})
         self.assertNotIn("agent-plus-meta upgrade --", out["nextSteps"][0])
 
+    def test_envcheck_clean_appends_upgrade_check_as_second_step(self) -> None:
+        # 2026-07-07 funnel fix: upgrade-check used to be a dead end reachable
+        # only by typing it by hand. envcheck's clean path now appends it as
+        # entry #2 -- the history-branched first-win step MUST stay at index
+        # 0 (most-important-first is a real contract, not just a docstring).
+        out: dict = {}
+        ap._inject_next_steps(out, "envcheck", {"missing": []})
+        steps = out["nextSteps"]
+        self.assertEqual(len(steps), 2, steps)
+        self.assertEqual(steps[0], ap._history_branched_step())
+        self.assertTrue(steps[1].startswith("agent-plus-meta upgrade-check"), steps)
+
+    def test_envcheck_missing_vars_does_not_append_upgrade_check(self) -> None:
+        # Unchanged regression guard: the dirty path stays a single
+        # re-run-envcheck step -- don't upsell an upgrade before the
+        # workspace's own env vars are even sorted out.
+        out: dict = {}
+        ap._inject_next_steps(out, "envcheck", {"missing": ["GITHUB_TOKEN"]})
+        steps = out["nextSteps"]
+        self.assertEqual(len(steps), 1, steps)
+        self.assertNotIn("upgrade-check", steps[0])
+
     def test_marketplace_install_unaccepted_suggests_remove_not_refresh(self) -> None:
         # refresh silently SKIPS un-accepted marketplaces -- chaining
         # straight to refresh here would look like a no-op to the user.
