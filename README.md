@@ -146,7 +146,7 @@ That's one plugin. The framework ships **five universal primitives**:
 | [`repo-analyze`](./repo-analyze) | The ~67-grep + ~60-ls cold-start dance for unfamiliar repos | `repo-analyze [--output] [--shape-depth] [--pretty]` |
 | [`diff-summary`](./diff-summary) | The 5–20 Read calls to triage a PR ("test? source? config? did the public API change?") | `diff-summary [--staged \| --base BRANCH \| --range A..B] [--public-api-only] [--risk MIN]` |
 | [`skill-feedback`](./skill-feedback) | "Was that skill any good?" — agent self-rates, JSONL on disk, optional bundle into a GitHub issue | `log <skill> --rating --outcome [--friction]`, `report`, `submit` |
-| [`skill-plus`](./skill-plus) | "I keep typing this by hand" → mine the session log, scaffold a real skill, audit it, promote it to your marketplace | `scan`, `propose`, `scaffold <name> --from-candidate <id>`, `inquire <tool> [--audit]`, `list`, `feedback`, `promote <name>` |
+| [`skill-plus`](./skill-plus) | "I keep typing this by hand" → mine the session log, report improvement opportunities, scaffold a real skill, audit it, promote it to your marketplace | `scan`, `opportunities`, `propose`, `scaffold <name> --from-candidate <id>`, `inquire <tool> [--audit]`, `list`, `feedback`, `promote <name>` |
 
 Plus a **marketplace convention** — `<user>/agent-plus-skills` — for publishing your own service-specific wrappers (GitHub, Vercel, Supabase, Railway, Linear, OpenRouter, Coolify, Hetzner, Hermes, Langfuse, etc.). Reference marketplace lives at [`osouthgate/agent-plus-skills`](https://github.com/osouthgate/agent-plus-skills) — install it, fork it, or use it as a template.
 
@@ -173,6 +173,9 @@ $ diff-summary --base main                     # one-call PR triage
 $ skill-plus scan --pretty                     # mine the session log for repeated patterns
 {"candidatesNew": 3, "candidates": [
   {"key": "railway logs --service", "count": 14, "sessions": 3, ...}]}
+
+$ skill-plus opportunities --run-scan --accept-consent --pretty  # weekly review surface
+{"summary": {"total": 4, "byKind": {"skill": 2, "routine": 1, "friction": 1}}, ...}
 
 $ skill-plus scaffold railway-probe --from-candidate 8ad12e3f9be1   # turn pattern → skill
 ✓ wrote .claude/skills/railway-probe/{SKILL.md, bin/, ...}
@@ -338,7 +341,7 @@ The umbrella `VERSION` file (and the badge above) is **tag-bound** — it tracks
 
 ## Project status
 
-Five primitives. Four (`agent-plus-meta`, `repo-analyze`, `diff-summary`, `skill-feedback`) plus the marketplace lifecycle have been dogfooded for months. `skill-plus` is the newer addition (0.4.0 — `scan`/`scaffold`/`inquire` are stable; the rest of the surface is settling). Pre-1.0 — but cold-start orientation and diff triage are production-stable.
+Five primitives. Four (`agent-plus-meta`, `repo-analyze`, `diff-summary`, `skill-feedback`) plus the marketplace lifecycle have been dogfooded for months. `skill-plus` is the newer addition (0.8.0 — `scan`/`scaffold`/`inquire` are stable; `opportunities` is the weekly review surface; the rest of the surface is settling). Pre-1.0 — but cold-start orientation and diff triage are production-stable.
 
 The framework is for **Claude Code** — claude.ai web Skills and Cowork are out of scope (no Bash, no filesystem, no plugin loader). For prompt-template skill generation, see [`claude-reflect`](https://github.com/cnocon/claude-reflect)'s `/reflect-skills` — it complements agent-plus rather than competes with it.
 

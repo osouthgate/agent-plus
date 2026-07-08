@@ -6,6 +6,9 @@ Format: one entry per change, most recent first. Date format `YYYY-MM-DD`.
 
 ## Unreleased
 
+### Added
+- **`opportunities` weekly self-improvement report.** Adds `skill-plus opportunities [--run-scan --accept-consent]`, a read-side report that composes skill candidates, routine/habit candidates, friction blocks, and explicit `skill-feedback` ratings into one ranked `opportunities[]` list with a concrete next command per item. `install-cron --opportunities` schedules `opportunities --run-scan --accept-consent` so the existing weekly mining loop can emit a reviewable report instead of only refreshing logs; POSIX and Windows both append scheduled output to `<state>/scan.log`. Date: 2026-07-08.
+
 ### Security
 - **`scan`'s redactor now covers `VAR=secret` env-assignments and Netlify `nfp_` tokens.** The prior `_SECRET_PATTERNS` matched `--flag=value` secrets but not shell env-assignment prefixes (`NETLIFY_AUTH_TOKEN=…`, `AWS_SECRET_ACCESS_KEY=…`), and `nfp_` was not a known token prefix. Added a name-based env-assignment pattern (`<NAME ending in TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH>=<value>` -> `NAME=[REDACTED]`, name kept readable like the header-name rule) plus an `nfp_` token pattern. `_scrub_record` rescrubs every record on every rewrite, so a later `scan` also cleans candidates persisted before the pattern existed. Synced the same additions into `bin/_subcommands/scaffold.py`'s generated-skill template (which had additionally drifted 7 patterns behind canonical: `gh[ousr]_`, `pk-lf-`, Slack/Discord webhooks, Stripe `(sk|rk|pk)_(live|test)_`, `sbp_`, `sntrys_`) and `evals/scripts/bootstrap_fixtures.py`.
 

@@ -11,8 +11,9 @@ Authoring a good Claude skill isn't hard because of the boilerplate — it's har
 ```bash
 skill-plus scan             [--accept-consent] [--all-projects] [--pretty]
 skill-plus propose          [--limit 10] [--kind skill|routine|habit|blocks|all] [--pretty]
+skill-plus opportunities    [--run-scan] [--accept-consent] [--limit 10] [--pretty]
 skill-plus routine          (--adopt ID | --dismiss ID) [--pretty]
-skill-plus install-cron     [--frequency weekly]
+skill-plus install-cron     [--frequency weekly] [--opportunities]
 skill-plus scaffold <name>  [--description ...] [--when-to-use ...]
                             [--killer-command ...] [--do-not-use-for ...]
                             [--from-candidate <id>]
@@ -94,6 +95,15 @@ skill-plus routine --dismiss <id>     # not useful -> de-rank, annotate "dismiss
 ### propose --kind blocks — the friction lens
 
 `scan` additionally mines tool-permission blocks and denials from the same session history into `blocks.jsonl`. `propose --kind blocks` ranks the block clusters so you can remove the friction at the source — a settings allowlist entry, a skill, or a workflow change — instead of re-hitting the same denial every session. Records pass through the same `scrub_text` redaction as every other persisted log.
+
+### opportunities — the weekly review surface
+
+```bash
+skill-plus opportunities --pretty
+skill-plus opportunities --run-scan --accept-consent --pretty
+```
+
+Reads the existing skill candidates, routine/habit candidates, friction blocks, and explicit `skill-feedback` ratings, then emits one ranked `opportunities[]` list with a concrete next command per item. Default is read-only and uses the same 30-day window as `scan`; `--run-scan --accept-consent` refreshes the mining logs first for cron/Task Scheduler.
 
 ### scaffold — turn it into a skill
 
@@ -216,13 +226,14 @@ Cache lives at `~/.agent-plus/inquire-cache/<tool>.json`, 7-day TTL. Bypass with
 
 ```bash
 skill-plus install-cron --frequency weekly
+skill-plus install-cron --frequency weekly --opportunities
 ```
 
-POSIX: idempotent crontab edit, marker-line keyed. Windows: `schtasks` with sanitized task name. Cron consent captured at install time; cron itself runs `scan --accept-consent` and never writes outside `~/.agent-plus/skill-plus/`. Errors land in `<state>/scan.log`.
+POSIX: idempotent crontab edit, marker-line keyed. Windows: `schtasks` with sanitized task name. Cron consent captured at install time; cron itself runs `scan --accept-consent` by default, or `opportunities --run-scan --accept-consent` with `--opportunities`, and never writes outside `~/.agent-plus/skill-plus/`. Scheduled reports and errors land in `<state>/scan.log`.
 
 ## nextSteps[] chaining
 
-Every output envelope includes a `nextSteps` array. Per-command hints: `scan` → `propose` (with candidate count); `propose` → `scaffold`; `scaffold` → `skill-feedback log` + `promote`; `promote` → `skill-feedback report`. Only injected when `ok` is not explicitly `False` — consent-required and error responses are unaffected.
+Every output envelope includes a `nextSteps` array. Per-command hints: `scan` → `propose` (with candidate count); `propose` → `scaffold`; `opportunities` → the top recommended command; `scaffold` → `skill-feedback log` + `promote`; `promote` → `skill-feedback report`. Only injected when `ok` is not explicitly `False` — consent-required and error responses are unaffected.
 
 ## Privacy
 
@@ -274,4 +285,4 @@ Python 3.9+ stdlib only. No pip installs.
 python3 -m pytest skill-plus/test/ -v
 ```
 
-83 tests covering envelope contract, foundation helpers, scan (clustering / denylist / dedupe / redaction / malformed JSONL / consent gate / cap), propose (ranking / limit / name derivation / enhance-flip), scaffold (slot validation / from-candidate seeding / generated bin runs), list (frontmatter parser / contract checks / non-stdlib import detection), install-cron (POSIX + Windows idempotency / reinstall detection / consent), feedback (stream-1 aggregation / stream-2 fallback rate / discoverability gap), and promote (live marketplace shape / contract validation / dry-run default).
+Tests cover envelope contract, foundation helpers, scan (clustering / denylist / dedupe / redaction / malformed JSONL / consent gate / cap), propose (ranking / limit / name derivation / enhance-flip), opportunities (mixed-source report / scan refresh / consent failure), scaffold (slot validation / from-candidate seeding / generated bin runs), list (frontmatter parser / contract checks / non-stdlib import detection), install-cron (POSIX + Windows idempotency / reinstall detection / consent / opportunities mode), feedback (stream-1 aggregation / stream-2 fallback rate / discoverability gap), and promote (live marketplace shape / contract validation / dry-run default).
