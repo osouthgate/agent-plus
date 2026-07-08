@@ -1,7 +1,7 @@
 ---
 name: skill-plus
-description: agent-plus | Mine the Claude Code session log to find commands the user keeps typing by hand, then scaffold them into proper Claude skills under `.claude/skills/<name>/`. Read-only audit of existing skills against the framework contract via `list`. Cross-source feedback aggregator joining `skill-feedback` ratings with implicit session-mining failure signals via `feedback`. Promote project-local skills to a `<user>/agent-plus-skills` marketplace via `promote`. Stdlib Python, local-only, no network.
-when_to_use: Trigger when the user says "I keep doing this", "I've done this three times", "I keep running the same command", "make this repeatable", "I do this every PR", "make this a skill", "what skills should I have", "audit my skills", "scaffold a skill for X", "promote this skill to my marketplace", "show me what I do repeatedly", "feedback on the framework", "is this skill any good", "session mining", "what's in my session log", "what could be a routine", "what do I do on a schedule", "what should I automate", "turn this into a routine", "I do this every morning", "what should I cron". For cadence questions surface `skill-plus propose --kind all` (routine = schedulable, habit = diffuse repeat). Also trigger AFTER a stretch of repetitive Bash work where the user expresses friction — surface `skill-plus propose` to show the candidates that have already been mined.
+description: agent-plus | Mine the Claude Code session log to find commands the user keeps typing by hand, report weekly self-improvement opportunities, then scaffold them into proper Claude skills under `.claude/skills/<name>/`. Read-only audit of existing skills against the framework contract via `list`. Cross-source feedback aggregator joining `skill-feedback` ratings with implicit session-mining failure signals via `feedback`. Promote project-local skills to a `<user>/agent-plus-skills` marketplace via `promote`. Stdlib Python, local-only, no network.
+when_to_use: Trigger when the user says "I keep doing this", "I've done this three times", "I keep running the same command", "make this repeatable", "I do this every PR", "make this a skill", "what skills should I have", "audit my skills", "scaffold a skill for X", "promote this skill to my marketplace", "show me what I do repeatedly", "feedback on the framework", "is this skill any good", "session mining", "what's in my session log", "what could be a routine", "what do I do on a schedule", "what should I automate", "turn this into a routine", "I do this every morning", "what should I cron", "weekly opportunity review", "mine for improvements". For cadence questions surface `skill-plus propose --kind all` (routine = schedulable, habit = diffuse repeat). For a broad improvement review surface `skill-plus opportunities --run-scan --accept-consent --pretty`. Also trigger AFTER a stretch of repetitive Bash work where the user expresses friction — surface `skill-plus propose` or `skill-plus opportunities` to show the candidates that have already been mined.
 allowed-tools: Bash(skill-plus:*) Bash(python3 *skill-plus*:*)
 ---
 
@@ -22,6 +22,9 @@ skill-plus scan --accept-consent
 # Show ranked candidates from the candidate log
 skill-plus propose --pretty
 
+# One weekly-review style report across skill, cadence, friction, and feedback signals
+skill-plus opportunities --run-scan --accept-consent --pretty
+
 # Cadence lens: schedulable routines vs diffuse habits (from the same scan)
 skill-plus propose --kind all --pretty
 skill-plus routine --adopt <id>     # you set this routine up -> stop suggesting it
@@ -36,6 +39,9 @@ skill-plus scaffold railway-probe \
 
 # Make scanning continuous (weekly)
 skill-plus install-cron --frequency weekly
+
+# Make the weekly job emit the opportunities report after scanning
+skill-plus install-cron --frequency weekly --opportunities
 ```
 
 **Audit + feedback loop:**
@@ -64,7 +70,7 @@ skill-plus promote railway-probe --to osouthgate/agent-plus-skills --no-dry-run
 
 ## Killer command
 
-`skill-plus scaffold <name> --from-candidate <id>` — turn a mined session pattern into a complete `.claude/skills/<name>/` skeleton (SKILL.md + POSIX + Windows launchers + stdlib Python entry with envelope helpers, redactor, layered env resolver) with the killer command pre-filled from the evidence. One call replaces the blank-page boilerplate that is the friction every skill author hits.
+`skill-plus opportunities --run-scan --accept-consent --pretty` — refresh the mining logs and emit one ranked list of skill, routine, friction, and feedback opportunities, each with a concrete next command. Follow with `skill-plus scaffold <name> --from-candidate <id>` when the top item is a skill candidate.
 
 ## Do NOT use this for
 

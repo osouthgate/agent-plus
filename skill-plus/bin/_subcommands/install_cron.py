@@ -41,13 +41,33 @@ def _marker_for(project_path: Path) -> str:
 # ─── POSIX ────────────────────────────────────────────────────────────────────
 
 
-def _posix_entry(project_path: Path, frequency: str) -> str:
+def _scheduled_args(project_path: Path, opportunities: bool) -> list[str]:
+    if opportunities:
+        return ["opportunities", "--run-scan", "--accept-consent", "--project", str(project_path)]
+    return ["scan", "--accept-consent", "--project", str(project_path)]
+
+
+def _quote_scheduled_args(args: list[str]) -> str:
+    out: list[str] = []
+    quote_next = False
+    for arg in args:
+        if quote_next:
+            out.append(f'"{arg.replace(chr(34), chr(92) + chr(34))}"')
+            quote_next = False
+        else:
+            out.append(arg)
+            quote_next = arg == "--project"
+    return " ".join(out)
+
+
+def _posix_entry(project_path: Path, frequency: str, opportunities: bool = False) -> str:
     expr = _cron_expression(frequency)
     py = sys.executable
     bin_path = _bin_path()
     log_path = project_state_root() / "scan.log"  # noqa: F821 — injected
+    cmd_args = _quote_scheduled_args(_scheduled_args(project_path, opportunities))
     return (
-        f'{expr} "{py}" "{bin_path}" scan --accept-consent --project "{project_path}" '
+        f'{expr} "{py}" "{bin_path}" {cmd_args} '
         f'>> "{log_path}" 2>&1'
     )
 
@@ -94,12 +114,14 @@ def _strip_block(current: str, marker: str) -> tuple[str, bool]:
     return "\n".join(out), removed
 
 
-def _posix_action(project_path: Path, frequency: str, *, print_only: bool, uninstall: bool, runner=None) -> dict:
+def _posix_action(project_path: Path, frequency: str, *, print_only: bool,
+                  uninstall: bool, opportunities: bool = False, runner=None) -> dict:
     if runner is None:
         runner = subprocess.run
     marker = _marker_for(project_path)
-    entry_line = _posix_entry(project_path, frequency)
+    entry_line = _posix_entry(project_path, frequency, opportunities=opportunities)
     block = f"{marker}\n{entry_line}"
+    mode = "opportunities" if opportunities else "scan"
 
     if print_only and not uninstall:
         return {
@@ -109,6 +131,7 @@ def _posix_action(project_path: Path, frequency: str, *, print_only: bool, unins
             "entry": block,
             "projectPath": str(project_path),
             "frequency": frequency,
+            "mode": mode,
         }
 
     current, _ = _posix_read_crontab(runner=runner)
@@ -146,6 +169,7 @@ def _posix_action(project_path: Path, frequency: str, *, print_only: bool, unins
         "entry": block,
         "projectPath": str(project_path),
         "frequency": frequency,
+        "mode": mode,
     }
 
 
@@ -164,18 +188,20 @@ def _task_name(project_path: Path) -> str:
     return f"agent-plus-skill-plus-scan-{_sanitize_slug(project_path)}"
 
 
-def _windows_command(project_path: Path) -> str:
+def _windows_command(project_path: Path, opportunities: bool = False) -> str:
     py = sys.executable
     bin_path = _bin_path()
-    # schtasks /tr expects a single string. Wrap all paths in double-quotes.
-    return f'"{py}" "{bin_path}" scan --accept-consent --project "{project_path}"'
+    args = _quote_scheduled_args(_scheduled_args(project_path, opportunities))
+    log_path = project_state_root() / "scan.log"  # noqa: F821 -- injected
+    # schtasks /tr expects a single string; cmd.exe is required for redirection.
+    return f'cmd.exe /d /c ""{py}" "{bin_path}" {args} >> "{log_path}" 2>&1"'
 
 
-def _windows_create_args(project_path: Path, frequency: str) -> list[str]:
+def _windows_create_args(project_path: Path, frequency: str, opportunities: bool = False) -> list[str]:
     args = [
         "schtasks", "/create",
         "/tn", _task_name(project_path),
-        "/tr", _windows_command(project_path),
+        "/tr", _windows_command(project_path, opportunities=opportunities),
     ]
     if frequency == "daily":
         args += ["/sc", "daily", "/st", "03:00"]
@@ -204,7 +230,8 @@ def _windows_task_exists(project_path: Path, runner) -> bool:
     return res.returncode == 0
 
 
-def _windows_action(project_path: Path, frequency: str, *, print_only: bool, uninstall: bool, runner=None) -> dict:
+def _windows_action(project_path: Path, frequency: str, *, print_only: bool,
+                    uninstall: bool, opportunities: bool = False, runner=None) -> dict:
     if runner is None:
         runner = subprocess.run
     if uninstall:
@@ -240,7 +267,8 @@ def _windows_action(project_path: Path, frequency: str, *, print_only: bool, uni
             "wasPresent": True,
         }
 
-    args = _windows_create_args(project_path, frequency)
+    args = _windows_create_args(project_path, frequency, opportunities=opportunities)
+    mode = "opportunities" if opportunities else "scan"
     if print_only:
         return {
             "ok": True,
@@ -249,6 +277,7 @@ def _windows_action(project_path: Path, frequency: str, *, print_only: bool, uni
             "entry": args,
             "projectPath": str(project_path),
             "frequency": frequency,
+            "mode": mode,
             "taskName": _task_name(project_path),
         }
     # Pre-check existence so we can distinguish install vs reinstall via exit code
@@ -267,6 +296,7 @@ def _windows_action(project_path: Path, frequency: str, *, print_only: bool, uni
         "entry": args,
         "projectPath": str(project_path),
         "frequency": frequency,
+        "mode": mode,
         "taskName": _task_name(project_path),
     }
 
@@ -279,16 +309,21 @@ def run(args, emit_fn) -> int:
     frequency = getattr(args, "frequency", "weekly") or "weekly"
     print_only = bool(getattr(args, "print_only", False))
     uninstall = bool(getattr(args, "uninstall", False))
+    opportunities = bool(getattr(args, "opportunities", False))
 
     is_windows = sys.platform == "win32"
 
     try:
+        if not print_only and not uninstall:
+            _ensure_dir(project_state_root() / "scan.log")  # noqa: F821 -- injected
         if is_windows:
             payload = _windows_action(project_path, frequency,
-                                      print_only=print_only, uninstall=uninstall)
+                                      print_only=print_only, uninstall=uninstall,
+                                      opportunities=opportunities)
         else:
             payload = _posix_action(project_path, frequency,
-                                    print_only=print_only, uninstall=uninstall)
+                                    print_only=print_only, uninstall=uninstall,
+                                    opportunities=opportunities)
     except Exception as exc:  # noqa: BLE001
         emit_fn({
             "ok": False,

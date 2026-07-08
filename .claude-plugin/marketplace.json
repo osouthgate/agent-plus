@@ -31,7 +31,7 @@
     {
       "name": "skill-plus",
       "source": "./skill-plus",
-      "description": "Mine the Claude Code session log to find commands you keep typing by hand, scaffold them into project-scoped Claude skills under .claude/skills/<name>/, audit existing skills against the framework contract, close the loop with a cross-source feedback aggregator that joins skill-feedback ratings against implicit session-mining failure signals, and promote skills you keep using to your <user>/agent-plus-skills marketplace. Stdlib Python, local-only, no network. Consent-gated and secret-redacting before disk write."
+      "description": "Mine the Claude Code session log to find commands you keep typing by hand, report weekly improvement opportunities from skill candidates, routines, friction blocks, and feedback, scaffold candidates into project-scoped Claude skills under .claude/skills/<name>/, audit existing skills against the framework contract, and promote skills you keep using to your <user>/agent-plus-skills marketplace. Stdlib Python, local-only, no network. Consent-gated and secret-redacting before disk write."
     }
   ]
 }

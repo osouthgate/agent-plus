@@ -11,6 +11,7 @@ Subcommands (all emit JSON; --pretty for indented):
   scan                  one-shot session-log scan; appends candidates to
                         <git-toplevel>/.agent-plus/skill-plus/candidates.jsonl
   propose               interactive — show ranked candidates from candidate log
+  opportunities         one report of skill, routine, friction, and feedback opportunities
   install-cron          self-install scheduled scan (cron / Task Scheduler)
   scaffold <name>       write .claude/skills/<name>/{SKILL.md,bin/<name>}
   list                  audit existing project skills against the contract
@@ -459,7 +460,7 @@ def _stub(name: str):
 
 
 SUBCOMMANDS = (
-    "scan", "propose", "install-cron", "scaffold", "list", "feedback", "promote",
+    "scan", "propose", "opportunities", "install-cron", "scaffold", "list", "feedback", "promote",
     "globalize", "localize", "where", "team-sync", "collisions", "inquire", "review",
     "routine",
 )
@@ -524,6 +525,29 @@ def build_parser() -> argparse.ArgumentParser:
                          "cross-reference; emit raw historical block counts.")
     _add_envelope_args(sp)
 
+    # opportunities
+    sp = sub.add_parser(
+        "opportunities",
+        help="one report of skill, routine, friction, and feedback opportunities",
+    )
+    sp.add_argument("--project", default=None)
+    sp.add_argument("--limit", type=int, default=10)
+    sp.add_argument("--since-days", type=int, default=30,
+                    help="scan/feedback lookback window (default: 30)")
+    sp.add_argument("--run-scan", action="store_true",
+                    help="refresh mining logs before reporting")
+    sp.add_argument("--accept-consent", action="store_true",
+                    help="with --run-scan, grant scan consent non-interactively")
+    sp.add_argument("--all-projects", action="store_true",
+                    help="with --run-scan, mine all projects instead of only --project")
+    sp.add_argument("--max-sessions", type=int, default=50,
+                    help="with --run-scan, cap sessions read (default: 50)")
+    sp.add_argument("--min-count", type=int, default=3,
+                    help="with --run-scan, minimum invocation count (default: 3)")
+    sp.add_argument("--min-sessions", type=int, default=2,
+                    help="with --run-scan, minimum distinct sessions (default: 2)")
+    _add_envelope_args(sp)
+
     # routine (boomerang: mark a routine/habit candidate adopted or dismissed)
     sp = sub.add_parser("routine",
                         help="adopt/dismiss a routine|habit candidate (boomerang)")
@@ -538,6 +562,8 @@ def build_parser() -> argparse.ArgumentParser:
     # install-cron
     sp = sub.add_parser("install-cron", help="self-install scheduled scan")
     sp.add_argument("--frequency", choices=["daily", "weekly"], default="weekly")
+    sp.add_argument("--opportunities", action="store_true",
+                    help="schedule opportunities --run-scan instead of scan")
     sp.add_argument("--print-only", action="store_true",
                     help="show what would be installed but don't write")
     sp.add_argument("--uninstall", action="store_true")
@@ -715,6 +741,12 @@ def _next_steps_for(command: str, payload: dict) -> list[str]:
         if skills:
             return ["skill-plus scaffold <name> -- create a .claude/skills/<name>/ skeleton for the top candidate"]
         return ["skill-plus scan -- gather more session data before proposing"]
+    if command == "opportunities":
+        summary = payload.get("summary") if isinstance(payload, dict) else None
+        if isinstance(summary, dict) and summary.get("total"):
+            top = summary.get("topAction") or "skill-plus opportunities --pretty"
+            return [f"{top} -- act on the highest-priority opportunity"]
+        return ["skill-plus opportunities --run-scan -- gather fresh signals before reviewing opportunities"]
     if command == "scaffold":
         name = payload.get("name") or ""
         return [

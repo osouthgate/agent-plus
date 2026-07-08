@@ -65,6 +65,7 @@ def _args(**kw):
         "frequency": "weekly",
         "print_only": False,
         "uninstall": False,
+        "opportunities": False,
     }
     defaults.update(kw)
     return types.SimpleNamespace(**defaults)
@@ -110,6 +111,20 @@ def test_posix_print_only_daily_cron_expression(tmp_path, monkeypatch):
     assert "0 3 * * *" in captured["p"]["entry"]
 
 
+def test_posix_print_only_opportunities_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    mod = _load_install_cron(tmp_path / "state", tmp_path / "consent.json")
+    captured = {}
+    proj = tmp_path / "p"
+    proj.mkdir()
+    mod.run(_args(project=str(proj), print_only=True, opportunities=True),
+            lambda x: captured.setdefault("p", x))
+    p = captured["p"]
+    assert p["mode"] == "opportunities"
+    assert "opportunities --run-scan --accept-consent --project" in p["entry"]
+    assert "0 3 * * 0" in p["entry"]
+
+
 def test_windows_print_only_weekly(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
     mod = _load_install_cron(tmp_path / "state", tmp_path / "consent.json")
@@ -125,10 +140,29 @@ def test_windows_print_only_weekly(tmp_path, monkeypatch):
     assert isinstance(p["entry"], list)
     assert "schtasks" in p["entry"][0]
     assert "/create" in p["entry"]
+    tr = p["entry"][p["entry"].index("/tr") + 1]
+    assert tr.startswith("cmd.exe /d /c ")
+    assert f'>> "{tmp_path / "state" / "scan.log"}" 2>&1' in tr
     assert "/sc" in p["entry"] and "weekly" in p["entry"]
     assert "/d" in p["entry"] and "SUN" in p["entry"]
     assert "/st" in p["entry"] and "03:00" in p["entry"]
     assert "/f" in p["entry"]
+
+
+def test_windows_print_only_opportunities_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    mod = _load_install_cron(tmp_path / "state", tmp_path / "consent.json")
+    captured = {}
+    proj = tmp_path / "winproj"
+    proj.mkdir()
+    mod.run(_args(project=str(proj), print_only=True, opportunities=True),
+            lambda x: captured.setdefault("p", x))
+    p = captured["p"]
+    assert p["mode"] == "opportunities"
+    tr = p["entry"][p["entry"].index("/tr") + 1]
+    assert tr.startswith("cmd.exe /d /c ")
+    assert "opportunities --run-scan --accept-consent --project" in tr
+    assert f'>> "{tmp_path / "state" / "scan.log"}" 2>&1' in tr
 
 
 def test_windows_print_only_daily(tmp_path, monkeypatch):
@@ -280,7 +314,8 @@ def test_consent_granted_on_full_install_via_run(tmp_path, monkeypatch):
     """End-to-end via run() — patch subprocess.run so no real crontab is touched."""
     monkeypatch.setattr(sys, "platform", "linux")
     consent_p = tmp_path / "consent.json"
-    mod = _load_install_cron(tmp_path / "state", consent_p)
+    state = tmp_path / "state"
+    mod = _load_install_cron(state, consent_p)
 
     runner = _FakeRunner([
         {"rc": 0, "stdout": ""},  # crontab -l empty
@@ -299,11 +334,33 @@ def test_consent_granted_on_full_install_via_run(tmp_path, monkeypatch):
     assert p["ok"] is True
     assert p["action"] == "installed"
     assert p["consentGranted"] is True
+    assert state.is_dir()
     # Consent file written
     assert consent_p.exists()
     data = json.loads(consent_p.read_text(encoding="utf-8"))
     assert str(proj.resolve()) in data["projects"]
     assert data["projects"][str(proj.resolve())]["source"] == "install-cron"
+
+
+def test_windows_full_install_creates_log_dir_via_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "win32")
+    state = tmp_path / "state"
+    mod = _load_install_cron(state, tmp_path / "consent.json")
+    runner = _FakeRunner([
+        {"rc": 1, "stderr": "ERROR: The system cannot find the file specified."},
+        {"rc": 0},
+    ])
+    monkeypatch.setattr(mod.subprocess, "run", runner)
+
+    proj = tmp_path / "p"
+    proj.mkdir()
+    captured = {}
+    rc = mod.run(_args(project=str(proj), frequency="weekly", opportunities=True),
+                 lambda x: captured.setdefault("p", x))
+    assert rc == 0
+    assert captured["p"]["action"] == "installed"
+    assert captured["p"]["mode"] == "opportunities"
+    assert state.is_dir()
 
 
 def test_windows_uninstall_idempotent_when_absent(tmp_path, monkeypatch):
